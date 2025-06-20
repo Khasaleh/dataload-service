@@ -8,3 +8,4 @@ sqlalchemy
 python-jose[cryptography]
 boto3
 passlib
+python-dotenv
