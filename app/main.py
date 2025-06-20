@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends
 from fastapi.security import OAuth2PasswordBearer
-from app.routes import upload, token
+from app.routes import upload, token, status_api # Import the new status_api router
 
 auth_tags = [
     {"name": "Upload", "description": "Upload CSV files"},
@@ -19,4 +19,5 @@ app = FastAPI(
 )
 
 app.include_router(upload.router, tags=["Upload"])
-app.include_router(token.router, prefix="/api")
+app.include_router(token.router, prefix="/api") # Keep existing prefix for token router
+app.include_router(status_api.router) # Add the new status_api router, prefix is defined in the router itself

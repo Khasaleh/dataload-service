@@ -1,18 +1,31 @@
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from app.dependencies.auth import get_current_user
-from app.services.validator import validate_csv # This will be used by Celery task later
-from app.services.storage import upload_file as upload_to_wasabi # Import wasabi upload
-from app.tasks.load_jobs import ( # Assuming these will be refactored to file-level tasks
-    load_product_data, load_item_data, load_meta_data,
-    load_price_data, load_brand_data, load_attribute_data,
-    load_return_policy_data
-)
-import csv # Will be used by Celery task
-import io  # Will be used by Celery task
+# from app.services.validator import validate_csv # Not directly used in route
+from app.services.storage import upload_file as upload_to_wasabi
+from app.models.schemas import UploadSessionModel # Import new model
+from datetime import datetime # For setting timestamps
+
+# Placeholder for DB session - replace with actual dependency
+# from app.db.connection import get_db_session_for_fastapi_dependency_wrapper as get_db_session
+# For now, we'll assume db_session is available if we were to uncomment DB logic below.
+
 import uuid # For generating session_id
 import os # For potential bucket name from env
 
 router = APIRouter()
+
+# Define upload sequence dependencies: key is the load_type, value is a list of prerequisite load_types.
+UPLOAD_SEQUENCE_DEPENDENCIES = {
+    "products": ["brands", "return_policies"],
+    "product_items": ["products"],
+    "product_prices": ["products"],
+    "meta_tags": ["products"],
+    # "brands", "attributes", "return_policies" have no dependencies
+}
+
+# Define which load_types are considered "parent" types that might restrict re-upload if children exist
+# This is a more advanced check, perhaps for future, not explicitly in this task but good to note.
+# PARENT_LOAD_TYPES = {"brands", "return_policies", "products"}
 
 ROLE_PERMISSIONS = {
     "admin": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags"},
@@ -97,18 +110,74 @@ async def upload_file_to_wasabi_and_queue(
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Empty CSV file submitted.")
-    await file.seek(0) # Reset file pointer for wasabi upload after reading for empty check
+    await file.seek(0) # Reset file pointer for wasabi upload
 
     session_id = str(uuid.uuid4())
-    # Construct a unique path in Wasabi
     wasabi_path = f"uploads/{business_id}/{session_id}/{load_type}/{file.filename}"
 
+    # --- Database Session Placeholder ---
+    # db = get_db_session() # Acquire DB session if direct DB interaction was enabled here
+
+    # --- Upload Sequence and Concurrency Checks (Conceptual DB Query) ---
+    # Conceptual: Check for active (pending/processing) uploads of the same load_type for this business_id
+    # Example:
+    # active_sessions = db.query(UploadSessionModel).filter(
+    #     UploadSessionModel.business_id == business_id,
+    #     UploadSessionModel.load_type == load_type,
+    #     UploadSessionModel.status.in_(["pending", "processing"])
+    # ).first()
+    # if active_sessions:
+    #     raise HTTPException(status_code=409, detail=f"An upload for {load_type} is already in progress.")
+
+    # Check for prerequisite load_types
+    prerequisites = UPLOAD_SEQUENCE_DEPENDENCIES.get(load_type, [])
+    for prereq_load_type in prerequisites:
+        # Conceptual: Check if a "completed" session exists for the prerequisite load_type
+        # Example:
+        # completed_prereq = db.query(UploadSessionModel).filter(
+        #     UploadSessionModel.business_id == business_id,
+        #     UploadSessionModel.load_type == prereq_load_type,
+        #     UploadSessionModel.status == "completed"
+        # ).order_by(UploadSessionModel.updated_at.desc()).first() # Get the latest one
+        # if not completed_prereq:
+        #     raise HTTPException(status_code=409,
+        #                         detail=f"Prerequisite load type '{prereq_load_type}' must be successfully uploaded before '{load_type}'.")
+        pass # Placeholder for actual DB query logic
+
+    # --- Create UploadSession Record (Conceptual DB Save) ---
+    new_session_record = UploadSessionModel(
+        session_id=session_id,
+        business_id=business_id,
+        load_type=load_type,
+        original_filename=file.filename,
+        wasabi_path=wasabi_path,
+        status="pending", # Initial status
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow()
+    )
+    # Conceptual: Add to DB and commit
+    # try:
+    #     db.add(new_session_record)
+    #     db.commit()
+    #     db.refresh(new_session_record)
+    # except Exception as e:
+    #     db.rollback()
+    #     # Log e
+    #     raise HTTPException(status_code=500, detail="Failed to create upload session record.")
+    # finally:
+    #     db.close()
+
+
+    # --- Upload to Wasabi ---
     try:
-        # Use a temporary file object for Boto3 if file.file is not suitable directly
-        # For UploadFile, file.file is a SpooledTemporaryFile, which should work.
         upload_to_wasabi(bucket=WASABI_BUCKET_NAME, path=wasabi_path, file_obj=file.file)
     except Exception as e:
         # Log the exception e
+        # Conceptual: Update session status to "failed" if DB record was created
+        # new_session_record.status = "failed"
+        # new_session_record.details = f"Failed to upload to Wasabi: {str(e)}"
+        # new_session_record.updated_at = datetime.utcnow()
+        # db.commit() (after adding and flushing new_session_record earlier)
         raise HTTPException(status_code=500, detail=f"Failed to upload file to Wasabi: {str(e)}")
 
     # Get the appropriate Celery task from the map
@@ -120,17 +189,19 @@ async def upload_file_to_wasabi_and_queue(
     # The Celery task itself will handle downloading from Wasabi, validation, and processing
     task_instance = celery_task.delay(
         business_id=business_id,
-        session_id=session_id,
-        wasabi_file_path=wasabi_path
-        # Add original_filename if tasks need it: original_filename=file.filename
+        session_id=session_id, # This session_id is from the UploadSessionModel
+        wasabi_file_path=wasabi_path,
+        original_filename=file.filename # Pass original_filename
     )
 
     return {
-        "message": "File accepted for processing.",
-        "session_id": session_id,
-        "task_id": task_instance.id, # Celery task ID for potential tracking
-        "load_type": load_type,
-        "wasabi_path": wasabi_path
+        "message": "File accepted for processing. Session created.",
+        "session_id": new_session_record.session_id,
+        "task_id": task_instance.id,
+        "load_type": new_session_record.load_type,
+        "original_filename": new_session_record.original_filename,
+        "wasabi_path": new_session_record.wasabi_path,
+        "status": new_session_record.status
     }
 
 # The old upload_file function can be removed or commented out if this new one replaces it.
