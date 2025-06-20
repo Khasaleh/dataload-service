@@ -17,8 +17,10 @@ from sqlalchemy.orm import Session
 # Example:
 from app.db.models import (
     CategoryOrm,
-    BrandOrm, # Added BrandOrm
-    # ProductOrm, AttributeOrm, ReturnPolicyOrm,
+    BrandOrm,
+    AttributeOrm,      # Added AttributeOrm
+    AttributeValueOrm, # Added AttributeValueOrm
+    # ProductOrm, ReturnPolicyOrm,
     # ProductItemOrm, ProductPriceOrm, MetaTagOrm
 )
 # from sqlalchemy.exc import SQLAlchemyError # For more specific DB error handling if needed
@@ -337,6 +339,161 @@ def load_brand_to_db(
 
     except Exception as e:
         logger.error(f"Error processing brand record '{brand_name_from_csv}' for business {business_details_id}: {e}", exc_info=True)
+        return None
+
+def load_attribute_to_db(
+    db_session: Session,
+    business_details_id: int,
+    record_data: Dict[str, Any], # Dict from AttributeCsvModel
+    session_id: str,
+    db_pk_redis_pipeline: Any # Redis pipeline object
+) -> Optional[int]:
+    """
+    Loads or updates a parent attribute and its associated values in the database.
+    Handles parsing of pipe-separated value strings from the CSV record.
+    Maps parent attribute_name to its DB PK in Redis for the current session.
+
+    Args:
+        db_session: SQLAlchemy session.
+        business_details_id: The integer ID for the business.
+        record_data: A dictionary representing a row from the attribute CSV,
+                     validated by AttributeCsvModel. Expected to have 'attribute_name',
+                     pipe-separated value fields, etc.
+        session_id: The current upload session ID.
+        db_pk_redis_pipeline: The Redis pipeline for storing _db_pk mappings.
+
+    Returns:
+        The database primary key (integer/bigint) of the processed parent attribute,
+        or None if processing failed for this record.
+    """
+    parent_attribute_name = record_data.get("attribute_name")
+    if not parent_attribute_name:
+        logger.error(f"Missing 'attribute_name' in record_data for business {business_details_id}, session {session_id}. Record: {record_data}")
+        return None
+
+    attribute_db_id: Optional[int] = None
+    parent_attr_orm_instance: Optional[AttributeOrm] = None
+
+    try:
+        # 1. Upsert Parent Attribute (AttributeOrm)
+        parent_attr_orm_instance = db_session.query(AttributeOrm).filter_by(
+            business_details_id=business_details_id,
+            name=parent_attribute_name
+        ).first()
+
+        is_color_from_csv = record_data.get('is_color', False)
+
+        if parent_attr_orm_instance: # Existing parent attribute
+            logger.info(f"Updating existing attribute '{parent_attribute_name}' (ID: {parent_attr_orm_instance.id}) for business {business_details_id}")
+            parent_attr_orm_instance.is_color = is_color_from_csv
+            parent_attr_orm_instance.active = record_data.get("attribute_active", parent_attr_orm_instance.active)
+
+            if record_data.get("updated_by") is not None: parent_attr_orm_instance.updated_by = record_data.get("updated_by")
+            if record_data.get("updated_date") is not None: parent_attr_orm_instance.updated_date = record_data.get("updated_date")
+            # created_by and created_date are typically not updated for existing records from CSV.
+            attribute_db_id = parent_attr_orm_instance.id
+        else: # New parent attribute
+            logger.info(f"Creating new attribute '{parent_attribute_name}' for business {business_details_id}")
+            parent_orm_data = {
+                "business_details_id": business_details_id,
+                "name": parent_attribute_name,
+                "is_color": is_color_from_csv,
+                "active": record_data.get("attribute_active"),
+                "created_by": record_data.get("created_by"),
+                "created_date": record_data.get("created_date"),
+                "updated_by": record_data.get("updated_by", record_data.get("created_by")),
+                "updated_date": record_data.get("updated_date", record_data.get("created_date")),
+            }
+            parent_attr_orm_instance = AttributeOrm(**parent_orm_data)
+            db_session.add(parent_attr_orm_instance)
+            db_session.flush()
+            if parent_attr_orm_instance.id is None:
+                logger.error(f"Failed to obtain DB ID for new attribute '{parent_attribute_name}' after flush.")
+                raise Exception(f"DB flush failed to return an ID for new attribute '{parent_attribute_name}'.")
+            attribute_db_id = parent_attr_orm_instance.id
+            logger.info(f"Created new attribute '{parent_attribute_name}' with DB ID {attribute_db_id}")
+
+        if attribute_db_id is not None: # Should always be true if no exception before this
+            if db_pk_redis_pipeline is not None:
+                add_to_id_map(
+                    session_id,
+                    f"attributes{DB_PK_MAP_SUFFIX}",
+                    parent_attribute_name,
+                    attribute_db_id,
+                    pipeline=db_pk_redis_pipeline
+                )
+            else:
+                 add_to_id_map(session_id, f"attributes{DB_PK_MAP_SUFFIX}", parent_attribute_name, attribute_db_id)
+
+
+        # 2. Process Attribute Values (AttributeValueOrm)
+        values_name_str = record_data.get("values_name")
+        if values_name_str and attribute_db_id is not None:
+            value_display_names = [name.strip() for name in values_name_str.split('|') if name.strip()]
+
+            raw_value_values = record_data.get("value_value")
+            value_actual_values = [v.strip() for v in raw_value_values.split('|')] if raw_value_values else []
+
+            raw_img_urls = record_data.get("img_url")
+            value_image_urls = [img.strip() for img in raw_img_urls.split('|')] if raw_img_urls else []
+
+            raw_values_active = record_data.get("values_active")
+            value_active_statuses = [status.strip().upper() for status in raw_values_active.split('|')] if raw_values_active else []
+
+            # Pydantic model should have already validated list length consistency.
+            # Here, we assume they are consistent or pad shorter lists.
+            num_values = len(value_display_names)
+
+            for i, val_display_name in enumerate(value_display_names):
+                actual_value_part = value_actual_values[i] if i < len(value_actual_values) else None
+                image_url_part = value_image_urls[i] if i < len(value_image_urls) else None
+                # Default active status for a value to "INACTIVE" if not provided or if list is shorter.
+                # The ORM model has server_default="INACTIVE", so this explicit default might only be for clarity
+                # or if we want to override the ORM default based on CSV presence.
+                active_status_part = value_active_statuses[i] if i < len(value_active_statuses) and value_active_statuses[i] in ["ACTIVE", "INACTIVE"] else "INACTIVE"
+
+                value_for_db: str
+                if parent_attr_orm_instance.is_color: # parent_attr_orm_instance should be set from above
+                    value_for_db = actual_value_part if actual_value_part else val_display_name
+                else:
+                    value_for_db = actual_value_part if actual_value_part else val_display_name
+
+                if not value_for_db:
+                    logger.warning(f"Skipping attribute value for '{parent_attribute_name}' due to missing value/name part at index {i}.")
+                    continue
+
+                attr_value_orm = db_session.query(AttributeValueOrm).filter_by(
+                    attribute_id=attribute_db_id,
+                    name=val_display_name
+                ).first()
+
+                if attr_value_orm:
+                    logger.debug(f"Updating existing attribute value '{val_display_name}' for attribute ID {attribute_db_id}")
+                    attr_value_orm.value = value_for_db
+                    attr_value_orm.attribute_image_url = image_url_part if image_url_part is not None else attr_value_orm.attribute_image_url
+                    attr_value_orm.active = active_status_part
+                    # Audit fields for values are not typically updated from this CSV structure directly
+                else:
+                    logger.debug(f"Creating new attribute value '{val_display_name}' for attribute ID {attribute_db_id}")
+                    new_val_orm_data = {
+                        "attribute_id": attribute_db_id,
+                        "name": val_display_name,
+                        "value": value_for_db,
+                        "attribute_image_url": image_url_part,
+                        "active": active_status_part,
+                        # logo_name is from DDL, default is None or handled by DB
+                        # created_by, created_date for attribute values are not sourced from this CSV structure
+                    }
+                    attr_value_orm = AttributeValueOrm(**new_val_orm_data)
+                    db_session.add(attr_value_orm)
+            # Rely on process_csv_task's final commit for attribute values of this parent attribute.
+            # If a mix of new/updated values, flush might be needed if new value IDs were referenced elsewhere.
+            # db_session.flush() # If needed to get IDs for AttributeValueOrm immediately
+
+        return attribute_db_id
+
+    except Exception as e:
+        logger.error(f"Error processing attribute record '{parent_attribute_name}' for business {business_details_id}: {e}", exc_info=True)
         return None
 
 # ... other loader functions for products, attributes, etc. ...

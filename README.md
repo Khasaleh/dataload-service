@@ -179,6 +179,29 @@ This CSV format is used to upload brand information.
 **Sample File**:
 A sample CSV file demonstrating this structure can be found at `sample_data/brands.csv`.
 
+### Attributes (`load_type: "attributes"`)
+
+This CSV format is used to upload attribute definitions and their possible values. A single row in this CSV defines one parent attribute and all its associated values.
+
+**Key Columns**:
+
+*   `attribute_name` (Mandatory, String): The name of the attribute itself (e.g., "Color", "Size", "Material"). This is the unique identifier for the attribute within a business.
+*   `is_color` (Mandatory, Boolean: `TRUE` or `FALSE`): Set to `TRUE` if this attribute represents color swatches/options, `FALSE` otherwise. This affects how `value_value` is interpreted for its child values.
+*   `attribute_active` (Optional, String): The status of the attribute itself (e.g., "ACTIVE", "INACTIVE").
+*   `values_name` (Optional, String): A pipe (`|`) separated list of display names for the attribute's values. Example: `Red|Blue|Green` or `Small|Medium|Large`. This field is required if any other `values_*` field (like `value_value`, `img_url`, `values_active`) is provided.
+*   `value_value` (Optional, String): A pipe (`|`) separated list of the actual underlying values corresponding to each name in `values_name`.
+    *   If `is_color` is `TRUE`, these should be the color codes (e.g., hex like `FF0000|0000FF`).
+    *   If `is_color` is `FALSE`, these are the specific values (e.g., `S|M|L`). If a part in this list is empty for a non-color attribute, the system will use the corresponding part from `values_name` as its value.
+*   `img_url` (Optional, String): A pipe (`|`) separated list of image URLs, corresponding to each attribute value. Useful for color swatches or visual options.
+*   `values_active` (Optional, String): A pipe (`|`) separated list of statuses (e.g., "ACTIVE" or "INACTIVE") for each corresponding attribute value. If a part is empty or the entire field is omitted for a value, that value defaults to "INACTIVE".
+
+**Important Notes on Pipe-Separated Fields**:
+*   If provided, `values_name`, `value_value`, `img_url`, and `values_active` must all have the same number of pipe-separated parts if they are not empty. For example, if `values_name` has 3 names, `value_value` (if provided) must also have 3 values.
+*   To omit a value for a specific part in an optional pipe-separated list (like `img_url` or `value_value` for non-colors), leave that part empty but include the delimiters. For example, `image1.png||image3.png` means the second value has no image.
+
+**Sample File**:
+A sample CSV file demonstrating this structure can be found at `sample_data/attributes.csv`.
+
 
 ## API Access (GraphQL)
 
@@ -438,7 +461,7 @@ mutation UploadMyFile($theFile: Upload!, $type: String!) {
 ```json
 {
   "theFile": null, /* Actual file data sent as part of multipart form */
-  "type": "products"
+  "type": "products" /* Valid types include "categories", "brands", "attributes", "products", etc. */
 }
 ```
 
