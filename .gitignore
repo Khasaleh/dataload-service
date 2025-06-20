@@ -1,0 +1,43 @@
+# Environment variables
+# Ignore local environment files, but not the example template.
+.env
+.env.*
+!.env.example
+
+# Python virtual environment
+venv/
+*.pyc
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / Editor specific
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Coverage reports
+.coverage
+coverage.xml
+htmlcov/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# Other common ignores
+*.log
+*.tmp
+*.temp
+local_settings.py
+```

@@ -1,6 +1,15 @@
 from fastapi import FastAPI, Depends
 from fastapi.security import OAuth2PasswordBearer
-from app.routes import upload, token, status_api # Import the new status_api router
+from dotenv import load_dotenv
+import os # Often used with dotenv, good to have if other early init needs it.
+import logging
+
+# Load environment variables from .env file for local development.
+# This should be called as early as possible, before other modules might try to access os.getenv.
+# In production, environment variables are typically set directly in the environment.
+load_dotenv()
+
+from app.routes import upload, token, status_api # Import routers after load_dotenv
 
 auth_tags = [
     {"name": "Upload", "description": "Upload CSV files"},
