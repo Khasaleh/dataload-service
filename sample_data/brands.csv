@@ -1,0 +1,6 @@
+name,logo,supplier_id,active,created_by,created_date,updated_by,updated_date
+Nike,https://example.com/logos/nike.png,101,TRUE,1,1672531200,1,1672531200
+Adidas,/images/logos/adidas.svg,102,TRUE,1,1672531201,2,1672617600
+Puma,images/puma_logo.jpg,,FALSE,,,,
+"Levi Strauss & Co.",https://example.com/logos/levis.png,201,TRUE,2,1672704000,,
+Chanel,https://example.com/logos/chanel.png,301,TRUE,,,,

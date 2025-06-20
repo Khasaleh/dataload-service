@@ -49,7 +49,17 @@ def authenticate_user_placeholder(username: str, password: str) -> Optional[Dict
 
 # --- Actual Service/Task Imports ---
 from app.services.storage import upload_file as upload_to_wasabi
-from app.tasks.load_jobs import CELERY_TASK_MAP # Assuming this map is populated correctly in load_jobs
+# Updated import to fetch individual task functions
+from app.tasks.load_jobs import (
+    process_brands_file,
+    process_attributes_file,
+    process_return_policies_file,
+    process_products_file,
+    process_product_items_file,
+    process_product_prices_file,
+    process_meta_tags_file
+    # process_categories_file # This will be imported once created in load_jobs.py
+)
 from app.db.connection import get_session as get_db_session_sync # For DB operations
 from app.db.models import UploadSessionOrm # For DB operations
 import logging # For logging DB errors

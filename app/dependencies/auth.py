@@ -32,21 +32,43 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
         headers={"WWW-Authenticate": "Bearer"},
     )
     missing_claims_exception = HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN, # Using 403 as claims are there, but content is bad for our app
-        detail="Invalid token: Missing essential claims (sub, userId, companyId).",
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Invalid token: Missing or invalid essential claims (e.g., sub, userId, parsable companyId).",
     )
 
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
 
         username: Optional[str] = payload.get("sub")
-        user_id: Optional[Any] = payload.get("userId") # Keep Any for now, can be int or str depending on source
-        company_id: Optional[str] = payload.get("companyId")
+        user_id: Optional[Any] = payload.get("userId") # Assuming userId can be int or string from token
+        company_id_str: Optional[str] = payload.get("companyId") # Original string from token
         role_array: Optional[List[Dict[str, str]]] = payload.get("role")
 
-        if username is None or user_id is None or company_id is None:
-            logger.warning(f"Token missing one or more core claims: sub, userId, companyId. Payload: {payload}")
-            raise missing_claims_exception # Use more specific exception for bad claims
+        business_details_id: Optional[int] = None
+        if company_id_str:
+            parts = company_id_str.split('-')
+            # Expected format from token: FAZ-{userId}-{businessId}-{year}-{month}-{random}
+            # So, the integer businessId (business_details_id) is at index 2.
+            if len(parts) >= 3: # Check for at least 3 parts to safely access index 2
+                try:
+                    business_details_id = int(parts[2])
+                except ValueError:
+                    logger.warning(f"Invalid format for businessId part in companyId: '{parts[2]}' from companyIdString '{company_id_str}'. Cannot parse to int.")
+                    # This is treated as a critical failure as business_details_id is essential.
+                    raise missing_claims_exception
+            else:
+                logger.warning(f"companyIdString '{company_id_str}' does not have enough parts (expected format like FAZ-userId-businessId-year-month-random) to extract business_details_id.")
+                # This is also critical if business_details_id is essential.
+                raise missing_claims_exception
+
+        # Essential claims check now includes the parsed integer business_details_id
+        if username is None or user_id is None or business_details_id is None:
+            logger.warning(
+                f"Token missing one or more core claims or failed to parse/validate business_details_id. "
+                f"Username: {username}, UserID: {user_id}, Parsed BusinessDetailsID: {business_details_id}, "
+                f"Original CompanyIDStr: {company_id_str}. Payload: {payload}"
+            )
+            raise missing_claims_exception
 
         roles: List[str] = []
         if isinstance(role_array, list):
@@ -59,8 +81,9 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
 
         return {
             "username": username,
-            "user_id": user_id, # Consider converting to int(user_id) if it's always an integer string
-            "business_id": company_id, # Mapping companyId to business_id for internal consistency
+            "user_id": user_id, # Consider standardizing type if necessary (e.g., always int or always str)
+            "business_id": business_details_id, # This is now the parsed integer ID
+            "company_id_str": company_id_str,   # Original companyId string, kept for reference if needed
             "roles": roles
         }
     except JWTError as e:

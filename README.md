@@ -119,6 +119,67 @@ Do **not** deploy `.env` files to these environments. The `.env.example` file ca
 
     Once both the FastAPI server and Celery worker are running, you can access the GraphQL API (e.g., via the GraphiQL interface at `/graphql`).
 
+## CSV Upload Formats
+
+This section describes the expected CSV formats for different `load_type` values used with the `uploadFile` mutation.
+
+### Categories (`load_type: "categories"`)
+
+This CSV format is used to upload category information, including hierarchical structures.
+
+**Key Columns**:
+
+*   `category_path` (Mandatory, String): Defines the category's position in the hierarchy using a `/` delimiter. For example:
+    *   `Electronics` (for a top-level category)
+    *   `Electronics/Computers` (for a sub-category "Computers" under "Electronics")
+    *   `Electronics/Computers/Laptops` (for a sub-sub-category "Laptops")
+    The system will create/update parent categories based on these path segments. This path is the unique identifier for a row's target category in the CSV.
+*   `name` (Optional, String): The display name for the category level being defined by the full `category_path`. If omitted, the name is derived from the last segment of the `category_path`. For example, if `category_path` is "Electronics/Computers" and `name` is blank, the name "Computers" will be used. If `name` is "Desktop & Laptop Computers", that will be used.
+*   `description` (Mandatory, String): A text description for the category.
+*   `enabled` (Optional, Boolean: `TRUE` or `FALSE`): Defaults to `TRUE`. Indicates if the category is active/published.
+*   `image_name` (Optional, String): Filename or path for the category image.
+*   `long_description` (Optional, Text): More detailed description.
+*   `order_type` (Optional, String): E.g., "DEFAULT", "SPECIAL".
+*   `shipping_type` (Optional, String): E.g., "STANDARD", "OVERSIZE".
+*   `active` (Optional, String): Another status field (note: DDL is `varchar(255)`). Consider if `enabled` (boolean) is sufficient or if this has a distinct meaning (e.g., for specific display states beyond simple enabled/disabled).
+*   `seo_description` (Optional, String): SEO meta description.
+*   `seo_keywords` (Optional, String): Comma-separated SEO keywords.
+*   `seo_title` (Optional, String): SEO meta title.
+*   `url` (Optional, String): A custom URL slug for the category. If not provided, one might be auto-generated based on the name/path.
+*   `position_on_site` (Optional, Integer): For ordering categories.
+
+**Sample File**:
+A sample CSV file demonstrating this structure can be found at `sample_data/category.csv`.
+
+**Hierarchical Processing**:
+When a row with `category_path` like "L1/L2/L3" is processed:
+1.  The system ensures "L1" exists (creating it if necessary with minimal data derived from the path).
+2.  Then ensures "L2" exists under "L1" (creating it if necessary).
+3.  Finally, "L3" is created or updated under "L2", and the metadata from the CSV row (description, image_name, etc.) is applied to this "L3" category.
+
+*(Documentation for other CSV formats like "brands", "products", etc., would follow here in respective subsections.)*
+
+### Brands (`load_type: "brands"`)
+
+This CSV format is used to upload brand information.
+
+**Key Columns**:
+
+*   `name` (Mandatory, String): The unique display name of the brand. This is used as the primary identifier for the brand within a business context in the CSV.
+*   `logo` (Mandatory, String): A URL or path to the brand's logo image.
+*   `supplier_id` (Optional, Integer): An identifier for an associated supplier, if applicable.
+*   `active` (Optional, String): A status indicator for the brand (e.g., "TRUE", "FALSE", or other status string like "active", "inactive"). The system interprets this as a string that can be used for filtering or display logic.
+*   `created_by` (Optional, Integer): User ID (BigInt in DB) of the creator if providing this data via CSV.
+*   `created_date` (Optional, Integer): Epoch timestamp (BigInt in DB) of creation if providing via CSV.
+*   `updated_by` (Optional, Integer): User ID (BigInt in DB) of the last updater if providing via CSV.
+*   `updated_date` (Optional, Integer): Epoch timestamp (BigInt in DB) of last update if providing via CSV.
+
+*(Note: Audit fields like `created_by`, `created_date`, etc., are typically managed by the system automatically upon record creation/update if not supplied in the CSV. If provided, they will be stored as specified.)*
+
+**Sample File**:
+A sample CSV file demonstrating this structure can be found at `sample_data/brands.csv`.
+
+
 ## API Access (GraphQL)
 
 This service exposes a GraphQL API.
