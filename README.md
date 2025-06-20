@@ -159,6 +159,27 @@ When a row with `category_path` like "L1/L2/L3" is processed:
 
 *(Documentation for other CSV formats like "brands", "products", etc., would follow here in respective subsections.)*
 
+### Brands (`load_type: "brands"`)
+
+This CSV format is used to upload brand information.
+
+**Key Columns**:
+
+*   `name` (Mandatory, String): The unique display name of the brand. This is used as the primary identifier for the brand within a business context in the CSV.
+*   `logo` (Mandatory, String): A URL or path to the brand's logo image.
+*   `supplier_id` (Optional, Integer): An identifier for an associated supplier, if applicable.
+*   `active` (Optional, String): A status indicator for the brand (e.g., "TRUE", "FALSE", or other status string like "active", "inactive"). The system interprets this as a string that can be used for filtering or display logic.
+*   `created_by` (Optional, Integer): User ID (BigInt in DB) of the creator if providing this data via CSV.
+*   `created_date` (Optional, Integer): Epoch timestamp (BigInt in DB) of creation if providing via CSV.
+*   `updated_by` (Optional, Integer): User ID (BigInt in DB) of the last updater if providing via CSV.
+*   `updated_date` (Optional, Integer): Epoch timestamp (BigInt in DB) of last update if providing via CSV.
+
+*(Note: Audit fields like `created_by`, `created_date`, etc., are typically managed by the system automatically upon record creation/update if not supplied in the CSV. If provided, they will be stored as specified.)*
+
+**Sample File**:
+A sample CSV file demonstrating this structure can be found at `sample_data/brands.csv`.
+
+
 ## API Access (GraphQL)
 
 This service exposes a GraphQL API.

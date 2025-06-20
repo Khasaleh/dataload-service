@@ -7,9 +7,9 @@ from app.tasks import load_jobs
 from app.tasks.load_jobs import process_csv_task, _update_session_status # Import function to test directly
 from app.db.models import ( # Import ORM Models
     BrandOrm, AttributeOrm, ReturnPolicyOrm, ProductOrm,
-    ProductItemOrm, ProductPriceOrm, MetaTagOrm, UploadSessionOrm
+    ProductItemOrm, ProductPriceOrm, MetaTagOrm, UploadSessionOrm, CategoryOrm
 )
-from app.models.schemas import BrandModel # For constructing validated_records if needed
+from app.models.schemas import BrandModel, CategoryCsvModel # Added CategoryCsvModel
 import datetime # For _update_session_status test
 
 # Sample data
@@ -88,32 +88,24 @@ def mock_add_to_id_map_func(): # Specific fixture for add_to_id_map, if needed p
 # The old test_process_csv_task_success was commented out.
 # This is the new detailed test for a specific type (brands) and scenario (all new).
 
-@patch('app.tasks.load_jobs.add_to_id_map')
-def test_process_csv_task_success_brands_new_only(
-    mock_add_to_id_map_in_test,
+@patch('app.tasks.load_jobs.load_brand_to_db') # Patch the specific loader for brands
+@patch('app.tasks.load_jobs.add_to_id_map') # Still useful for checking string_id_map calls for other types
+def test_process_csv_task_brands_success( # Renamed for clarity
+    mock_add_to_id_map_direct, # For checking string_id_map behavior for other types
+    mock_load_brand_to_db,
     mock_wasabi_client,
-    mock_db_session_get,
+    mock_db_session_get, # This fixture provides the mock session passed to the loader
     mock_redis_client,
     mock_validate_csv_for_brands,
     mock_update_session_status_func
 ):
     # --- Configure Mocks for this specific test ---
-    mock_db_session = mock_db_session_get.return_value # This is the MagicMock for the session instance
-    mock_db_session.query(BrandOrm).filter_by().first.return_value = None # Simulate all brands are new
-
-    # Simulate DB assigning an ID on flush
-    added_instances = []
-    def capture_and_set_id(instance):
-        nonlocal added_instances
-        # Simulate simple auto-increment ID for testing
-        instance.id = len(added_instances) + 1
-        added_instances.append(instance)
-    # When add is called, it will trigger this side_effect.
-    # flush() itself doesn't need a side_effect here if we set id directly in add's side_effect.
-    mock_db_session.add.side_effect = capture_and_set_id
+    mock_db_session = mock_db_session_get.return_value
+    # Configure the mock loader to return DB PKs
+    mock_load_brand_to_db.side_effect = [1, 2] # Two brand records, return their new/existing PKs
 
     map_type = "brands"
-    record_key = "brand_name"
+    record_key = "name" # Changed from brand_name to name
     id_prefix = "brand"
 
     # Override wasabi client to return brand-specific CSV content for this test
@@ -130,47 +122,42 @@ def test_process_csv_task_success_brands_new_only(
     )
 
     assert result["status"] == "success"
-    assert result["processed_db_count"] == len(SAMPLE_BRAND_RECORDS_VALIDATED)
+    assert result["processed_db_count"] == len(SAMPLE_BRAND_RECORDS_VALIDATED) # All records processed by loader
 
     mock_wasabi_client.get_object.assert_called_once_with(Bucket=load_jobs.WASABI_BUCKET_NAME, Key=SAMPLE_WASABI_PATH)
     mock_validate_csv_for_brands.assert_called_once()
 
-    # DB assertions
-    assert mock_db_session.add.call_count == len(SAMPLE_BRAND_RECORDS_VALIDATED)
-    assert mock_db_session.flush.call_count == len(SAMPLE_BRAND_RECORDS_VALIDATED)
-    mock_db_session.commit.assert_called_once()
-
-    assert len(added_instances) == 2
-    assert isinstance(added_instances[0], BrandOrm)
-    assert added_instances[0].brand_name == "Brand Alpha"
-    assert added_instances[0].business_id == SAMPLE_BUSINESS_ID
-    assert added_instances[0].id == 1
-    assert isinstance(added_instances[1], BrandOrm)
-    assert added_instances[1].brand_name == "Brand Beta"
-    assert added_instances[1].id == 2
-
-    # Redis DB PK mapping assertions using the mock_add_to_id_map_in_test
-    db_pk_map_suffix = "_db_pk"
-    expected_db_pk_redis_calls = [
-        call(SAMPLE_SESSION_ID, f"{map_type}{db_pk_map_suffix}", "Brand Alpha", 1, pipeline=mock_redis_client.pipeline.side_effect[1]), # db_pk_redis_pipeline
-        call(SAMPLE_SESSION_ID, f"{map_type}{db_pk_map_suffix}", "Brand Beta", 2, pipeline=mock_redis_client.pipeline.side_effect[1])
+    # Verify calls to the loader
+    assert mock_load_brand_to_db.call_count == len(SAMPLE_BRAND_RECORDS_VALIDATED)
+    expected_loader_calls = [
+        call(
+            db_session=mock_db_session,
+            business_details_id=SAMPLE_BUSINESS_ID,
+            record_data=SAMPLE_BRAND_RECORDS_VALIDATED[0],
+            session_id=SAMPLE_SESSION_ID,
+            db_pk_redis_pipeline=mock_redis_client.pipeline.side_effect[1] # db_pk_redis_pipeline
+        ),
+        call(
+            db_session=mock_db_session,
+            business_details_id=SAMPLE_BUSINESS_ID,
+            record_data=SAMPLE_BRAND_RECORDS_VALIDATED[1],
+            session_id=SAMPLE_SESSION_ID,
+            db_pk_redis_pipeline=mock_redis_client.pipeline.side_effect[1]
+        ),
     ]
-    db_pk_calls = [c for c in mock_add_to_id_map_in_test.call_args_list if c[0][1].endswith(db_pk_map_suffix)]
-    assert len(db_pk_calls) == len(expected_db_pk_redis_calls)
-    for expected_call in expected_db_pk_redis_calls:
-        assert expected_call in db_pk_calls
+    mock_load_brand_to_db.assert_has_calls(expected_loader_calls, any_order=False)
 
-    # Redis string ID mapping assertions
-    expected_string_id_redis_calls = [
-        call(SAMPLE_SESSION_ID, map_type, "Brand Alpha", f"{id_prefix}:brand_alpha", pipeline=mock_redis_client.pipeline.side_effect[0]), # string_id_redis_pipeline
-        call(SAMPLE_SESSION_ID, map_type, "Brand Beta", f"{id_prefix}:brand_beta", pipeline=mock_redis_client.pipeline.side_effect[0])
-    ]
-    string_id_calls = [c for c in mock_add_to_id_map_in_test.call_args_list if not c[0][1].endswith(db_pk_map_suffix)]
-    assert len(string_id_calls) == len(expected_string_id_redis_calls)
-    for expected_call in expected_string_id_redis_calls:
-        assert expected_call in string_id_calls
+    mock_db_session.commit.assert_called_once() # DB commit after loop
 
-    # Redis pipeline execution
+    # Redis pipeline execution for DB PKs (done by loader, pipeline executed by process_csv_task)
+    mock_redis_client.pipeline.side_effect[1].execute.assert_called_once()
+
+    # Verify string_id_map is NOT called for "brands" by process_csv_task directly
+    # as it's now handled by a specific loader.
+    for call_arg_obj in mock_add_to_id_map_direct.call_args_list: # Use the correct mock name
+        assert call_arg_obj[0][1] != map_type # Check map_type arg in add_to_id_map call
+
+    # Redis TTL pipeline execution (original test had 4, now should be similar)
     assert mock_redis_client.pipeline.call_count == 4 # string_id, db_pk, ttl_string, ttl_db_pk
     mock_redis_client.pipeline.side_effect[0].execute.assert_called_once()
     mock_redis_client.pipeline.side_effect[1].execute.assert_called_once()
@@ -497,6 +484,136 @@ def test_process_csv_task_wasabi_cleanup_error_does_not_fail_task(
              error_count=0)
     ]
     mock_update_session_status_func.assert_has_calls(expected_status_calls, any_order=False)
+
+
+# --- Category Specific Tests for process_csv_task ---
+
+SAMPLE_CATEGORY_RECORDS_VALIDATED = [
+    CategoryCsvModel(category_path="Electronics/Audio", name="Audio", description="Audio Devices").model_dump(),
+    CategoryCsvModel(category_path="Electronics/Audio/Headphones", name="Headphones", description="All Headphones").model_dump(),
+]
+
+@pytest.fixture
+def mock_validate_csv_for_categories():
+    with patch('app.tasks.load_jobs.validate_csv') as mock_validate:
+        mock_validate.return_value = ([], SAMPLE_CATEGORY_RECORDS_VALIDATED)
+        yield mock_validate
+
+@patch('app.tasks.load_jobs.load_category_to_db')
+@patch('app.tasks.load_jobs.add_to_id_map') # Also mock add_to_id_map to check string_id_map calls
+def test_process_csv_task_categories_success(
+    mock_add_to_id_map_direct, # For checking string_id_map behavior
+    mock_load_category_to_db,
+    mock_wasabi_client,
+    mock_db_session_get,
+    mock_redis_client,
+    mock_validate_csv_for_categories,
+    mock_update_session_status_func
+):
+    mock_db_session = mock_db_session_get.return_value
+    mock_load_category_to_db.side_effect = [1, 2] # Simulate DB PKs returned
+
+    map_type = "categories"
+    record_key = "category_path"
+    id_prefix = "cat" # For string_id_map
+
+    # Update wasabi mock for category content if needed
+    mock_wasabi_client.get_object.return_value['Body'].read.return_value = b"category_path,name,description\nElectronics/Audio,Audio,Audio Devices"
+
+
+    result = process_csv_task(
+        business_id=SAMPLE_BUSINESS_ID, # Assuming this is int
+        session_id=SAMPLE_SESSION_ID,
+        wasabi_file_path="uploads/some/categories.csv",
+        original_filename="categories.csv",
+        record_key=record_key,
+        id_prefix=id_prefix,
+        map_type=map_type
+    )
+
+    assert result["status"] == "success"
+    assert result["processed_db_count"] == len(SAMPLE_CATEGORY_RECORDS_VALIDATED)
+
+    assert mock_load_category_to_db.call_count == len(SAMPLE_CATEGORY_RECORDS_VALIDATED)
+    expected_loader_calls = [
+        call(
+            db_session=mock_db_session,
+            business_details_id=SAMPLE_BUSINESS_ID,
+            record_data=SAMPLE_CATEGORY_RECORDS_VALIDATED[0],
+            session_id=SAMPLE_SESSION_ID,
+            db_pk_redis_pipeline=mock_redis_client.pipeline.side_effect[1]
+        ),
+        call(
+            db_session=mock_db_session,
+            business_details_id=SAMPLE_BUSINESS_ID,
+            record_data=SAMPLE_CATEGORY_RECORDS_VALIDATED[1],
+            session_id=SAMPLE_SESSION_ID,
+            db_pk_redis_pipeline=mock_redis_client.pipeline.side_effect[1]
+        ),
+    ]
+    mock_load_category_to_db.assert_has_calls(expected_loader_calls, any_order=False)
+
+    mock_db_session.commit.assert_called_once()
+    mock_redis_client.pipeline.side_effect[1].execute.assert_called_once() # db_pk_redis_pipeline
+
+    # Verify string_id_map is NOT called for categories by process_csv_task directly
+    for call_arg in mock_add_to_id_map_direct.call_args_list:
+        assert call_arg[0][1] != map_type # map_type arg in add_to_id_map call
+
+    # Verify TTL for db_pk map was called
+    mock_redis_client.pipeline.side_effect[3].expire.assert_called_once_with(
+        f"id_map:session:{SAMPLE_SESSION_ID}:{map_type}_db_pk", time=load_jobs.REDIS_SESSION_TTL_SECONDS
+    )
+    mock_redis_client.pipeline.side_effect[3].execute.assert_called_once()
+    # Verify TTL for string_id_map was also called (as string_id_pipeline is still executed even if no calls made TO it for this map_type)
+    mock_redis_client.pipeline.side_effect[2].execute.assert_called_once()
+
+
+    mock_update_session_status_func.assert_any_call(SAMPLE_SESSION_ID, SAMPLE_BUSINESS_ID, status="completed",
+                                              record_count=len(SAMPLE_CATEGORY_RECORDS_VALIDATED),
+                                              error_count=0)
+
+@patch('app.tasks.load_jobs.load_category_to_db')
+def test_process_csv_task_categories_loader_fails_for_one_record(
+    mock_load_category_to_db,
+    mock_wasabi_client,
+    mock_db_session_get,
+    mock_redis_client,
+    mock_validate_csv_for_categories,
+    mock_update_session_status_func
+):
+    mock_db_session = mock_db_session_get.return_value
+    mock_load_category_to_db.side_effect = [123, None] # First succeeds, second fails
+
+    result = process_csv_task(
+        business_id=SAMPLE_BUSINESS_ID,
+        session_id=SAMPLE_SESSION_ID,
+        wasabi_file_path="uploads/some/categories.csv",
+        original_filename="categories.csv",
+        record_key="category_path",
+        id_prefix="cat",
+        map_type="categories"
+    )
+
+    assert result["status"] == "db_error"
+    # processed_db_count is based on successful loader calls before error or full loop completion.
+    # Since one loader call returned None, db_error_count became > 0, leading to rollback.
+    # The current logic would count processed_csv_records_count for all attempts, but processed_db_count
+    # should reflect what would have been committed. Since a rollback occurs, it's 0.
+    assert result["processed_db_count"] == 0
+
+    assert mock_load_category_to_db.call_count == 2
+    mock_db_session.rollback.assert_called_once()
+    mock_db_session.commit.assert_not_called()
+
+    mock_redis_client.pipeline.side_effect[1].execute.assert_not_called() # db_pk_redis_pipeline
+
+    mock_update_session_status_func.assert_any_call(
+        SAMPLE_SESSION_ID, SAMPLE_BUSINESS_ID,
+        status="db_processing_failed",
+        details=ANY,
+        error_count=1
+    )
 
 # To run these tests (ensure pytest is installed and in the correct directory):
 # Terminal: pip install pytest

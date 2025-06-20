@@ -1,13 +1,13 @@
 import pytest
 from unittest.mock import MagicMock, patch, call, ANY
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError # For flush error test
 
-from app.services.db_loaders import load_category_to_db, DB_PK_MAP_SUFFIX
-from app.db.models import CategoryOrm
+# Import functions to test and also Redis utils to assert their calls after being patched
+from app.services.db_loaders import load_category_to_db, load_brand_to_db, DB_PK_MAP_SUFFIX, add_to_id_map, get_from_id_map
+from app.db.models import CategoryOrm, BrandOrm
 
-# Mocking get_from_id_map and add_to_id_map from app.tasks.load_jobs,
-# as that's where db_loaders currently imports them from.
-MODULE_PATH_FOR_REDIS_UTILS = "app.services.db_loaders"
+MODULE_PATH_FOR_REDIS_UTILS = "app.services.db_loaders" # Used by patcher
 
 @pytest.fixture
 def mock_db_session():
@@ -17,9 +17,20 @@ def mock_db_session():
 def mock_redis_pipeline():
     return MagicMock()
 
+# Autouse fixture to patch Redis utils for all tests in this module
+@pytest.fixture(autouse=True)
+def auto_patch_redis_utils(mocker): # Renamed to avoid confusion with direct imports
+    # These mocks will replace the actual functions in db_loaders for the duration of tests in this module
+    mocker.patch(f'{MODULE_PATH_FOR_REDIS_UTILS}.add_to_id_map', autospec=True)
+    mocker.patch(f'{MODULE_PATH_FOR_REDIS_UTILS}.get_from_id_map', autospec=True)
+
+
 # --- Tests for load_category_to_db ---
 
-@patch(f'{MODULE_PATH_FOR_REDIS_UTILS}.get_from_id_map')
+# No longer need @patch for add_to_id_map/get_from_id_map here due to autouse fixture
+def test_load_category_l1_new(mock_db_session, mock_redis_pipeline): # Mocks are auto-applied
+    business_details_id = 100
+    session_id = "sess_test_l1_new"
 @patch(f'{MODULE_PATH_FOR_REDIS_UTILS}.add_to_id_map')
 def test_load_category_l1_new(mock_add_to_id_map, mock_get_from_id_map, mock_db_session, mock_redis_pipeline):
     business_details_id = 100
@@ -354,4 +365,171 @@ def test_load_category_db_flush_error(mock_add_to_id_map, mock_get_from_id_map, 
     assert returned_db_pk is None
     mock_db_session.add.assert_called_once() # Add was attempted
     mock_add_to_id_map.assert_not_called() # Should not reach here if flush fails and returns None
+
+
+# --- Tests for load_brand_to_db ---
+
+def test_load_brand_new_record_success(mock_db_session, mock_redis_pipeline):
+    # Access patched versions from autouse fixture if needed, or pass them if specific mock needed
+    mock_add_to_id_map = getattr(patch_redis_utils, 'add_to_id_map_mock', MagicMock()) # Get from fixture or default
+
+    business_details_id = 200
+    session_id = "sess_brand_new"
+    record_data = {
+        "name": "Awesome Brand",
+        "logo": "logo.png",
+        "supplier_id": 55,
+        "active": "TRUE",
+        "created_by": 10, "created_date": 1678886400, # Example epoch
+        "updated_by": 11, "updated_date": 1678886500,
+    }
+
+    mock_db_session.query(BrandOrm).filter_by().first.return_value = None # New record
+
+    new_brand_instance = None
+    def capture_add_brand(instance):
+        nonlocal new_brand_instance
+        instance.id = 789 # Simulate DB assigning an ID
+        new_brand_instance = instance
+    mock_db_session.add.side_effect = capture_add_brand
+
+    returned_db_pk = load_brand_to_db(
+        mock_db_session, business_details_id, record_data, session_id, mock_redis_pipeline
+    )
+
+    assert returned_db_pk == 789
+    mock_db_session.query(BrandOrm).filter_by(
+        business_details_id=business_details_id, name="Awesome Brand"
+    ).first.assert_called_once()
+
+    mock_db_session.add.assert_called_once()
+    assert new_brand_instance is not None
+    assert new_brand_instance.name == "Awesome Brand"
+    assert new_brand_instance.logo == "logo.png"
+    assert new_brand_instance.supplier_id == 55
+    assert new_brand_instance.active == "TRUE"
+    assert new_brand_instance.created_by == 10
+    assert new_brand_instance.created_date == 1678886400
+    assert new_brand_instance.business_details_id == business_details_id
+
+    mock_db_session.flush.assert_called_once()
+    # Use the imported (and now patched) add_to_id_map directly
+    add_to_id_map.assert_called_once_with(
+        session_id, f"brands{DB_PK_MAP_SUFFIX}", "Awesome Brand", 789, pipeline=mock_redis_pipeline
+    )
+
+
+def test_load_brand_update_existing_record_success(mock_db_session, mock_redis_pipeline):
+    # add_to_id_map is auto-patched by auto_patch_redis_utils
+    business_details_id = 200
+    session_id = "sess_brand_update"
+    record_data = {
+        "name": "Awesome Brand", # Key to find existing
+        "logo": "new_logo.png",   # Updated field
+        "active": "FALSE",        # Updated field
+        "supplier_id": None,      # Clearing a field
+        "updated_by": 12,         # New audit info
+        "updated_date": 1678887000
+    }
+
+    mock_existing_brand = BrandOrm(
+        id=789, name="Awesome Brand", business_details_id=business_details_id,
+        logo="old_logo.png", active="TRUE", supplier_id=55,
+        created_by=10, created_date=1678886400, updated_by=10, updated_date=1678886400
+    )
+    mock_db_session.query(BrandOrm).filter_by().first.return_value = mock_existing_brand
+
+    returned_db_pk = load_brand_to_db(
+        mock_db_session, business_details_id, record_data, session_id, mock_redis_pipeline
+    )
+
+    assert returned_db_pk == 789
+    mock_db_session.add.assert_not_called()
+    assert mock_existing_brand.logo == "new_logo.png"
+    assert mock_existing_brand.active == "FALSE"
+    assert mock_existing_brand.supplier_id is None # Check if set to None
+    assert mock_existing_brand.updated_by == 12
+    assert mock_existing_brand.updated_date == 1678887000
+    # Ensure non-provided fields are not changed from original
+    assert mock_existing_brand.created_by == 10
+
+    add_to_id_map.assert_called_once_with(
+        session_id, f"brands{DB_PK_MAP_SUFFIX}", "Awesome Brand", 789, pipeline=mock_redis_pipeline
+    )
+
+
+def test_load_brand_optional_fields_not_provided_on_create(mock_db_session, mock_redis_pipeline):
+    # add_to_id_map is auto-patched
+    business_details_id = 200
+    session_id = "sess_brand_optional"
+    record_data = { # Only mandatory fields
+        "name": "Minimal Brand",
+        "logo": "minimal_logo.png",
+    }
+    mock_db_session.query(BrandOrm).filter_by().first.return_value = None
+
+    new_brand_instance = None
+    def capture_add_minimal_brand(instance):
+        nonlocal new_brand_instance
+        instance.id = 790
+        new_brand_instance = instance
+    mock_db_session.add.side_effect = capture_add_minimal_brand
+
+    returned_db_pk = load_brand_to_db(mock_db_session, business_details_id, record_data, session_id, mock_redis_pipeline)
+
+    assert returned_db_pk == 790
+    assert new_brand_instance is not None
+    assert new_brand_instance.name == "Minimal Brand"
+    assert new_brand_instance.logo == "minimal_logo.png"
+    assert new_brand_instance.supplier_id is None
+    assert new_brand_instance.active is None
+    assert new_brand_instance.created_by is None
+    assert new_brand_instance.created_date is None
+
+
+def test_load_brand_update_preserves_unprovided_fields(mock_db_session, mock_redis_pipeline):
+    mock_add_to_id_map = getattr(patch_redis_utils, 'add_to_id_map_mock', MagicMock())
+    business_details_id = 200
+    session_id = "sess_brand_preserve"
+    record_data = { # Only logo is updated
+        "name": "Preserved Brand",
+        "logo": "very_new_logo.png",
+    }
+
+    mock_existing_brand = BrandOrm(
+        id=791, name="Preserved Brand", business_details_id=business_details_id,
+        logo="old_logo_preserved.png", active="ACTIVE_STATUS", supplier_id=101,
+        created_by=1, created_date=1000, updated_by=1, updated_date=1000
+    )
+    mock_db_session.query(BrandOrm).filter_by().first.return_value = mock_existing_brand
+
+    returned_db_pk = load_brand_to_db(mock_db_session, business_details_id, record_data, session_id, mock_redis_pipeline)
+
+    assert returned_db_pk == 791
+    assert mock_existing_brand.logo == "very_new_logo.png" # Updated
+    assert mock_existing_brand.active == "ACTIVE_STATUS" # Preserved
+    assert mock_existing_brand.supplier_id == 101 # Preserved
+    assert mock_existing_brand.updated_by is None
+    assert mock_existing_brand.updated_date is None # These are not updated because they were not in record_data
+
+
+def test_load_brand_missing_name_returns_none(mock_db_session, mock_redis_pipeline):
+    record_data = {"logo": "some_logo.png"} # Name is missing
+    returned_db_pk = load_brand_to_db(mock_db_session, 200, record_data, "sess_brand_no_name", mock_redis_pipeline)
+    assert returned_db_pk is None
+    mock_db_session.add.assert_not_called()
+    add_to_id_map.assert_not_called() # add_to_id_map is auto-patched
+
+
+def test_load_brand_db_flush_error_returns_none(mock_db_session, mock_redis_pipeline):
+    # add_to_id_map is auto-patched
+    record_data = {"name": "FlushFail Brand", "logo": "logo.png"}
+    mock_db_session.query(BrandOrm).filter_by().first.return_value = None
+    mock_db_session.flush.side_effect = SQLAlchemyError("DB Flush Error Simulated")
+
+    returned_db_pk = load_brand_to_db(mock_db_session, 200, record_data, "sess_brand_flush_fail", mock_redis_pipeline)
+
+    assert returned_db_pk is None
+    mock_db_session.add.assert_called_once() # Add was attempted
+    add_to_id_map.assert_not_called() # Should not be called if flush fails
 ```
