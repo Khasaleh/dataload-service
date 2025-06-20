@@ -40,8 +40,15 @@ def mock_db_session_get():
 def mock_redis_client():
     # Mocks redis_client used in load_jobs
     with patch('app.tasks.load_jobs.redis_client', autospec=True) as mock_redis:
-        mock_pipeline = MagicMock()
-        mock_redis.pipeline.return_value = mock_pipeline
+        # Configure pipeline() to return a new MagicMock each time it's called
+        # This allows us to distinguish between the pipeline for HSETs and the pipeline for EXPIRE
+        mock_hset_pipeline = MagicMock(name="hset_pipeline")
+        mock_expire_pipeline = MagicMock(name="expire_pipeline")
+
+        # Set up side_effect to return different pipeline mocks if needed, or a default one
+        # For this test, we'll make it return distinct mocks for two calls
+        mock_redis.pipeline.side_effect = [mock_hset_pipeline, mock_expire_pipeline, MagicMock(), MagicMock()] # Add more if other tests call pipeline more
+
         yield mock_redis
 
 @pytest.fixture
@@ -85,8 +92,17 @@ def test_process_csv_task_success(
         call.hset(f"id_map:session:{SAMPLE_SESSION_ID}:{SAMPLE_MAP_TYPE}", "val1", f"{SAMPLE_ID_PREFIX}:val1"),
         call.hset(f"id_map:session:{SAMPLE_SESSION_ID}:{SAMPLE_MAP_TYPE}", "val3", f"{SAMPLE_ID_PREFIX}:val3")
     ]
-    mock_redis_client.pipeline.return_value.hset.assert_has_calls(expected_redis_hset_calls, any_order=True)
-    mock_redis_client.pipeline.return_value.execute.assert_called_once()
+
+    # The first call to mock_redis_client.pipeline() returns mock_hset_pipeline
+    mock_hset_pipeline = mock_redis_client.pipeline.side_effect[0]
+    mock_hset_pipeline.hset.assert_has_calls(expected_redis_hset_calls, any_order=True)
+    mock_hset_pipeline.execute.assert_called_once()
+
+    # The second call to mock_redis_client.pipeline() returns mock_expire_pipeline
+    mock_expire_pipeline = mock_redis_client.pipeline.side_effect[1]
+    expected_key_to_expire = f"id_map:session:{SAMPLE_SESSION_ID}:{SAMPLE_MAP_TYPE}"
+    mock_expire_pipeline.expire.assert_called_once_with(expected_key_to_expire, time=load_jobs.REDIS_SESSION_TTL_SECONDS)
+    mock_expire_pipeline.execute.assert_called_once()
 
     mock_wasabi_client.delete_object.assert_called_once_with(Bucket=load_jobs.WASABI_BUCKET_NAME, Key=SAMPLE_WASABI_PATH)
 

@@ -19,6 +19,10 @@ REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_DB_ID_MAPPING = int(os.getenv("REDIS_DB_ID_MAPPING", 1))
 
+# TTL Configuration for Redis session keys
+DEFAULT_REDIS_SESSION_TTL_SECONDS = 24 * 60 * 60  # 24 hours
+REDIS_SESSION_TTL_SECONDS = int(os.getenv("REDIS_SESSION_TTL_SECONDS", DEFAULT_REDIS_SESSION_TTL_SECONDS))
+
 try:
     redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB_ID_MAPPING, decode_responses=True)
     redis_client.ping()
@@ -144,7 +148,30 @@ def process_csv_task(business_id, session_id, wasabi_file_path, original_filenam
             processed_count += 1
 
         if redis_pipeline:
+            # Execute HSET commands
             redis_pipeline.execute()
+
+            # Now, set TTL on the key for the current map_type
+            # We need a new pipeline for this, or execute it directly if redis_client is not None.
+            # For simplicity, let's use a new pipeline or direct command.
+            # It's generally safe to add to the same pipeline if it hasn't been reset,
+            # but the original execute() consumes the pipeline commands.
+            # So, we need to re-initialize or use redis_client directly.
+
+            # Re-acquire pipeline or use client directly for EXPIRE
+            # (This assumes redis_client is the same instance used by the pipeline earlier)
+            if redis_client: # Ensure client is available
+                key_to_expire = f"{get_id_map_key(session_id)}:{map_type}"
+                logger.info(f"Setting TTL for Redis key: {key_to_expire} to {REDIS_SESSION_TTL_SECONDS} seconds.")
+                try:
+                    # Using a new pipeline for the expire command for clarity
+                    ttl_pipeline = redis_client.pipeline()
+                    ttl_pipeline.expire(key_to_expire, time=REDIS_SESSION_TTL_SECONDS)
+                    ttl_pipeline.execute()
+                except Exception as ttl_error:
+                    logger.error(f"Failed to set TTL for key {key_to_expire}: {ttl_error}", exc_info=True)
+                    # Non-critical error, so we don't fail the task.
+
         if db_engine_session:
             # Example: db_engine_session.commit() if there were DB operations for the data itself
             pass
