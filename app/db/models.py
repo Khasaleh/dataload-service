@@ -38,6 +38,25 @@ class UploadSessionOrm(Base):
         {"schema": PUBLIC_SCHEMA} # Assuming operational data like this goes to public or a dedicated ops schema
     )
 
+# --- Business Details Model ---
+class BusinessDetailsOrm(Base):
+    __tablename__ = "business_details"
+
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
+    # Example other fields:
+    # company_id_string = Column(String, unique=True, index=True, nullable=False)
+    # business_name = Column(String, nullable=True)
+
+    # Relationships
+    return_policies = relationship("ReturnPolicyOrm", back_populates="business_detail")
+    # Add other relationships as needed, e.g.:
+    # upload_sessions = relationship("UploadSessionOrm", back_populates="business_detail_fk_name")
+    # categories = relationship("CategoryOrm", back_populates="business_detail_fk_name")
+
+    __table_args__ = (
+        {"schema": PUBLIC_SCHEMA},
+    )
+
 # --- Category Models ---
 class CategoryOrm(Base):
     __tablename__ = "categories"
@@ -188,23 +207,42 @@ class AttributeValueOrm(Base):
     )
 
 class ReturnPolicyOrm(Base):
-    __tablename__ = "return_policies"
-    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    business_details_id = Column(BigInteger, index=True, nullable=False) # Changed
-    return_policy_code = Column(String, index=True, nullable=False)
-    name = Column(String, nullable=False)
-    return_window_days = Column(Integer, nullable=False)
-    grace_period_days = Column(Integer, nullable=False, default=0)
-    description = Column(Text, nullable=True)
+    __tablename__ = "return_policy" # Renamed table
 
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
 
+    # DDL: created_date timestamp without time zone NOT NULL
+    created_date = Column(DateTime, nullable=False, server_default=func.now())
+
+    # DDL: grace_period_return bigint
+    grace_period_return = Column(BigInteger, nullable=True)
+
+    # DDL: policy_name text COLLATE pg_catalog."default"
+    policy_name = Column(Text, nullable=True)
+
+    # DDL: return_policy_type character varying(255) COLLATE pg_catalog."default" NOT NULL
+    return_policy_type = Column(String(255), nullable=False)
+
+    # DDL: time_period_return bigint
+    time_period_return = Column(BigInteger, nullable=True)
+
+    # DDL: updated_date timestamp without time zone
+    updated_date = Column(DateTime, nullable=True, onupdate=func.now())
+
+    # DDL: business_details_id bigint (FK to public.business_details.id)
+    business_details_id = Column(BigInteger, ForeignKey(f'{PUBLIC_SCHEMA}.business_details.id'), index=True, nullable=True)
+
+    # Relationships
+    business_detail = relationship("BusinessDetailsOrm", back_populates="return_policies")
+
+    # The 'products' relationship target (ProductOrm.return_policy_id) will need to be updated
+    # to ForeignKey('public.return_policy.id') when ProductOrm is revised.
+    # TODO: Review ProductOrm.return_policy_id FK and relationship back_populates.
     products = relationship("ProductOrm", back_populates="return_policy")
 
     __table_args__ = (
-        UniqueConstraint('business_details_id', 'return_policy_code', name='uq_returnpolicy_business_code'),
-        {"schema": BUSINESS_SCHEMA} # Assigned schema
+        Index('idx_return_policy_business_type', "business_details_id", "return_policy_type"),
+        {"schema": PUBLIC_SCHEMA}, # Moved to PUBLIC_SCHEMA
     )
 
 class ProductOrm(Base):

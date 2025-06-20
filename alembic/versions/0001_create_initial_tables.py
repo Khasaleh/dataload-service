@@ -94,19 +94,22 @@ def upgrade() -> None:
     # op.create_index(op.f('ix_catalog_management_attribute_value_id'), 'attribute_value', ['id'], unique=False, schema=CATALOG_SCHEMA) # PKs are auto-indexed
 
     op.create_table('return_policies',
-        sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column('id', sa.BigInteger(), autoincrement=True, nullable=False),
         sa.Column('business_details_id', sa.BigInteger(), nullable=False),
-        sa.Column('return_policy_code', sa.String(), nullable=False),
-        sa.Column('name', sa.String(), nullable=False),
+        sa.Column('return_policy_code', sa.String(length=255), nullable=False),
+        sa.Column('name', sa.String(length=255), nullable=False),
         sa.Column('return_window_days', sa.Integer(), nullable=False),
-        sa.Column('grace_period_days', sa.Integer(), server_default=sa.text('0'), nullable=False),
+        sa.Column('grace_period_days', sa.Integer(), nullable=False), # Removed server_default
         sa.Column('description', sa.Text(), nullable=True),
-        sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-        sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), onupdate=sa.text('now()'), nullable=False),
+        sa.Column('created_by', sa.BigInteger(), nullable=True),
+        sa.Column('created_date', sa.BigInteger(), nullable=True),
+        sa.Column('updated_by', sa.BigInteger(), nullable=True),
+        sa.Column('updated_date', sa.BigInteger(), nullable=True),
         sa.PrimaryKeyConstraint('id', name=op.f('pk_return_policies')),
         sa.UniqueConstraint('business_details_id', 'return_policy_code', name=op.f('uq_returnpolicy_business_code')),
         schema=BUSINESS_SCHEMA
     )
+    op.create_index(op.f('ix_return_policies_id'), 'return_policies', ['id'], unique=False, schema=BUSINESS_SCHEMA) # Index for PK
     op.create_index(op.f('ix_fazeal_business_return_policies_business_details_id'), 'return_policies', ['business_details_id'], unique=False, schema=BUSINESS_SCHEMA)
     op.create_index(op.f('ix_fazeal_business_return_policies_return_policy_code'), 'return_policies', ['return_policy_code'], unique=False, schema=BUSINESS_SCHEMA)
 
@@ -302,6 +305,7 @@ def downgrade() -> None:
 
     op.drop_index(op.f('ix_fazeal_business_return_policies_return_policy_code'), table_name='return_policies', schema=BUSINESS_SCHEMA)
     op.drop_index(op.f('ix_fazeal_business_return_policies_business_details_id'), table_name='return_policies', schema=BUSINESS_SCHEMA)
+    op.drop_index(op.f('ix_return_policies_id'), table_name='return_policies', schema=BUSINESS_SCHEMA) # Drop PK index
     op.drop_table('return_policies', schema=BUSINESS_SCHEMA)
 
     op.drop_index(op.f('ix_catalog_management_attribute_value_value'), table_name='attribute_value', schema=CATALOG_SCHEMA)

@@ -1,6 +1,7 @@
 
-from pydantic import BaseModel, Field, validator, constr # Added constr
+from pydantic import BaseModel, Field, validator, constr, root_validator # Added constr and root_validator
 from typing import Optional, List # Added List
+from datetime import datetime # Added datetime
 
 class BrandCsvModel(BaseModel): # Renamed from BrandModel
     """Pydantic model for validating a row from a Brand CSV file."""
@@ -108,30 +109,47 @@ class AttributeCsvModel(BaseModel):
                     )
         return v # Return the original value for 'values_active'
 
-class ReturnPolicyModel(BaseModel):
-    return_policy_code: str
-    name: str
-    return_window_days: int
-    grace_period_days: int
-    description: str
+class ReturnPolicyCsvModel(BaseModel):
+    """Pydantic model for validating a row from a Return Policy CSV file,
+    aligning with the new return_policy table DDL."""
+    id: Optional[int] = None # For matching existing records if provided in CSV
 
-    @validator('return_policy_code', 'name')
-    def policy_fields_must_not_be_empty(cls, value):
-        if not value.strip():
-            raise ValueError('field must not be empty')
-        return value
+    # Timestamps can be provided in CSV (e.g., ISO format) or system-generated
+    created_date: Optional[datetime] = None
+    updated_date: Optional[datetime] = None
 
-    @validator('return_window_days')
-    def return_window_days_must_be_positive(cls, value):
-        if value <= 0:
-            raise ValueError('return_window_days must be positive')
-        return value
+    grace_period_return: Optional[int] = None # Corresponds to bigint in DB
+    policy_name: Optional[str] = None # Corresponds to text in DB
+    return_policy_type: str # E.g., "SALES_ARE_FINAL", "SALES_RETURN_ALLOWED"
+    time_period_return: Optional[int] = None # Corresponds to bigint in DB
 
-    @validator('grace_period_days')
-    def grace_period_days_must_be_non_negative(cls, value):
-        if value < 0:
-            raise ValueError('grace_period_days must be non-negative')
-        return value
+    business_details_id: Optional[int] = None # Integer ID for business
+
+    class Config:
+        anystr_strip_whitespace = True
+        extra = "forbid"
+
+    @root_validator(pre=False, skip_on_failure=True) # Run after individual field validation
+    def check_conditional_fields(cls, values):
+        policy_type = values.get('return_policy_type')
+        time_period = values.get('time_period_return')
+        # policy_name = values.get('policy_name') # policy_name can be null in DDL
+
+        if policy_type == "SALES_RETURN_ALLOWED":
+            if time_period is None:
+                raise ValueError("'time_period_return' is required when 'return_policy_type' is 'SALES_RETURN_ALLOWED'.")
+            # policy_name is optional as per DDL and CSV examples.
+
+        elif policy_type == "SALES_ARE_FINAL":
+            # For "SALES_ARE_FINAL", other fields are typically null or ignored.
+            # Pydantic Optional already handles this.
+            pass
+
+        # Further validation for specific enum values of return_policy_type could be added here
+        # if policy_type not in ["SALES_ARE_FINAL", "SALES_RETURN_ALLOWED", "OTHER_POLICY_TYPE"]:
+        #     raise ValueError(f"Invalid 'return_policy_type': {policy_type}. Expected known types.")
+
+        return values
 
 class ProductModel(BaseModel):
     product_name: str
@@ -229,7 +247,7 @@ class CategoryCsvModel(BaseModel):
         anystr_strip_whitespace = True
         # extra = "forbid" # Uncomment if no extra fields are allowed from CSV
 
-from datetime import datetime
+# from datetime import datetime # Moved to top
 import uuid
 
 class UploadSessionModel(BaseModel):

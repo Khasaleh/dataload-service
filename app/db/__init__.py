@@ -16,6 +16,7 @@ from .models import MetaTagOrm
 from .models import CategoryOrm
 from .models import CategoryAttributeOrm
 from .models import AttributeValueOrm # Added
+from .models import BusinessDetailsOrm # Added
 
 # You can also define an __all__ variable if you want to control what `from app.db import *` imports,
 # though explicit imports are generally preferred.
@@ -32,4 +33,5 @@ from .models import AttributeValueOrm # Added
 #     "CategoryOrm",
 #     "CategoryAttributeOrm",
 #     "AttributeValueOrm", # Added
+#     "BusinessDetailsOrm", # Added
 # ]
