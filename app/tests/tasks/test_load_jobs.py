@@ -754,6 +754,135 @@ def test_process_csv_task_wasabi_cleanup_error_does_not_fail_task(
     ]
     mock_update_session_status.assert_has_calls(expected_status_calls)
 
+
+# --- Category Specific Tests for process_csv_task ---
+
+SAMPLE_CATEGORY_RECORDS_VALIDATED = [
+    CategoryCsvModel(category_path="Electronics/Audio", name="Audio", description="Audio Devices").model_dump(),
+    CategoryCsvModel(category_path="Electronics/Audio/Headphones", name="Headphones", description="All Headphones").model_dump(),
+]
+
+@pytest.fixture
+def mock_validate_csv_for_categories():
+    with patch('app.tasks.load_jobs.validate_csv') as mock_validate:
+        mock_validate.return_value = ([], SAMPLE_CATEGORY_RECORDS_VALIDATED)
+        yield mock_validate
+
+@patch('app.tasks.load_jobs.load_category_to_db')
+@patch('app.tasks.load_jobs.add_to_id_map') # Also mock add_to_id_map to check string_id_map calls
+def test_process_csv_task_categories_success(
+    mock_add_to_id_map_direct, # For checking string_id_map behavior
+    mock_load_category_to_db,
+    mock_wasabi_client,
+    mock_db_session_get,
+    mock_redis_client,
+    mock_validate_csv_for_categories,
+    mock_update_session_status_func
+):
+    mock_db_session = mock_db_session_get.return_value
+    # Simulate load_category_to_db returning a new DB PK for each call
+    mock_load_category_to_db.side_effect = [1, 2] # Two records, two PKs
+
+    map_type = "categories"
+    record_key = "category_path"
+    id_prefix = "cat" # For string_id_map
+
+    # Update wasabi mock for category content if needed
+    mock_wasabi_client.get_object.return_value['Body'].read.return_value = b"category_path,name,description\nElectronics/Audio,Audio,Audio Devices"
+
+
+    result = process_csv_task(
+        business_id=SAMPLE_BUSINESS_ID, # Assuming this is int
+        session_id=SAMPLE_SESSION_ID,
+        wasabi_file_path="uploads/some/categories.csv", # Path specific to test
+        original_filename="categories.csv",
+        record_key=record_key,
+        id_prefix=id_prefix,
+        map_type=map_type
+    )
+
+    assert result["status"] == "success"
+    assert result["processed_db_count"] == len(SAMPLE_CATEGORY_RECORDS_VALIDATED)
+
+    assert mock_load_category_to_db.call_count == len(SAMPLE_CATEGORY_RECORDS_VALIDATED)
+    expected_loader_calls = [
+        call(
+            db_session=mock_db_session,
+            business_details_id=SAMPLE_BUSINESS_ID,
+            record_data=SAMPLE_CATEGORY_RECORDS_VALIDATED[0],
+            session_id=SAMPLE_SESSION_ID,
+            db_pk_redis_pipeline=mock_redis_client.pipeline.side_effect[1] # db_pk_redis_pipeline
+        ),
+        call(
+            db_session=mock_db_session,
+            business_details_id=SAMPLE_BUSINESS_ID,
+            record_data=SAMPLE_CATEGORY_RECORDS_VALIDATED[1],
+            session_id=SAMPLE_SESSION_ID,
+            db_pk_redis_pipeline=mock_redis_client.pipeline.side_effect[1]
+        ),
+    ]
+    mock_load_category_to_db.assert_has_calls(expected_loader_calls, any_order=False) # Order of processing records
+
+    mock_db_session.commit.assert_called_once()
+    # db_pk_redis_pipeline is side_effect[1]
+    mock_redis_client.pipeline.side_effect[1].execute.assert_called_once()
+
+    # Verify string_id_map is NOT called for categories by process_csv_task directly
+    # The add_to_id_map_direct mock is the one patched on app.tasks.load_jobs.add_to_id_map
+    for call_arg_obj in mock_add_to_id_map_direct.call_args_list:
+        assert call_arg_obj.args[1] != map_type # Check map_type arg in add_to_id_map call
+
+    # Verify TTL for db_pk map was called (pipeline index 3)
+    mock_redis_client.pipeline.side_effect[3].expire.assert_called_once_with(
+        f"id_map:session:{SAMPLE_SESSION_ID}:{map_type}_db_pk", time=load_jobs.REDIS_SESSION_TTL_SECONDS
+    )
+    mock_redis_client.pipeline.side_effect[3].execute.assert_called_once()
+    # Verify TTL for string_id_map was also called (pipeline index 2) (as string_id_pipeline is still executed)
+    mock_redis_client.pipeline.side_effect[2].execute.assert_called_once()
+
+
+    mock_update_session_status_func.assert_any_call(SAMPLE_SESSION_ID, SAMPLE_BUSINESS_ID, status="completed",
+                                              record_count=len(SAMPLE_CATEGORY_RECORDS_VALIDATED),
+                                              error_count=0)
+
+@patch('app.tasks.load_jobs.load_category_to_db')
+def test_process_csv_task_categories_loader_fails_for_one_record(
+    mock_load_category_to_db,
+    mock_wasabi_client,
+    mock_db_session_get,
+    mock_redis_client,
+    mock_validate_csv_for_categories,
+    mock_update_session_status_func
+):
+    mock_db_session = mock_db_session_get.return_value
+    mock_load_category_to_db.side_effect = [123, None] # First succeeds, second fails
+
+    result = process_csv_task(
+        business_id=SAMPLE_BUSINESS_ID,
+        session_id=SAMPLE_SESSION_ID,
+        wasabi_file_path="uploads/some/categories.csv",
+        original_filename="categories.csv",
+        record_key="category_path",
+        id_prefix="cat",
+        map_type="categories"
+    )
+
+    assert result["status"] == "db_error"
+    assert result["processed_db_count"] == 0
+
+    assert mock_load_category_to_db.call_count == 2
+    mock_db_session.rollback.assert_called_once()
+    mock_db_session.commit.assert_not_called()
+
+    mock_redis_client.pipeline.side_effect[1].execute.assert_not_called() # db_pk_redis_pipeline
+
+    mock_update_session_status_func.assert_any_call(
+        SAMPLE_SESSION_ID, SAMPLE_BUSINESS_ID,
+        status="db_processing_failed",
+        details=ANY,
+        error_count=1
+    )
+
 # To run these tests (ensure pytest is installed and in the correct directory):
 # Terminal: pip install pytest
 # Then: pytest app/tests/tasks/test_load_jobs.py
