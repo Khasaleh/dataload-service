@@ -4,32 +4,46 @@ import datetime
 import uuid # For session_id generation
 import os # For WASABI_BUCKET_NAME
 
-from app.graphql_types import UploadSessionType, TokenResponseType, UserType # UserType might be used by auth
+from app.graphql_types import UploadSessionType, TokenResponseType, UserType
 from strawberry.file_uploads import Upload
+from jose import jwt # Added
+from app.dependencies.auth import SECRET_KEY, ALGORITHM # Added
+from datetime import timedelta # Added
+
 
 # --- Placeholder/Conceptual Service Imports & Functions ---
-# These would be replaced by actual service calls in a full implementation.
 
-# Placeholder for user authentication and token creation logic
-# In a real app, this would verify credentials against a database and generate a JWT.
-_MOCK_USERS_FOR_TOKEN_AUTH = {
-    "testuser": {"password": "password123", "business_id": "biz_auth_test", "role": "admin"}
+# This is a placeholder. In a real app, this would query your user database
+# and use passlib for password verification.
+# from passlib.context import CryptContext
+# pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+_MOCK_USERS_DB = {
+    "testuser": {
+        "username": "testuser", "hashed_password": "password", # In real app, use: pwd_context.hash("password") e.g. "$2b$12$yourbcryptstringhere"
+        "user_id": "user_123", "business_id": "biz_789", "roles": ["ROLE_USER"], "disabled": False
+    },
+    "adminuser": {
+        "username": "adminuser", "hashed_password": "adminpassword", # Replace with a real bcrypt hash for testing if needed
+        "user_id": "admin_456", "business_id": "biz_789", "roles": ["ROLE_ADMIN", "ROLE_USER"], "disabled": False
+    }
 }
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30))
 
-def verify_user_and_create_token(username: str, password: str) -> Optional[Dict[str, Any]]:
-    """Placeholder for verifying user credentials and creating a token."""
-    user = _MOCK_USERS_FOR_TOKEN_AUTH.get(username)
-    if user and user["password"] == password:
-        # In a real app, use app.dependencies.auth.create_access_token or similar
-        mock_token_content = {
-            "sub": username, # Subject of the token
-            "business_id": user["business_id"],
-            "role": user["role"],
-            "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=30) # Mock expiry
-        }
-        # This is NOT a real JWT, just a placeholder for the token string
-        return {"access_token": f"mock_jwt_for_{username}", "token_type": "bearer", "user_data": mock_token_content}
-    return None
+def authenticate_user_placeholder(username: str, password: str) -> Optional[Dict[str, Any]]:
+    """
+    Placeholder for user authentication.
+    In a real app, this would verify against hashed passwords in a database.
+    Returns user details dict if authentication is successful, else None.
+    """
+    user = _MOCK_USERS_DB.get(username)
+    if not user or user["disabled"]:
+        return None
+    # Simulate password check for placeholder - REPLACE with pwd_context.verify(password, user["hashed_password"])
+    if user["hashed_password"] != password: # Simple string comparison for mock
+        return None
+    return {"username": user["username"], "user_id": user["user_id"], "business_id": user["business_id"], "roles": user["roles"]}
+
 
 # Placeholder for actual database/service logic for UploadSession creation
 _mock_db_sessions_for_mutation: Dict[str, Dict[str, Any]] = {}
@@ -60,6 +74,11 @@ class GenerateTokenInput:
     # client_secret: Optional[str] = None
 
 @strawberry.input
+class RefreshTokenInput:
+    """Input type for refreshing an authentication token."""
+    refreshToken: str
+
+@strawberry.input
 class UploadFileInput:
     """Input type for the file upload mutation."""
     load_type: str
@@ -78,19 +97,99 @@ class Mutation:
     @strawberry.mutation
     def generate_token(self, input: GenerateTokenInput) -> Optional[TokenResponseType]:
         """
-        Generates an authentication token for a user given valid credentials.
-        This is a placeholder and would typically involve password hashing and secure token generation.
+        Generates an authentication token (JWT) and a refresh token for a user
+        given valid credentials.
         """
-        # This logic should mirror app/routes/token.py or call a shared auth service.
-        token_data = verify_user_and_create_token(input.username, input.password)
+        user_details = authenticate_user_placeholder(username=input.username, password=input.password)
 
-        if not token_data:
-            # Strawberry handles None for Optional fields by making the GraphQL field null.
-            # For more specific error handling, custom GraphQL error types or extensions can be used.
-            # e.g., raise strawberry.GraphQLError("Invalid username or password.")
-            return None
+        if not user_details:
+            raise strawberry.GraphQLError("Invalid username or password.")
+            # Alternatively, for some GraphQL patterns, returning None is also an option:
+            # return None
 
-        return TokenResponseType(token=token_data["access_token"], token_type="bearer")
+        # Create the JWT access token payload
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token_payload = {
+            "sub": user_details["username"],
+            "userId": user_details["user_id"],
+            "companyId": user_details["business_id"], # Using companyId in token as per original spec
+            "role": [{"authority": role_name} for role_name in user_details["roles"]],
+            "iat": datetime.datetime.utcnow(),
+            "exp": datetime.datetime.utcnow() + access_token_expires
+        }
+        encoded_jwt = jwt.encode(access_token_payload, SECRET_KEY, algorithm=ALGORITHM)
+
+        # Generate a refresh token (e.g., a simple UUID for this example)
+        # In a real system, this refresh token would be stored securely (e.g., in a database)
+        # associated with the user_id and have its own expiry. It would be used to obtain
+        # new access tokens without requiring the user to re-enter credentials.
+        # For placeholder validation in refreshToken mutation, we make it predictable.
+        refresh_token_value = f"mock-rt-{user_details['username']}-{uuid.uuid4()}"
+        # Conceptual: store_refresh_token(user_id=user_details["user_id"], token=refresh_token_value, expires_in=...)
+
+        return TokenResponseType(
+            token=encoded_jwt,
+            token_type="bearer",
+            refreshToken=refresh_token_value
+        )
+
+    @strawberry.mutation
+    async def refresh_token(self, input: RefreshTokenInput) -> Optional[TokenResponseType]:
+        """
+        Refreshes an authentication token set (access and refresh tokens)
+        using a provided refresh token. Implements refresh token rotation.
+        """
+
+        # --- Placeholder Refresh Token Validation Logic ---
+        # This is highly conceptual. A real system needs a secure refresh token store and validation.
+        user_details_for_refresh = None
+        # Example: Crude check for a mock refresh token.
+        # A real system would look up `input.refreshToken` in a database,
+        # verify its validity/expiry, and retrieve the associated user_id.
+        if input.refreshToken and input.refreshToken.startswith("mock-rt-testuser"):
+            # Simulate fetching user details for "testuser" if the token format matches.
+            # This implies the token was originally issued for "testuser".
+            user_details_for_refresh = _MOCK_USERS_DB.get("testuser")
+        elif input.refreshToken and input.refreshToken.startswith("mock-rt-adminuser"):
+            user_details_for_refresh = _MOCK_USERS_DB.get("adminuser")
+        # Add more conditions if other users' refresh tokens need to be "valid" for this placeholder.
+
+        if not user_details_for_refresh:
+            raise strawberry.GraphQLError("Invalid or expired refresh token.")
+
+        if user_details_for_refresh.get("disabled", False):
+            raise strawberry.GraphQLError("User account is disabled.")
+        # --- End of Placeholder Validation ---
+
+        # Generate new access token
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token_payload = {
+            "sub": user_details_for_refresh["username"],
+            "userId": user_details_for_refresh["user_id"],
+            "companyId": user_details_for_refresh["business_id"],
+            "role": [{"authority": role_name} for role_name in user_details_for_refresh["roles"]],
+            "iat": datetime.datetime.utcnow(),
+            "exp": datetime.datetime.utcnow() + access_token_expires
+        }
+        new_access_token = jwt.encode(access_token_payload, SECRET_KEY, algorithm=ALGORITHM)
+
+        # Generate new refresh token (implementing rotation)
+        new_refresh_token_value = f"mock-rt-{user_details_for_refresh['username']}-{uuid.uuid4()}" # New token
+
+        # --- Conceptual: Update Refresh Token Store ---
+        # In a real application:
+        # 1. Invalidate the old refresh token (input.refreshToken) in your secure store.
+        #    (e.g., mark as used, delete, or add to a denylist until its original expiry).
+        # 2. Store the new_refresh_token_value, associated with user_details_for_refresh["user_id"],
+        #    with a new (potentially long) expiry.
+        # logger.info(f"User {user_details_for_refresh['username']} refreshed token. Old RT: {input.refreshToken}, New RT: {new_refresh_token_value}")
+        # --- End Conceptual Store Update ---
+
+        return TokenResponseType(
+            token=new_access_token,
+            token_type="bearer",
+            refreshToken=new_refresh_token_value
+        )
 
     @strawberry.mutation
     async def upload_file(
@@ -110,13 +209,21 @@ class Mutation:
             raise strawberry.GraphQLError("Authentication required: User or business ID not found in context.")
 
         business_id = current_user_data["business_id"]
-        # user_role = current_user_data.get("role") # For role-based permissions
+        user_roles = current_user_data.get("roles", []) # Get list of roles
 
         # --- Basic Validation (similar to app/routes/upload.py) ---
         # TODO: Implement/integrate actual ROLE_PERMISSIONS check if needed.
-        # Example:
-        # if not has_permission(user_role, "upload", input.load_type):
-        #     raise strawberry.GraphQLError(f"Permission denied for load type: {input.load_type}")
+        # Example conceptual check (replace with actual permission logic):
+        # Assume ROLE_PERMISSIONS is a dict like:
+        # ROLE_PERMISSIONS = { "ROLE_ADMIN": {"brands", "products"}, "ROLE_UPLOADER": {"products"} }
+        #
+        # allowed_for_role = False
+        # for role in user_roles:
+        #     if role in ROLE_PERMISSIONS and input.load_type in ROLE_PERMISSIONS[role]:
+        #         allowed_for_role = True
+        #         break
+        # if not allowed_for_role:
+        #     raise strawberry.GraphQLError(f"Permission denied for load type '{input.load_type}' based on user roles: {user_roles}")
 
         if input.load_type not in CELERY_TASK_MAP:
             raise strawberry.GraphQLError(f"Invalid load type: {input.load_type}. Supported types are: {list(CELERY_TASK_MAP.keys())}")

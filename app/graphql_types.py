@@ -28,21 +28,27 @@ class UploadSessionType:
 @strawberry.type
 class UserType:
     """
-    Represents an authenticated user's information relevant to the API.
-    Derived from the data returned by the get_current_user dependency.
+    Represents an authenticated user's information, typically derived from JWT claims
+    processed by the get_current_user dependency.
     """
-    business_id: str
-    role: str
-    # Example: if get_current_user also returned user_id
-    # user_id: Optional[str] = None
+    user_id: strawberry.ID      # Corresponds to 'userId' claim from JWT. Strawberry handles various underlying types for ID.
+    username: str               # Corresponds to 'sub' (subject) claim from JWT.
+    business_id: str            # Corresponds to 'companyId' claim from JWT (mapped to 'business_id' in auth context).
+    roles: List[str]            # List of role strings (e.g., ["ROLE_ADMIN", "ROLE_USER"]).
 
 @strawberry.type
 class TokenResponseType:
     """
-    Represents the response when a new authentication token is generated.
+    Response type for authentication token generation.
+    Includes the access token and a refresh token.
     """
-    token: str
-    token_type: str
+    token: str          # The JWT access token (often referred to as auth-token).
+    token_type: str     # Typically "bearer".
+    refreshToken: str   # The refresh token (often referred to as auth-refreshtoken).
+    # Optional fields if the token generation response should directly include some user info:
+    # user_id: Optional[strawberry.ID] = None
+    # username: Optional[str] = None
+    # roles: Optional[List[str]] = None
 
 @strawberry.type
 class StandardMessageType:

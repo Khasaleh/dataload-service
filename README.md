@@ -81,11 +81,42 @@ query GetMyBusinessUploads {
 ```graphql
 mutation GenerateToken {
   generateToken(input: {username: "your_username", password: "your_password"}) {
-    token
+    token        # Access Token (auth-token)
     tokenType
+    refreshToken # Refresh Token (auth-refreshtoken)
   }
 }
 ```
+
+### Example Mutation: Refresh Token
+
+(Assumes you have a valid, unexpired `refreshToken`)
+
+```graphql
+mutation RefreshMyToken($myRefreshToken: String!) {
+  refreshToken(input: {refreshToken: $myRefreshToken}) {
+    token        # New Access Token
+    tokenType
+    refreshToken # New Refresh Token (if rotation is enabled)
+  }
+}
+```
+**Variables for the above mutation:**
+```json
+{
+  "myRefreshToken": "your_actual_refresh_token_value"
+}
+```
+
+#### Access Token (auth-token)
+
+The `token` returned by `generateToken` and `refreshToken` is a JWT (JSON Web Token). It includes standard claims like `exp` (expiration time) and `iat` (issued at time), as well as application-specific claims such as:
+*   `sub` (Subject - typically the username)
+*   `userId` (The user's unique identifier)
+*   `companyId` (The identifier for the user's company/business, used internally as `business_id`)
+*   `role` (An array of role objects, e.g., `[{"authority":"ROLE_ADMIN"}]`)
+
+Clients should typically treat the access token as opaque but must send it in the `Authorization: Bearer <token>` header for authenticated requests. The application uses HS512 as the default signing algorithm for these tokens.
 
 ### Example Mutation: Upload File
 

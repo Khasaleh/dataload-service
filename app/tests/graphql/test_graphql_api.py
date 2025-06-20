@@ -1,22 +1,35 @@
 import pytest
 import asyncio
 import io
-from unittest.mock import patch, MagicMock, call, ANY # ANY is useful for some mock assertions
+from unittest.mock import patch, MagicMock, call, ANY
 import uuid
 import datetime
+from datetime import timedelta # For checking token expiry
+import time # For checking token expiry
+from jose import jwt # For decoding JWTs
 
 from fastapi.testclient import TestClient
 
 from app.main import app # Main FastAPI application with GraphQL router
-from app.dependencies.auth import get_current_user # For overriding
-# Import types for response validation if needed, though direct dict comparison is often used
+from app.dependencies.auth import get_current_user, SECRET_KEY, ALGORITHM # For overriding and token decoding
 from app.graphql_types import UploadSessionType, UserType, TokenResponseType
 
 client = TestClient(app)
 
 # --- Mock Data ---
-MOCK_USER_ADMIN = {"business_id": "biz_gql_test", "role": "admin", "user_id": "user_gql_test"}
-MOCK_USER_OTHER_BIZ = {"business_id": "biz_other", "role": "admin", "user_id": "user_other"}
+# Updated mock user structure to match new JWT claims and UserType
+MOCK_USER_ADMIN = {
+    "username": "admin_gql_user",
+    "user_id": "admin_user_id_123", # Can be string or int depending on what UserType expects for ID
+    "business_id": "biz_gql_test",
+    "roles": ["ROLE_ADMIN", "ROLE_EDITOR"]
+}
+MOCK_USER_OTHER_BIZ = {
+    "username": "other_biz_user",
+    "user_id": "other_user_id_456",
+    "business_id": "biz_other",
+    "roles": ["ROLE_USER"]
+}
 
 # --- Helper for Dependency Overrides ---
 def override_get_current_user(user_data: dict):
@@ -32,8 +45,10 @@ def test_query_me_authenticated():
     query = """
         query {
             me {
+                userId
+                username
                 businessId
-                role
+                roles
             }
         }
     """
@@ -42,8 +57,10 @@ def test_query_me_authenticated():
 
     assert response.status_code == 200
     data = response.json()
+    assert data["data"]["me"]["userId"] == MOCK_USER_ADMIN["user_id"]
+    assert data["data"]["me"]["username"] == MOCK_USER_ADMIN["username"]
     assert data["data"]["me"]["businessId"] == MOCK_USER_ADMIN["business_id"]
-    assert data["data"]["me"]["role"] == MOCK_USER_ADMIN["role"]
+    assert data["data"]["me"]["roles"] == MOCK_USER_ADMIN["roles"]
 
 def test_query_me_unauthenticated():
     # The get_context expects Optional[dict] = Depends(get_current_user)
@@ -189,46 +206,80 @@ def test_query_upload_sessions_by_business(mock_get_sessions_db):
 
 
 # --- Mutation Tests ---
-@patch('app.graphql_mutations.verify_user_and_create_token')
-def test_mutation_generate_token_success(mock_verify_user):
-    mock_token = "mock_jwt_token_string"
-    mock_verify_user.return_value = {"access_token": mock_token, "token_type": "bearer"}
+@patch('app.graphql_mutations.authenticate_user_placeholder')
+def test_mutation_generate_token_success(mock_authenticate_user):
+    # Mock the return value of authenticate_user_placeholder
+    # This should now be the full user details dict
+    user_auth_details = {
+        "username": "testuser",
+        "user_id": "user_123",
+        "business_id": "biz_789",
+        "roles": ["ROLE_USER"]
+    }
+    mock_authenticate_user.return_value = user_auth_details
 
     mutation = """
         mutation($input: GenerateTokenInput!) {
             generateToken(input: $input) {
                 token
                 tokenType
+                refreshToken
             }
         }
     """
-    variables = {"input": {"username": "testuser", "password": "password"}}
+    variables = {"input": {"username": "testuser", "password": "password"}} # Password matches placeholder
     response = client.post("/graphql", json={"query": mutation, "variables": variables})
 
     assert response.status_code == 200
-    data = response.json()
-    assert data["data"]["generateToken"]["token"] == mock_token
-    assert data["data"]["generateToken"]["tokenType"] == "bearer"
-    mock_verify_user.assert_called_once_with("testuser", "password")
+    data = response.json().get("data", {}).get("generateToken")
+    assert data is not None
+    assert "token" in data
+    assert data["tokenType"] == "bearer"
+    assert "refreshToken" in data
+    assert data["refreshToken"].startswith("mock-rt-testuser-") # Check prefix
 
-@patch('app.graphql_mutations.verify_user_and_create_token')
-def test_mutation_generate_token_failure(mock_verify_user):
-    mock_verify_user.return_value = None # Simulate invalid credentials
+    mock_authenticate_user.assert_called_once_with(username="testuser", password="password")
+
+    # Decode the access token and verify claims
+    decoded_token = jwt.decode(data["token"], SECRET_KEY, algorithms=[ALGORITHM])
+    assert decoded_token["sub"] == user_auth_details["username"]
+    assert decoded_token["userId"] == user_auth_details["user_id"]
+    assert decoded_token["companyId"] == user_auth_details["business_id"]
+    assert len(decoded_token["role"]) == 1
+    assert decoded_token["role"][0]["authority"] == user_auth_details["roles"][0]
+
+    # Check expiry (iat is present, exp is in the future)
+    assert "iat" in decoded_token
+    assert "exp" in decoded_token
+    assert decoded_token["exp"] > time.time()
+    # ACCESS_TOKEN_EXPIRE_MINUTES is from app.graphql_mutations, check if it's roughly correct
+    # This requires importing ACCESS_TOKEN_EXPIRE_MINUTES or knowing its value.
+    # For now, just checking it's in the future is fine.
+
+@patch('app.graphql_mutations.authenticate_user_placeholder')
+def test_mutation_generate_token_failure(mock_authenticate_user):
+    mock_authenticate_user.return_value = None # Simulate invalid credentials
 
     mutation = """
         mutation($input: GenerateTokenInput!) {
             generateToken(input: $input) {
-                token
+                token # Querying for token, but expect it to be null or error
             }
         }
     """
     variables = {"input": {"username": "wronguser", "password": "badpassword"}}
     response = client.post("/graphql", json={"query": mutation, "variables": variables})
 
-    assert response.status_code == 200
+    assert response.status_code == 200 # GraphQL itself returns 200
     data = response.json()
-    assert data["data"]["generateToken"] is None
-    mock_verify_user.assert_called_once_with("wronguser", "badpassword")
+    # Depending on how the resolver handles None from authenticate_user:
+    # It might return data: { generateToken: null } if Optional
+    # Or an error in the "errors" list if it raises GraphQLError
+    # The current generateToken raises GraphQLError("Invalid username or password.")
+    assert data.get("data") is None or data.get("data", {}).get("generateToken") is None
+    assert len(data.get("errors", [])) == 1
+    assert "Invalid username or password." in data["errors"][0]["message"]
+    mock_authenticate_user.assert_called_once_with(username="wronguser", password="badpassword")
 
 
 @patch('app.graphql_mutations.upload_to_wasabi')
@@ -368,4 +419,102 @@ def test_mutation_upload_file_wasabi_failure(mock_upload_wasabi):
     assert data.get("data") is None or data.get("data", {}).get("uploadFile") is None
     assert len(data.get("errors", [])) == 1
     assert "Failed to upload file to Wasabi: S3 Upload Error" in data["errors"][0]["message"]
+
+
+# --- Refresh Token Mutation Tests ---
+
+# To test refreshToken, we need to control the _MOCK_USERS_DB in app.graphql_mutations
+# or mock the part of the refreshToken resolver that uses it.
+# Patching _MOCK_USERS_DB directly for the scope of a test is cleaner.
+
+@patch('app.graphql_mutations._MOCK_USERS_DB')
+def test_mutation_refresh_token_success(mock_users_db_in_mutations):
+    # Setup the mock DB that the refreshToken resolver will see
+    original_user_details = {
+        "username": "testuser", "hashed_password": "password",
+        "user_id": "user_123", "business_id": "biz_789",
+        "roles": ["ROLE_USER"], "disabled": False
+    }
+    mock_users_db_in_mutations.get.return_value = original_user_details # Simulate finding "testuser"
+
+    # This refresh token should be "valid" by the placeholder logic in refreshToken resolver
+    # because it starts with "mock-rt-testuser"
+    input_refresh_token = f"mock-rt-testuser-{uuid.uuid4()}"
+
+    mutation = """
+        mutation($input: RefreshTokenInput!) {
+            refreshToken(input: $input) {
+                token
+                tokenType
+                refreshToken
+            }
+        }
+    """
+    variables = {"input": {"refreshToken": input_refresh_token}}
+    response = client.post("/graphql", json={"query": mutation, "variables": variables})
+
+    assert response.status_code == 200
+    data = response.json().get("data", {}).get("refreshToken")
+    assert data is not None
+
+    assert "token" in data
+    assert data["tokenType"] == "bearer"
+    assert "refreshToken" in data
+    assert data["refreshToken"] != input_refresh_token # Check rotation
+    assert data["refreshToken"].startswith(f"mock-rt-{original_user_details['username']}-")
+
+    # Decode the new access token
+    new_decoded_access_token = jwt.decode(data["token"], SECRET_KEY, algorithms=[ALGORITHM])
+    assert new_decoded_access_token["sub"] == original_user_details["username"]
+    assert new_decoded_access_token["userId"] == original_user_details["user_id"]
+    assert new_decoded_access_token["companyId"] == original_user_details["business_id"]
+    assert len(new_decoded_access_token["role"]) == 1
+    assert new_decoded_access_token["role"][0]["authority"] == original_user_details["roles"][0]
+    assert new_decoded_access_token["exp"] > time.time()
+
+
+def test_mutation_refresh_token_invalid():
+    mutation = """
+        mutation($input: RefreshTokenInput!) {
+            refreshToken(input: $input) {
+                token
+            }
+        }
+    """
+    variables = {"input": {"refreshToken": "invalid-or-expired-token"}}
+    response = client.post("/graphql", json={"query": mutation, "variables": variables})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("data") is None or data.get("data", {}).get("refreshToken") is None
+    assert len(data.get("errors", [])) == 1
+    assert "Invalid or expired refresh token." in data["errors"][0]["message"]
+
+
+@patch('app.graphql_mutations._MOCK_USERS_DB')
+def test_mutation_refresh_token_disabled_user(mock_users_db_in_mutations):
+    disabled_user_details = {
+        "username": "testuser", "hashed_password": "password",
+        "user_id": "user_123", "business_id": "biz_789",
+        "roles": ["ROLE_USER"], "disabled": True # User is disabled
+    }
+    mock_users_db_in_mutations.get.return_value = disabled_user_details
+
+    input_refresh_token = f"mock-rt-testuser-{uuid.uuid4()}" # Token for "testuser"
+
+    mutation = """
+        mutation($input: RefreshTokenInput!) {
+            refreshToken(input: $input) {
+                token
+            }
+        }
+    """
+    variables = {"input": {"refreshToken": input_refresh_token}}
+    response = client.post("/graphql", json={"query": mutation, "variables": variables})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("data") is None or data.get("data", {}).get("refreshToken") is None
+    assert len(data.get("errors", [])) == 1
+    assert "User account is disabled." in data["errors"][0]["message"]
 ```
