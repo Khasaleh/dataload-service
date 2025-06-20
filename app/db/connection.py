@@ -50,106 +50,94 @@ DATABASES = {
     # Example for specific tenant DB if it's different from the default construction:
     # "biz_1001": "postgresql://user_biz1:pass_biz1@custom_host:5432/db_for_biz_1001",
     "default": DATABASE_URL # Uses the URL constructed from individual env vars
+    # The DATABASES dictionary is largely simplified as we move to a single DB with shared schemas.
+    # It's kept here if a very specific tenant needs a completely separate DB instance,
+    # but get_engine will now primarily use the "default" constructed DATABASE_URL.
 }
 
-def get_engine(business_id: str, strategy: str = "database_per_tenant"):
+def get_engine(): # Parameters business_id and strategy removed
     """
-    Returns a SQLAlchemy engine.
-    - If 'database_per_tenant', it attempts to find a specific DB URL for the business_id.
-    - If 'shared_database_with_schema_switching', it uses a default/shared database URL.
+    Returns a SQLAlchemy engine using the default database configuration.
+    The application now assumes a single primary database containing shared schemas.
     """
-    db_url = None
-    if strategy == "database_per_tenant":
-        db_url = DATABASES.get(f"biz_{business_id}")
-        if not db_url:
-            logger.warning(f"No specific database configuration for business_id={business_id}. Falling back to default.")
-            db_url = DATABASES.get("default")
-    else: # shared_database_with_schema_switching or other strategies
-        db_url = DATABASES.get("default")
-
+    db_url = DATABASES.get("default")
     if not db_url:
-        logger.error(f"No database URL found for business_id={business_id} or default.")
-        raise Exception(f"No database configuration usable for business_id={business_id}")
+        # This case should ideally be prevented by the check after DATABASE_URL construction.
+        logger.error("Default database URL not configured or missing.")
+        raise Exception("Default database URL is not configured.")
 
-    logger.info(f"Creating engine for business_id {business_id} using URL (ending): ...{db_url[-20:]}")
+    logger.info(f"Creating engine using default database URL (ending): ...{db_url[-20:]}")
     return create_engine(db_url, pool_pre_ping=True)
 
 
-def get_session(business_id: str):
+def get_session(business_id: int): # Type hint for business_id changed to int
     """
-    Provides a SQLAlchemy session, potentially configured for a specific tenant.
+    Provides a SQLAlchemy session configured with a fixed search_path
+    for shared schemas (CATALOG_SCHEMA, BUSINESS_SCHEMA, public).
 
-    This function demonstrates how different multi-tenancy strategies could be initiated.
-    The actual implementation details would depend heavily on the chosen ORM, database,
-    and overall architecture.
+    The `business_id` parameter is now primarily for context (e.g., logging, or if RLS
+    or other per-session, business-specific settings were needed beyond schema path).
+    Data isolation between businesses is expected to be handled by `business_id`
+    columns in tables within the shared schemas.
 
-    Note on Database Migrations (Alembic) for Multi-Tenancy:
-    - If using a schema-per-tenant strategy (like 'shared_database_with_schema_switching' below),
-      Alembic migrations (managed in the `alembic/` directory) need to be applied to EACH
-      tenant-specific schema to create and maintain its table structures. This typically involves
-      scripting Alembic runs or using advanced Alembic features for multi-tenancy, possibly
-      by adapting `alembic/env.py` to iterate over known tenant schemas or by running
-      `alembic upgrade head --x-arg tenant_schema=business_xyz` and using that arg in `env.py`.
-    - Shared tables (e.g., in 'public' or `CATALOG_SCHEMA`, `BUSINESS_SCHEMA`) are typically
-      migrated once per database.
+    Note on Database Migrations (Alembic):
+    - Alembic migrations (managed in `alembic/` directory) should be applied to the shared
+      schemas (`CATALOG_SCHEMA`, `BUSINESS_SCHEMA`, `public`) in the database defined by `DB_NAME`.
+    - Ensure these schemas are created in your database. Alembic typically creates tables
+      within the default search_path of the migration connection or in explicitly specified schemas
+      if models have `__table_args__ = {"schema": "schema_name"}`.
     """
 
-    # For this example, we'll assume a 'shared_database_with_schema_switching' strategy
-    # to demonstrate the schema path setting as requested by the subtask.
-    # In a real app, the strategy might be chosen based on configuration or business_id.
-    tenant_strategy = "shared_database_with_schema_switching" # Example strategy
-
-    engine = get_engine(business_id, strategy=tenant_strategy)
+    engine = get_engine() # Simplified call
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     session = SessionLocal()
 
-    logger.info(f"Session created for business_id: {business_id}. Strategy: {tenant_strategy}")
+    # Log the business_id for context, even if not used for dynamic schema path.
+    logger.info(f"Session created. Intended business_id context: {business_id}.")
 
-    # --- Placeholder for Schema Switching Logic ---
-    # In a multi-tenant system where tenants share a database but are isolated by schemas:
-    # - Each tenant's data resides in a dedicated schema (e.g., "business_1001", "tenant_abc").
-    # - When a session is established for a specific tenant, the database session's
-    #   search_path (for PostgreSQL) or current schema/database must be set.
-    # This ensures that SQL queries operate on the correct tenant's data.
+    # --- Set Fixed Schema Search Path ---
+    # All tenants/businesses will use the same set of schemas defined by environment variables.
+    # Data isolation is achieved via `business_id` columns in tables within these schemas.
 
-    if tenant_strategy == "shared_database_with_schema_switching":
-        # This is a common approach for PostgreSQL for isolating tenant data within a shared database.
-        # Other databases might use different commands (e.g., `USE database_name; SET schema = schema_name;` or similar).
+    # Schema names are loaded from environment variables at the module level.
+    # CATALOG_SCHEMA (e.g., "catalog_management")
+    # BUSINESS_SCHEMA (e.g., "fazeal_business")
 
-        # Defines the schema name for this tenant. For example, if business_id is "acme",
-        # this will attempt to use a schema named "business_acme".
-        # IMPORTANT: These tenant-specific schemas (e.g., "business_acme") MUST be manually
-        # created in your PostgreSQL database (the one defined by DB_NAME) before they can be used.
-        # Example SQL: CREATE SCHEMA IF NOT EXISTS business_acme;
-        schema_name = f"business_{business_id}" # Or derive from a mapping, lookup service, etc.
+    search_path_schemas = [
+        CATALOG_SCHEMA,    # For shared catalog-related tables
+        BUSINESS_SCHEMA, # For shared business-operation related tables
+        "public"           # Standard public schema, always include
+    ]
+    # Filter out any None or empty schema names that might result if env vars are missing and defaults are None.
+    # However, CATALOG_SCHEMA and BUSINESS_SCHEMA have defaults, so they should always be strings.
+    valid_schemas = [s for s in search_path_schemas if s and s.strip()]
 
-        try:
-            # Set the session's search_path for PostgreSQL. This command dictates the default schema
-            # where tables will be looked for (and created if not schema-qualified) for the
-            # duration of the current session/transaction.
-            # The tenant's specific schema (`schema_name`) is placed first in the search path.
-            # `public` is often included for access to standard PostgreSQL functions or extensions.
-            # Shared schemas like `CATALOG_SCHEMA` or `BUSINESS_SCHEMA` (loaded from env vars)
-            # could also be included in the search_path if they contain shared tables or functions
-            # that need to be accessible without schema qualification:
-            # e.g., session.execute(text(f"SET search_path TO {schema_name}, {CATALOG_SCHEMA}, {BUSINESS_SCHEMA}, public;"))
-            # For this example, we'll stick to the tenant-specific schema and public.
+    if not valid_schemas:
+        logger.error("No valid schemas found for search_path. Check CATALOG_SERVICE_SCHEMA and BUSINESS_SERVICE_SCHEMA environment variables.")
+        # Depending on strictness, could raise an error or default to just "public".
+        # For now, we'll proceed, and it might default to a minimal search_path if execute fails or is skipped.
+        # It's better to ensure valid_schemas is never empty by having robust defaults or checks.
+        # Let's ensure public is always there at least.
+        valid_schemas = ["public"] if not valid_schemas else valid_schemas
 
-            session.execute(text(f"SET search_path TO {schema_name}, public;"))
-            logger.info(f"Successfully set search_path to '{schema_name}, public' for session of business_id {business_id}.")
 
-            # Note on ORM table definitions:
-            # If ORM models (e.g., in app/db/models.py) explicitly define their schema
-            # (e.g., `__table_args__ = {"schema": "some_fixed_schema"}`), that explicit schema
-            # takes precedence over the search_path for those specific tables.
-            # The search_path is primarily for unqualified table names in queries or for default
-            # placement of new tables if schemas are not specified in ORM/SQL.
-        except Exception as e:
-            logger.error(f"Failed to set search_path to '{schema_name}' for business_id {business_id}: {e}", exc_info=True)
-            session.rollback()
-            raise
+    search_path_sql = f"SET search_path TO {', '.join(valid_schemas)};"
 
-    # Other strategies for multi-tenancy include:
+    try:
+        session.execute(text(search_path_sql))
+        logger.info(f"Successfully set search_path to '{', '.join(valid_schemas)}' for session. Business_id context: {business_id}.")
+    except Exception as e:
+        logger.error(f"Failed to set search_path to '{', '.join(valid_schemas)}' for business_id {business_id}: {e}", exc_info=True)
+        session.rollback()
+        raise # Re-raise to indicate session setup failure
+
+    # Note: Data isolation is now primarily the responsibility of queries using
+    # `WHERE business_id = :current_business_id` on tables within these shared schemas.
+    # The ORM models should all include a `business_id` column for this purpose.
+    # Row-Level Security (RLS) in PostgreSQL could also be used in conjunction with this
+    # to enforce this filtering at the database level automatically.
+
+    return session
     # 1. Row-Level Security (RLS):
     #    - Supported by some databases (e.g., PostgreSQL, SQL Server).
     #    - Data for all tenants is in shared tables, but policies filter rows based on the
