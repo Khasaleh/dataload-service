@@ -409,3 +409,33 @@ def process_product_prices_file(business_id: str, session_id: str, wasabi_file_p
 @shared_task(name="process_meta_tags_file")
 def process_meta_tags_file(business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
     return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, "product_name", "meta", "meta_tags")
+
+@shared_task(name="process_categories_file")
+def process_categories_file(business_id: int, session_id: str, wasabi_file_path: str, original_filename: str): # business_id type hint updated
+    """
+    Celery task to process a CSV file containing category data.
+    It calls the generic process_csv_task with parameters specific to categories.
+    """
+    logger.info(f"Category file processing task started for session: {session_id}, file: {original_filename}, business_id: {business_id}")
+    return process_csv_task(
+        business_id=business_id,
+        session_id=session_id,
+        wasabi_file_path=wasabi_file_path,
+        original_filename=original_filename,
+        record_key="category_path",  # The unique key field in the Category CSV (e.g., "L1/L2/L3")
+        id_prefix="cat",             # Prefix for any generated string IDs (if still used)
+        map_type="categories"        # The type of entity being processed, matches Pydantic model and ORM map
+    )
+
+
+# This map is imported by other modules (e.g., graphql_mutations) to dispatch tasks.
+CELERY_TASK_MAP = {
+    "brands": process_brands_file,
+    "attributes": process_attributes_file,
+    "return_policies": process_return_policies_file,
+    "products": process_products_file,
+    "product_items": process_product_items_file,
+    "product_prices": process_product_prices_file,
+    "meta_tags": process_meta_tags_file,
+    "categories": process_categories_file,  # New entry
+}
