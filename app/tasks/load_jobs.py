@@ -58,7 +58,9 @@ def get_from_id_map(session_id: str, map_type: str, key: str, pipeline=None):
 # Generic task processor
 
 # from app.db.models import UploadSessionOrm # Already imported with other ORM models
+from app.db.models import CategoryOrm # Explicit import for categories case
 # from app.db.connection import get_session as get_db_session_sync # Already imported as get_session
+from app.services.db_loaders import load_category_to_db # Import the new loader
 
 # Function to update session status in DB
 def _update_session_status(
@@ -155,157 +157,62 @@ def process_csv_task(business_id, session_id, wasabi_file_path, original_filenam
 
         db_engine_session = get_session(business_id)
 
-        # Pipeline for original string-to-string ID mapping (if still needed)
-        # For now, this part is kept, but its utility might diminish.
-        # It is used for the `generated_id` which is not directly a DB field.
         string_id_redis_pipeline = redis_client.pipeline() if redis_client else None
-
-        # Pipeline for CSV_key-to-DB_PK mapping
         db_pk_redis_pipeline = redis_client.pipeline() if redis_client else None
 
-        processed_count = 0
+        processed_csv_records_count = 0 # Counts records from validated_records loop
+        processed_db_count = 0 # Counts records successfully upserted to DB by a loader
         db_error_count = 0
-        fk_resolution_errors = []
+        # fk_resolution_errors list is not used here anymore, errors are logged by loaders
 
-        # --- Database Interaction Loop ---
+        # --- Dispatch to Specific DB Loader Loop ---
         for i, record_data in enumerate(validated_records):
-            csv_row_number = i + 1 # For logging/error reporting
-            orm_instance = None
+            csv_row_number = i + 1
             db_pk = None
 
-            # Get the main unique key from the CSV record (e.g., brand_name, product_name, variant_sku)
-            csv_unique_key_value = record_data.get(record_key)
-            if not csv_unique_key_value:
-                logger.warning(f"Row {csv_row_number}: Missing record_key '{record_key}' in validated data: {record_data}. Skipping.")
-                fk_resolution_errors.append({"row": csv_row_number, "error": f"Missing record_key '{record_key}'."})
+            if map_type == "categories":
+                try:
+                    # business_id is already an int from the Celery task signature
+                    db_pk = load_category_to_db(
+                        db_session=db_engine_session,
+                        business_details_id=business_id,
+                        record_data=record_data,
+                        session_id=session_id,
+                        db_pk_redis_pipeline=db_pk_redis_pipeline # Pass the pipeline here
+                    )
+                except Exception as e_loader:
+                    logger.error(f"Row {csv_row_number}: Error calling load_category_to_db for record {record_data.get(record_key, 'N/A')}: {e_loader}", exc_info=True)
+                    db_pk = None # Ensure db_pk is None on loader exception
+
+            # TODO: Add elif blocks for other map_types (brands, products, etc.)
+            # when their specific loader functions (e.g., load_brand_to_db) are implemented.
+            # elif map_type == "brands":
+            #     db_pk = load_brand_to_db(...)
+            #     if db_pk is None: logger.error(...) ; db_error_count +=1
+
+            else:
+                # For map_types without a specific loader yet, we skip specific DB interaction.
+                # The old generic DB logic has been removed.
+                # We preserve the original string ID mapping for these types if validate_csv or
+                # other parts of the system might still rely on it for non-DB-PK based relations.
+                logger.info(f"Row {csv_row_number}: No specific DB loader implemented for map_type: '{map_type}'. Skipping DB upsert via loader for record: {record_data.get(record_key, 'N/A')}")
+
+                if string_id_redis_pipeline and record_key and id_prefix:
+                    csv_unique_key_value = record_data.get(record_key)
+                    if csv_unique_key_value:
+                        generated_id_for_string_map = f"{id_prefix}:{str(csv_unique_key_value).lower().replace(' ', '_')}"
+                        add_to_id_map(session_id, map_type, csv_unique_key_value, generated_id_for_string_map, pipeline=string_id_redis_pipeline)
+
+            # Check if the loader specific to the map_type failed
+            if map_type in ["categories"] and db_pk is None: # Add other handled map_types here
+                logger.error(f"Row {csv_row_number}: DB loader for '{map_type}' failed for record: {record_data.get(record_key, 'N/A')}. Incrementing db_error_count.")
                 db_error_count += 1
-                continue
 
-            # Convert Pydantic dict (record_data) to a dict suitable for ORM, resolving FKs
-            orm_data = {"business_id": business_id}
-            skip_this_record = False
+            if db_pk is not None: # If DB processing by a loader was successful
+                 processed_db_count +=1
 
-            if map_type == "brands":
-                orm_data.update({k: v for k, v in record_data.items() if k in BrandOrm.__table__.columns})
-                orm_instance = db_engine_session.query(BrandOrm).filter_by(
-                    business_id=business_id, brand_name=record_data['brand_name']
-                ).first()
-
-            elif map_type == "attributes":
-                orm_data.update({k: v for k, v in record_data.items() if k in AttributeOrm.__table__.columns})
-                orm_instance = db_engine_session.query(AttributeOrm).filter_by(
-                    business_id=business_id, attribute_name=record_data['attribute_name']
-                ).first()
-
-            elif map_type == "return_policies":
-                orm_data.update({k: v for k, v in record_data.items() if k in ReturnPolicyOrm.__table__.columns})
-                orm_instance = db_engine_session.query(ReturnPolicyOrm).filter_by(
-                    business_id=business_id, return_policy_code=record_data['return_policy_code']
-                ).first()
-
-            elif map_type == "products":
-                brand_name_csv = record_data.get('brand_name')
-                brand_db_id = get_from_id_map(session_id, f"brands{db_pk_map_suffix}", brand_name_csv, pipeline=None) # Use direct client for immediate read
-                rp_code_csv = record_data.get('return_policy_code')
-                rp_db_id = get_from_id_map(session_id, f"return_policies{db_pk_map_suffix}", rp_code_csv, pipeline=None)
-
-                if not brand_db_id or not rp_db_id:
-                    logger.error(f"Row {csv_row_number} (Product: {record_data.get('product_name')}): Could not resolve FKs. Brand '{brand_name_csv}': {brand_db_id}, Policy '{rp_code_csv}': {rp_db_id}")
-                    fk_resolution_errors.append({"row": csv_row_number, "product_name": record_data.get('product_name'), "error": "FK resolution failed.", "missing_brand_id": not brand_db_id, "missing_policy_id": not rp_db_id})
-                    db_error_count += 1
-                    continue # Skip this record
-
-                orm_data.update({k: v for k, v in record_data.items() if k in ProductOrm.__table__.columns and k not in ['brand_name', 'return_policy_code']})
-                orm_data.update({"brand_id": int(brand_db_id), "return_policy_id": int(rp_db_id)})
-                orm_instance = db_engine_session.query(ProductOrm).filter_by(
-                    business_id=business_id, product_name=record_data['product_name']
-                ).first()
-
-            elif map_type == "product_items":
-                product_name_csv = record_data.get('product_name')
-                product_db_id = get_from_id_map(session_id, f"products{db_pk_map_suffix}", product_name_csv, pipeline=None)
-                if not product_db_id:
-                    logger.error(f"Row {csv_row_number} (Item SKU: {record_data.get('variant_sku')}): Could not resolve product_db_id for product '{product_name_csv}'.")
-                    fk_resolution_errors.append({"row": csv_row_number, "variant_sku": record_data.get('variant_sku'), "error": "Product FK resolution failed."})
-                    db_error_count += 1
-                    continue
-                orm_data.update({k: v for k, v in record_data.items() if k in ProductItemOrm.__table__.columns and k != 'product_name'})
-                orm_data["product_id"] = int(product_db_id)
-                orm_instance = db_engine_session.query(ProductItemOrm).filter_by(
-                    business_id=business_id, variant_sku=record_data['variant_sku']
-                ).first()
-
-            elif map_type == "product_prices":
-                product_name_csv = record_data.get('product_name')
-                product_db_id = get_from_id_map(session_id, f"products{db_pk_map_suffix}", product_name_csv, pipeline=None)
-                if not product_db_id:
-                    logger.error(f"Row {csv_row_number} (Price for Product: {product_name_csv}): Could not resolve product_db_id.")
-                    fk_resolution_errors.append({"row": csv_row_number, "product_name": product_name_csv, "error": "Product FK for price resolution failed."})
-                    db_error_count += 1
-                    continue
-                orm_data.update({k: v for k, v in record_data.items() if k in ProductPriceOrm.__table__.columns and k != 'product_name'})
-                orm_data["product_id"] = int(product_db_id)
-                # Assuming one price per product, so product_id is unique key for lookup here
-                orm_instance = db_engine_session.query(ProductPriceOrm).filter_by(
-                    business_id=business_id, product_id=int(product_db_id)
-                ).first()
-
-            elif map_type == "meta_tags":
-                product_name_csv = record_data.get('product_name')
-                product_db_id = get_from_id_map(session_id, f"products{db_pk_map_suffix}", product_name_csv, pipeline=None)
-                if not product_db_id:
-                    logger.error(f"Row {csv_row_number} (Meta for Product: {product_name_csv}): Could not resolve product_db_id.")
-                    fk_resolution_errors.append({"row": csv_row_number, "product_name": product_name_csv, "error": "Product FK for meta tags resolution failed."})
-                    db_error_count += 1
-                    continue
-                orm_data.update({k: v for k, v in record_data.items() if k in MetaTagOrm.__table__.columns and k != 'product_name'})
-                orm_data["product_id"] = int(product_db_id)
-                orm_instance = db_engine_session.query(MetaTagOrm).filter_by(
-                    business_id=business_id, product_id=int(product_db_id)
-                ).first()
-
-            # Create or Update
-            if orm_instance: # Update existing
-                for key, value in orm_data.items():
-                    setattr(orm_instance, key, value)
-                db_pk = orm_instance.id # Already has an ID
-            else: # Create new
-                # Dynamically select ORM class - this could be cleaner with a map
-                orm_class_map = {
-                    "brands": BrandOrm, "attributes": AttributeOrm, "return_policies": ReturnPolicyOrm,
-                    "products": ProductOrm, "product_items": ProductItemOrm,
-                    "product_prices": ProductPriceOrm, "meta_tags": MetaTagOrm
-                }
-                OrmClass = orm_class_map.get(map_type)
-                if OrmClass:
-                    orm_instance = OrmClass(**orm_data)
-                    db_engine_session.add(orm_instance)
-                    try:
-                        db_engine_session.flush() # Flush to get the new ID for db_pk mapping
-                        db_pk = orm_instance.id
-                    except Exception as flush_exc: # Catch IntegrityError, etc.
-                        logger.error(f"Row {csv_row_number}: DB flush error for {csv_unique_key_value}: {flush_exc}")
-                        db_engine_session.rollback() # Rollback this specific flush
-                        fk_resolution_errors.append({"row": csv_row_number, "key": csv_unique_key_value, "error": f"DB flush error: {str(flush_exc)}"})
-                        db_error_count +=1
-                        continue # Skip to next record
-                else:
-                    logger.error(f"Row {csv_row_number}: Unknown map_type '{map_type}' for ORM class mapping. Skipping.")
-                    fk_resolution_errors.append({"row": csv_row_number, "error": f"Unknown map_type '{map_type}'."})
-                    db_error_count += 1
-                    continue
-
-            if db_pk is not None and db_pk_redis_pipeline:
-                # Store CSV key -> DB PK mapping
-                add_to_id_map(session_id, f"{map_type}{db_pk_map_suffix}", csv_unique_key_value, db_pk, pipeline=db_pk_redis_pipeline)
-
-            # Original string-to-string ID mapping (if still used by some part of validation or cross-referencing)
-            if string_id_redis_pipeline:
-                generated_id = f"{id_prefix}:{csv_unique_key_value.lower().replace(' ', '_')}"
-                add_to_id_map(session_id, map_type, csv_unique_key_value, generated_id, pipeline=string_id_redis_pipeline)
-
-            processed_count += 1
-        # --- End Database Interaction Loop ---
+            processed_csv_records_count += 1
+        # --- End Dispatch to Specific DB Loader Loop ---
 
         if db_error_count > 0:
             logger.warning(f"Session {session_id}: Encountered {db_error_count} errors during DB processing for {map_type}. Rolling back DB changes.")

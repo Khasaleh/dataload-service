@@ -1,0 +1,12 @@
+category_path,name,description,enabled,image_name,long_description,order_type,shipping_type,active,seo_description,seo_keywords,seo_title,url,position_on_site
+Electronics,,All kinds of electronic gadgets,TRUE,,,,,,Electronics Gadgets,electronics,gadgets,Electronics,/electronics,1
+Electronics/Computers,Computers,"Desktops, Laptops, and Components",TRUE,,,,,,Computers and Laptops,computers,laptops,Computer Hardware,/electronics/computers,1
+Electronics/Computers/Laptops,Laptops,"Portable computing devices",TRUE,laptop_generic.jpg,"A wide variety of laptops for all needs.",DEFAULT,STANDARD,TRUE,"Best laptops for sale","laptops, notebooks, ultrabooks","Laptops | Portable Computers","/electronics/computers/laptops",1
+Electronics/Computers/Desktops,Desktops,"Powerful desktop computers",TRUE,desktop_generic.jpg,,,,TRUE,"Powerful Desktops","desktops,workstations","Desktops | Workstations","/electronics/computers/desktops",2
+Electronics/Mobile Phones,Mobile Phones,"Smartphones and accessories",TRUE,,,,,,Mobile Phones,smartphones,cellphones,Mobile Phones,"/electronics/mobile-phones",2
+Apparel,,"Clothing and Fashion",TRUE,,,,,,Clothing,apparel,fashion,Apparel,"/apparel",2
+Apparel/Mens,Mens Apparel,"Clothing for Men",TRUE,,,,,,Mens Clothing,mens apparel,mens fashion,Mens Apparel,"/apparel/mens",1
+Apparel/Mens/Shirts,Mens Shirts,"Casual and Formal Shirts for Men",TRUE,mens_shirt.jpg,,,,TRUE,"Buy Mens Shirts Online","mens shirts, formal shirts, casual shirts","Mens Shirts Online","/apparel/mens/shirts",1
+Books,,"Fiction and Non-fiction books",FALSE,,,,,,Books Catalog,books,reading,Books,"/books",3
+Home Goods,,Products for your home,TRUE,,,,HOME_DELIVERY,STANDARD,TRUE,Home Essentials,home, decor,Home Goods,"/home-goods",4
+Home Goods/Kitchen,Kitchenware,"Cookware, bakeware, and kitchen gadgets.",TRUE,kitchen.jpg,"Everything for your kitchen.",,,TRUE,Kitchen Supplies,kitchen,cookware,Kitchenware,"/home-goods/kitchen",1
