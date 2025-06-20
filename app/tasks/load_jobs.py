@@ -58,9 +58,9 @@ def get_from_id_map(session_id: str, map_type: str, key: str, pipeline=None):
 # Generic task processor
 
 # from app.db.models import UploadSessionOrm # Already imported with other ORM models
-from app.db.models import CategoryOrm # Explicit import for categories case
+from app.db.models import CategoryOrm, AttributeOrm, AttributeValueOrm # Ensure Attribute ORM models are available if needed for context, though not directly used in process_csv_task
 # from app.db.connection import get_session as get_db_session_sync # Already imported as get_session
-from app.services.db_loaders import load_category_to_db, load_brand_to_db # Import the new loaders
+from app.services.db_loaders import load_category_to_db, load_brand_to_db, load_attribute_to_db # Import the new loaders
 
 # Function to update session status in DB
 def _update_session_status(
@@ -197,7 +197,20 @@ def process_csv_task(business_id, session_id, wasabi_file_path, original_filenam
                     logger.error(f"Row {csv_row_number}: Error calling load_brand_to_db for record {record_data.get(record_key, 'N/A')}: {e_loader}", exc_info=True)
                     db_pk = None
 
-            # TODO: Add elif blocks for other map_types (products, attributes, etc.)
+            elif map_type == "attributes":
+                try:
+                    db_pk = load_attribute_to_db(
+                        db_session=db_engine_session,
+                        business_details_id=business_id,
+                        record_data=record_data,
+                        session_id=session_id,
+                        db_pk_redis_pipeline=db_pk_redis_pipeline
+                    )
+                except Exception as e_loader:
+                    logger.error(f"Row {csv_row_number}: Error calling load_attribute_to_db for record {record_data.get(record_key, 'N/A')}: {e_loader}", exc_info=True)
+                    db_pk = None
+
+            # TODO: Add elif blocks for other map_types (products, etc.)
             # when their specific loader functions are implemented.
 
             else:
@@ -214,7 +227,7 @@ def process_csv_task(business_id, session_id, wasabi_file_path, original_filenam
                         add_to_id_map(session_id, map_type, csv_unique_key_value, generated_id_for_string_map, pipeline=string_id_redis_pipeline)
 
             # Check if the loader specific to the map_type failed
-            if map_type in ["categories", "brands"] and db_pk is None: # Add "brands" here
+            if map_type in ["categories", "brands", "attributes"] and db_pk is None: # Add "attributes" here
                 logger.error(f"Row {csv_row_number}: DB loader for '{map_type}' failed for record: {record_data.get(record_key, 'N/A')}. Incrementing db_error_count.")
                 db_error_count += 1
 
@@ -312,8 +325,16 @@ def process_brands_file(business_id: int, session_id: str, wasabi_file_path: str
     )
 
 @shared_task(name="process_attributes_file")
-def process_attributes_file(business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, "attribute_name", "attr", "attributes")
+def process_attributes_file(business_id: int, session_id: str, wasabi_file_path: str, original_filename: str): # business_id type hint updated
+    return process_csv_task(
+        business_id=business_id,
+        session_id=session_id,
+        wasabi_file_path=wasabi_file_path,
+        original_filename=original_filename,
+        record_key="attribute_name", # This is the key in AttributeCsvModel
+        id_prefix="attr",
+        map_type="attributes"
+    )
 
 @shared_task(name="process_return_policies_file")
 def process_return_policies_file(business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
