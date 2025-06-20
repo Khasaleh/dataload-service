@@ -16,9 +16,10 @@ from sqlalchemy.orm import Session
 # Import ORM models as they are needed by specific loader functions.
 # Example:
 from app.db.models import (
-    CategoryOrm, # Added CategoryOrm
-#     BrandOrm, ProductOrm, AttributeOrm, ReturnPolicyOrm,
-#     ProductItemOrm, ProductPriceOrm, MetaTagOrm
+    CategoryOrm,
+    BrandOrm, # Added BrandOrm
+    # ProductOrm, AttributeOrm, ReturnPolicyOrm,
+    # ProductItemOrm, ProductPriceOrm, MetaTagOrm
 )
 # from sqlalchemy.exc import SQLAlchemyError # For more specific DB error handling if needed
 
@@ -238,14 +239,105 @@ def load_category_to_db(
         # Do not rollback here; let the caller manage the transaction for the whole file.
         return None
 
-# def load_brand_to_db(
-#     db_session: Session,
-#     business_details_id: int,
-#     record_data: Dict[str, Any],
-#     session_id: str
-# ) -> Optional[int]:
-#     logger.debug(f"Placeholder: load_brand_to_db called with data: {record_data}")
-#     pass # To be implemented
+def load_brand_to_db(
+    db_session: Session,
+    business_details_id: int,
+    record_data: Dict[str, Any], # Dict from BrandCsvModel
+    session_id: str,
+    db_pk_redis_pipeline: Any # Redis pipeline object
+) -> Optional[int]:
+    """
+    Loads or updates a single brand record in the database.
+    Manages mapping of brand name to DB PK in Redis for the current session.
+
+    Args:
+        db_session: SQLAlchemy session.
+        business_details_id: The integer ID for the business.
+        record_data: A dictionary representing a row from the brand CSV,
+                     validated by BrandCsvModel. Expected to have 'name', 'logo',
+                     and other brand-specific fields.
+        session_id: The current upload session ID.
+        db_pk_redis_pipeline: The Redis pipeline for storing _db_pk mappings.
+
+    Returns:
+        The database primary key (integer / bigint) of the processed brand,
+        or None if processing failed for this record.
+    """
+    brand_name_from_csv = record_data.get("name")
+    if not brand_name_from_csv:
+        logger.error(f"Missing 'name' (brand name) in record_data for business {business_details_id}, session {session_id}. Record: {record_data}")
+        return None
+
+    brand_db_id: Optional[int] = None
+
+    try:
+        # Check if brand already exists for this business
+        db_brand = db_session.query(BrandOrm).filter_by(
+            business_details_id=business_details_id,
+            name=brand_name_from_csv
+        ).first()
+
+        if db_brand:  # Existing brand, update it
+            logger.info(f"Updating existing brand '{brand_name_from_csv}' (ID: {db_brand.id}) for business {business_details_id}")
+            db_brand.logo = record_data.get("logo", db_brand.logo) # Keep old if CSV doesn't provide new
+            db_brand.supplier_id = record_data.get("supplier_id", db_brand.supplier_id)
+            db_brand.active = record_data.get("active", db_brand.active)
+
+            # Handle BigInt audit dates: only update if provided in CSV
+            # These are BigInt in ORM, matching DDL. Pydantic model provides them as Optional[int].
+            if record_data.get("created_by") is not None:
+                db_brand.created_by = record_data.get("created_by")
+            if record_data.get("created_date") is not None:
+                db_brand.created_date = record_data.get("created_date")
+            if record_data.get("updated_by") is not None:
+                db_brand.updated_by = record_data.get("updated_by")
+            if record_data.get("updated_date") is not None:
+                db_brand.updated_date = record_data.get("updated_date")
+
+            brand_db_id = db_brand.id
+        else:  # New brand, create it
+            logger.info(f"Creating new brand '{brand_name_from_csv}' for business {business_details_id}")
+
+            orm_data = {
+                "business_details_id": business_details_id,
+                "name": brand_name_from_csv,
+                "logo": record_data.get("logo"), # Mandatory in BrandCsvModel
+                "supplier_id": record_data.get("supplier_id"),
+                "active": record_data.get("active"),
+                "created_by": record_data.get("created_by"),
+                "created_date": record_data.get("created_date"),
+                "updated_by": record_data.get("updated_by"),
+                "updated_date": record_data.get("updated_date"),
+            }
+
+            new_brand_orm = BrandOrm(**orm_data)
+            db_session.add(new_brand_orm)
+            db_session.flush()  # To get the new_brand_orm.id
+
+            if new_brand_orm.id is None:
+                logger.error(f"Failed to obtain DB ID for new brand '{brand_name_from_csv}' after flush.")
+                raise Exception(f"DB flush failed to return an ID for new brand '{brand_name_from_csv}'.")
+            brand_db_id = new_brand_orm.id
+            logger.info(f"Created new brand '{brand_name_from_csv}' with DB ID {brand_db_id}")
+
+        # Store/Update mapping of brand_name_from_csv -> brand_db_id in Redis for this session
+        if brand_db_id is not None: # Should always be true if no exception before this
+            if db_pk_redis_pipeline is not None:
+                add_to_id_map(
+                    session_id,
+                    f"brands{DB_PK_MAP_SUFFIX}",
+                    brand_name_from_csv,
+                    brand_db_id,
+                    pipeline=db_pk_redis_pipeline
+                )
+            else: # Fallback, though pipeline is expected from process_csv_task
+                add_to_id_map(session_id, f"brands{DB_PK_MAP_SUFFIX}", brand_name_from_csv, brand_db_id)
+
+        return brand_db_id
+
+    except Exception as e:
+        logger.error(f"Error processing brand record '{brand_name_from_csv}' for business {business_details_id}: {e}", exc_info=True)
+        return None
 
 # ... other loader functions for products, attributes, etc. ...
 ```

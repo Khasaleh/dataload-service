@@ -60,7 +60,7 @@ def get_from_id_map(session_id: str, map_type: str, key: str, pipeline=None):
 # from app.db.models import UploadSessionOrm # Already imported with other ORM models
 from app.db.models import CategoryOrm # Explicit import for categories case
 # from app.db.connection import get_session as get_db_session_sync # Already imported as get_session
-from app.services.db_loaders import load_category_to_db # Import the new loader
+from app.services.db_loaders import load_category_to_db, load_brand_to_db # Import the new loaders
 
 # Function to update session status in DB
 def _update_session_status(
@@ -184,11 +184,21 @@ def process_csv_task(business_id, session_id, wasabi_file_path, original_filenam
                     logger.error(f"Row {csv_row_number}: Error calling load_category_to_db for record {record_data.get(record_key, 'N/A')}: {e_loader}", exc_info=True)
                     db_pk = None # Ensure db_pk is None on loader exception
 
-            # TODO: Add elif blocks for other map_types (brands, products, etc.)
-            # when their specific loader functions (e.g., load_brand_to_db) are implemented.
-            # elif map_type == "brands":
-            #     db_pk = load_brand_to_db(...)
-            #     if db_pk is None: logger.error(...) ; db_error_count +=1
+            elif map_type == "brands":
+                try:
+                    db_pk = load_brand_to_db(
+                        db_session=db_engine_session,
+                        business_details_id=business_id,
+                        record_data=record_data,
+                        session_id=session_id,
+                        db_pk_redis_pipeline=db_pk_redis_pipeline
+                    )
+                except Exception as e_loader:
+                    logger.error(f"Row {csv_row_number}: Error calling load_brand_to_db for record {record_data.get(record_key, 'N/A')}: {e_loader}", exc_info=True)
+                    db_pk = None
+
+            # TODO: Add elif blocks for other map_types (products, attributes, etc.)
+            # when their specific loader functions are implemented.
 
             else:
                 # For map_types without a specific loader yet, we skip specific DB interaction.
@@ -204,7 +214,7 @@ def process_csv_task(business_id, session_id, wasabi_file_path, original_filenam
                         add_to_id_map(session_id, map_type, csv_unique_key_value, generated_id_for_string_map, pipeline=string_id_redis_pipeline)
 
             # Check if the loader specific to the map_type failed
-            if map_type in ["categories"] and db_pk is None: # Add other handled map_types here
+            if map_type in ["categories", "brands"] and db_pk is None: # Add "brands" here
                 logger.error(f"Row {csv_row_number}: DB loader for '{map_type}' failed for record: {record_data.get(record_key, 'N/A')}. Incrementing db_error_count.")
                 db_error_count += 1
 
@@ -290,8 +300,16 @@ def process_csv_task(business_id, session_id, wasabi_file_path, original_filenam
 # For example, for 'brands', record_key is 'brand_name'. For 'products', it's 'product_name'.
 
 @shared_task(name="process_brands_file")
-def process_brands_file(business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, "brand_name", "brand", "brands")
+def process_brands_file(business_id: int, session_id: str, wasabi_file_path: str, original_filename: str): # business_id type hint updated
+    return process_csv_task(
+        business_id=business_id,
+        session_id=session_id,
+        wasabi_file_path=wasabi_file_path,
+        original_filename=original_filename,
+        record_key="name",  # Changed from "brand_name" to "name"
+        id_prefix="brand",
+        map_type="brands"
+    )
 
 @shared_task(name="process_attributes_file")
 def process_attributes_file(business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
