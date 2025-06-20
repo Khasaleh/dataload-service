@@ -5,11 +5,12 @@ import os
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/token")
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-default-secret-key-if-not-set")
+# Load JWT settings from environment variables with defaults (though defaults for secrets are not ideal for prod)
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-default-secret-key-if-not-set") # Keep a default for local dev if needed, but ensure it's strong or overridden
 ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 
 if SECRET_KEY == "your-default-secret-key-if-not-set":
-    print("WARNING (auth.py): Using default JWT_SECRET_KEY. This should be set via an environment variable for production.")
+    print("WARNING: Using default JWT_SECRET_KEY. This should be set via an environment variable for production.")
 
 def get_current_user(token: str = Depends(oauth2_scheme)):
     try:
