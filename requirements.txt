@@ -6,10 +6,8 @@ celery
 redis
 sqlalchemy
 python-jose
-boto3
 python-jose[cryptography]
 passlib
-celery
-redis
-fastapi
 uvicorn
+boto3
+python-dotenv
