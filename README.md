@@ -62,24 +62,42 @@ Do **not** deploy `.env` files to these environments. The `.env.example` file ca
 4.  **Database Setup & Migrations**:
     This application uses SQLAlchemy for database interaction and Alembic for managing schema migrations.
 
-    *   **Ensure your database instance is running** and accessible with the credentials you provided in your `.env` file.
-    *   You may need to **create the database** (e.g., `your_db_name`) manually if it doesn't exist yet. For PostgreSQL, you can use a command like:
+    *   **Ensure your database instance is running** and accessible with the credentials provided in your `.env` file. You will need to create the main database (e.g., `your_db_name` from `.env`) if it doesn't exist:
         ```sql
-        -- Connect to your PostgreSQL server as a superuser (e.g., postgres)
-        CREATE DATABASE your_db_name_here;
+        -- Example for PostgreSQL:
+        CREATE DATABASE your_db_name;
         ```
-    *   **Apply database migrations**: To create all tables and bring your database schema to the latest version, run:
-        ```bash
-        alembic upgrade head
-        ```
-        This command reads the database connection URL from your environment variables (as configured in `alembic/env.py`) and applies all pending migration scripts found in `alembic/versions/`.
 
-    *   **Creating New Migrations (for developers)**: If you modify the SQLAlchemy ORM models in `app/db/models.py` (e.g., add a new table or column), you will need to generate a new migration script:
+    *   **Multi-Tenant Schema Setup (Schema-per-Tenant)**:
+        This application is designed for multi-tenancy using a schema-per-tenant strategy (when using PostgreSQL, as configured in `app/db/connection.py`). This means data for each business (`business_id`) is stored in its own dedicated schema within the main database.
+        *   The convention used is `business_<business_id>` (e.g., `business_acme` for `business_id="acme"`).
+        *   **You must create these tenant-specific schemas manually in your database before you can apply migrations to them or load data for that tenant.**
+            ```sql
+            -- Example for PostgreSQL to create a schema for business_id 'acme':
+            CREATE SCHEMA IF NOT EXISTS business_acme;
+            ```
+        *   Repeat this for each `business_id` you plan to use during development or testing. The application's runtime (`app/db/connection.py`) will attempt to set the `search_path` to this schema for relevant database sessions.
+
+    *   **Apply Database Migrations**: Alembic is used to manage database schema versions. To apply migrations to a specific tenant schema (after creating it):
+        *   You'll need to ensure your database session for running Alembic targets the correct schema. One common way for local development is to connect to your database using a tool like `psql` or a GUI client, set the `search_path` for your session, and then run Alembic commands in a separate terminal where Alembic will use the default database connection (which should now resolve to the correct schema due to your session's `search_path`).
+            ```sql
+            -- In your SQL client, connected to your main database (DB_NAME):
+            SET search_path TO business_yourbusinessid, public;
+            ```
+        *   Alternatively, for more robust control, especially in scripts or automated environments, you can adapt `alembic/env.py` to accept a schema parameter (e.g., via `-x` option in Alembic CLI) and set the `search_path` or `version_table_schema` within `env.py` before migrations run.
+        *   Once targeting the desired schema, run:
+            ```bash
+            alembic upgrade head
+            ```
+        This will create all necessary tables (brands, products, etc.) inside that tenant's schema. Repeat this process for each tenant schema.
+        *(For advanced multi-tenant migration strategies with Alembic, refer to Alembic documentation on handling multiple schemas or programmable migration environments.)*
+
+    *   **Creating New Migrations (for developers)**: If you modify the SQLAlchemy ORM models in `app/db/models.py`, you'll need to generate a new migration script:
         ```bash
         # Ensure your virtual environment is active
         alembic revision -m "short_description_of_your_model_changes" --autogenerate
         ```
-        After generation, **always review and edit** the script created in the `alembic/versions/` directory to ensure it accurately reflects the intended changes before applying it with `alembic upgrade head`.
+        After generation, **always review and edit** the script created in the `alembic/versions/` directory to ensure it accurately reflects the intended changes. This script will then need to be applied to each tenant schema using the `alembic upgrade head` command as described above.
 
 5.  **Running the Application**:
 

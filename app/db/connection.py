@@ -6,17 +6,24 @@ import logging
 logger = logging.getLogger(__name__)
 
 # --- Database Configuration from Environment Variables ---
-# These variables define the connection to the primary/default database.
-# Individual tenant databases might use different credentials or hosts if using a strict database-per-tenant model,
-# which would require a more complex configuration management system (e.g., a service or a secure vault).
-# For the "shared_database_with_schema_switching" strategy, these define the shared database connection.
+# These variables define the connection to the primary/default database (specified by DB_NAME).
+# This database acts as the entry point and may contain multiple schemas for different tenants
+# if using a schema-per-tenant strategy.
+#
+# - DB_DRIVER: SQLAlchemy driver string (e.g., "postgresql+psycopg2", "mysql+mysqlconnector").
+# - DB_USER: Username for database connection.
+# - DB_PASSWORD: Password for database connection.
+# - DB_HOST: Hostname or IP address of the database server.
+# - DB_PORT: Port number for the database server (e.g., "5432" for PostgreSQL).
+# - DB_NAME: The name of the specific database to connect to on the server. This database
+#            will contain the various schemas (public, tenant-specific, shared service schemas).
 
-DB_DRIVER = os.getenv("DB_DRIVER", "postgresql+psycopg2") # Example: "postgresql+psycopg2" or "mysql+mysqlconnector"
+DB_DRIVER = os.getenv("DB_DRIVER", "postgresql+psycopg2")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT", "5432") # Default PostgreSQL port
-DB_NAME = os.getenv("DB_NAME")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME") # The main database name
 
 # Schema configurations (can be used for table definitions or search_path modifications)
 CATALOG_SCHEMA = os.getenv("CATALOG_SERVICE_SCHEMA", "catalog") # Example default schema name
@@ -75,6 +82,16 @@ def get_session(business_id: str):
     This function demonstrates how different multi-tenancy strategies could be initiated.
     The actual implementation details would depend heavily on the chosen ORM, database,
     and overall architecture.
+
+    Note on Database Migrations (Alembic) for Multi-Tenancy:
+    - If using a schema-per-tenant strategy (like 'shared_database_with_schema_switching' below),
+      Alembic migrations (managed in the `alembic/` directory) need to be applied to EACH
+      tenant-specific schema to create and maintain its table structures. This typically involves
+      scripting Alembic runs or using advanced Alembic features for multi-tenancy, possibly
+      by adapting `alembic/env.py` to iterate over known tenant schemas or by running
+      `alembic upgrade head --x-arg tenant_schema=business_xyz` and using that arg in `env.py`.
+    - Shared tables (e.g., in 'public' or `CATALOG_SCHEMA`, `BUSINESS_SCHEMA`) are typically
+      migrated once per database.
     """
 
     # For this example, we'll assume a 'shared_database_with_schema_switching' strategy
@@ -96,26 +113,37 @@ def get_session(business_id: str):
     # This ensures that SQL queries operate on the correct tenant's data.
 
     if tenant_strategy == "shared_database_with_schema_switching":
-        # This is a common approach for PostgreSQL.
-        # Other databases might have different commands or mechanisms.
+        # This is a common approach for PostgreSQL for isolating tenant data within a shared database.
+        # Other databases might use different commands (e.g., `USE database_name; SET schema = schema_name;` or similar).
+
+        # Defines the schema name for this tenant. For example, if business_id is "acme",
+        # this will attempt to use a schema named "business_acme".
+        # IMPORTANT: These tenant-specific schemas (e.g., "business_acme") MUST be manually
+        # created in your PostgreSQL database (the one defined by DB_NAME) before they can be used.
+        # Example SQL: CREATE SCHEMA IF NOT EXISTS business_acme;
         schema_name = f"business_{business_id}" # Or derive from a mapping, lookup service, etc.
 
         try:
-            # Example for PostgreSQL: Set the session's search_path.
-            # This tells PostgreSQL which schemas to look in, in order for unqualified table names.
-            # The tenant's specific schema (`schema_name`) is first.
-            # `public` is often included for standard functions or extensions.
-            # `CATALOG_SCHEMA` and `BUSINESS_SCHEMA` (loaded from env vars) could be added if they
-            # contain shared tables or functions relevant across tenants, e.g.:
-            # session.execute(text(f"SET search_path TO {schema_name}, {CATALOG_SCHEMA}, {BUSINESS_SCHEMA}, public;"))
-            # For this example, we'll just show the tenant-specific and public.
+            # Set the session's search_path for PostgreSQL. This command dictates the default schema
+            # where tables will be looked for (and created if not schema-qualified) for the
+            # duration of the current session/transaction.
+            # The tenant's specific schema (`schema_name`) is placed first in the search path.
+            # `public` is often included for access to standard PostgreSQL functions or extensions.
+            # Shared schemas like `CATALOG_SCHEMA` or `BUSINESS_SCHEMA` (loaded from env vars)
+            # could also be included in the search_path if they contain shared tables or functions
+            # that need to be accessible without schema qualification:
+            # e.g., session.execute(text(f"SET search_path TO {schema_name}, {CATALOG_SCHEMA}, {BUSINESS_SCHEMA}, public;"))
+            # For this example, we'll stick to the tenant-specific schema and public.
+
             session.execute(text(f"SET search_path TO {schema_name}, public;"))
             logger.info(f"Successfully set search_path to '{schema_name}, public' for session of business_id {business_id}.")
-            # If using CATALOG_SCHEMA or BUSINESS_SCHEMA for Table definitions, e.g.,
-            # `class Product(Base): __table_args__ = {'schema': CATALOG_SCHEMA} ...`
-            # then those schemas are directly part of table references and might not need to be
-            # in the search_path unless you also have functions or other objects in them that
-            # are called without schema qualification.
+
+            # Note on ORM table definitions:
+            # If ORM models (e.g., in app/db/models.py) explicitly define their schema
+            # (e.g., `__table_args__ = {"schema": "some_fixed_schema"}`), that explicit schema
+            # takes precedence over the search_path for those specific tables.
+            # The search_path is primarily for unqualified table names in queries or for default
+            # placement of new tables if schemas are not specified in ORM/SQL.
         except Exception as e:
             logger.error(f"Failed to set search_path to '{schema_name}' for business_id {business_id}: {e}", exc_info=True)
             session.rollback()
