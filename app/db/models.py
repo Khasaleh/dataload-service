@@ -108,18 +108,30 @@ class CategoryAttributeOrm(Base):
 
 class BrandOrm(Base):
     __tablename__ = "brands"
-    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    business_details_id = Column(BigInteger, index=True, nullable=False) # Changed
-    brand_name = Column(String, index=True, nullable=False)
 
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True) # Changed to BigInteger
+    business_details_id = Column(BigInteger, index=True, nullable=False) # Confirmed BigInteger
+    name = Column(String(150), index=True, nullable=False) # Changed from brand_name, added length
+
+    logo = Column(String(500), nullable=False) # New field
+    supplier_id = Column(BigInteger, nullable=True) # New field
+    active = Column(String(255), nullable=True) # New field, consider Boolean if values are 'true'/'false'
+
+    # Audit fields as per DDL (BigInteger type)
+    created_by = Column(BigInteger, nullable=True) # New field
+    created_date = Column(BigInteger, nullable=True) # New field
+    updated_by = Column(BigInteger, nullable=True) # New field
+    updated_date = Column(BigInteger, nullable=True) # New field
+
+    # Removing old created_at, updated_at if DDL's created_date/updated_date are the source
+    # created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    # updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
     products = relationship("ProductOrm", back_populates="brand")
 
     __table_args__ = (
-        UniqueConstraint('business_details_id', 'brand_name', name='uq_brand_business_name'),
-        {"schema": CATALOG_SCHEMA} # Assigned schema
+        UniqueConstraint('business_details_id', 'name', name='uq_brand_business_name'), # Updated to 'name'
+        {"schema": CATALOG_SCHEMA}
     )
 
 class AttributeOrm(Base): # General attributes, distinct from CategoryAttributeOrm

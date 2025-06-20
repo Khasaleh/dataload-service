@@ -2,14 +2,27 @@
 from pydantic import BaseModel, Field, validator, constr # Added constr
 from typing import Optional, List # Added List
 
-class BrandModel(BaseModel):
-    brand_name: str
+class BrandCsvModel(BaseModel): # Renamed from BrandModel
+    """Pydantic model for validating a row from a Brand CSV file."""
+    name: constr(strip_whitespace=True, min_length=1) # Was brand_name; this is the key identifier from CSV
+    logo: constr(strip_whitespace=True, min_length=1) # Path or URL to the brand logo; mandatory
 
-    @validator('brand_name')
-    def brand_name_must_not_be_empty(cls, value):
-        if not value.strip():
-            raise ValueError('brand_name must not be empty')
-        return value
+    supplier_id: Optional[int] = None # Pydantic int for DB BigInteger
+    active: Optional[str] = None # e.g., "TRUE", "FALSE", or other status strings, matches DB String(255)
+
+    # Optional audit fields if provided in CSV (DB type is BigInteger)
+    # These are often system-generated, but can be accepted from CSV if needed.
+    created_by: Optional[int] = None
+    created_date: Optional[int] = None # If CSV provides epoch timestamp
+    updated_by: Optional[int] = None
+    updated_date: Optional[int] = None # If CSV provides epoch timestamp
+
+    # Custom validator for 'name' is no longer needed due to constr.
+    # If other specific validations were needed for other fields, they could be added here.
+
+    class Config:
+        anystr_strip_whitespace = True
+        # extra = "forbid" # If no other columns are allowed from CSV
 
 class AttributeModel(BaseModel):
     attribute_name: str

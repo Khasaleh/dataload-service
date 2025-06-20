@@ -32,16 +32,23 @@ def upgrade() -> None:
     # op.execute(f"CREATE SCHEMA IF NOT EXISTS {PUBLIC_SCHEMA}") # Public usually exists
 
     op.create_table('brands',
-        sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column('business_details_id', sa.BigInteger(), nullable=False),
-        sa.Column('brand_name', sa.String(), nullable=False),
-        sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-        sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), onupdate=sa.text('now()'), nullable=False),
+        sa.Column('id', sa.BigInteger(), autoincrement=True, nullable=False), # Changed to BigInteger
+        sa.Column('business_details_id', sa.BigInteger(), nullable=False), # Already BigInteger
+        sa.Column('name', sa.String(length=150), nullable=False), # Renamed from brand_name, added length
+        sa.Column('logo', sa.String(length=500), nullable=False), # New field
+        sa.Column('supplier_id', sa.BigInteger(), nullable=True), # New field
+        sa.Column('active', sa.String(length=255), nullable=True), # New field
+        sa.Column('created_by', sa.BigInteger(), nullable=True), # New field
+        sa.Column('created_date', sa.BigInteger(), nullable=True), # New field
+        sa.Column('updated_by', sa.BigInteger(), nullable=True), # New field
+        sa.Column('updated_date', sa.BigInteger(), nullable=True), # New field
+        # Removed old created_at, updated_at DateTime fields
         sa.PrimaryKeyConstraint('id', name=op.f('pk_brands')),
-        sa.UniqueConstraint('business_details_id', 'brand_name', name=op.f('uq_brand_business_name')),
+        sa.UniqueConstraint('business_details_id', 'name', name=op.f('uq_brand_business_name')), # Updated to 'name'
         schema=CATALOG_SCHEMA
     )
-    op.create_index(op.f('ix_catalog_management_brands_brand_name'), 'brands', ['brand_name'], unique=False, schema=CATALOG_SCHEMA)
+    # op.drop_index(op.f('ix_catalog_management_brands_brand_name'), table_name='brands', schema=CATALOG_SCHEMA) # Drop old index if name changed
+    op.create_index(op.f('ix_catalog_management_brands_name'), 'brands', ['name'], unique=False, schema=CATALOG_SCHEMA) # Index on new 'name' field
     op.create_index(op.f('ix_catalog_management_brands_business_details_id'), 'brands', ['business_details_id'], unique=False, schema=CATALOG_SCHEMA)
 
     op.create_table('attributes',
@@ -270,11 +277,11 @@ def downgrade() -> None:
     op.drop_table('return_policies', schema=BUSINESS_SCHEMA)
 
     op.drop_index(op.f('ix_catalog_management_attributes_business_details_id'), table_name='attributes', schema=CATALOG_SCHEMA)
-    op.create_index(op.f('ix_catalog_management_attributes_attribute_name'), table_name='attributes', schema=CATALOG_SCHEMA) # This was ix_attributes_attribute_name
+    op.drop_index(op.f('ix_catalog_management_attributes_attribute_name'), table_name='attributes', schema=CATALOG_SCHEMA) # Corrected from create_index to drop_index
     op.drop_table('attributes', schema=CATALOG_SCHEMA)
 
     op.drop_index(op.f('ix_catalog_management_brands_business_details_id'), table_name='brands', schema=CATALOG_SCHEMA)
-    op.drop_index(op.f('ix_catalog_management_brands_brand_name'), table_name='brands', schema=CATALOG_SCHEMA)
+    op.drop_index(op.f('ix_catalog_management_brands_name'), table_name='brands', schema=CATALOG_SCHEMA) # Updated from brand_name to name
     op.drop_table('brands', schema=CATALOG_SCHEMA)
     # ### end Alembic commands ###
 ```
