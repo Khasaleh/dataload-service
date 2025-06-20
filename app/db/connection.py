@@ -5,20 +5,44 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# --- Database Connection Strategies for Multi-Tenancy ---
-# The functions below illustrate how database connections and sessions might be managed
-# in a multi-tenant application. The specific strategy depends on the chosen isolation level.
+# --- Database Configuration from Environment Variables ---
+# These variables define the connection to the primary/default database.
+# Individual tenant databases might use different credentials or hosts if using a strict database-per-tenant model,
+# which would require a more complex configuration management system (e.g., a service or a secure vault).
+# For the "shared_database_with_schema_switching" strategy, these define the shared database connection.
 
-# Strategy 1: Database per Tenant (as suggested by the DATABASES dictionary)
-#   - Each tenant has a completely separate database.
-#   - Provides strong data isolation.
-#   - Can be complex to manage many databases.
-#   - The DATABASES dictionary maps a business_id to a specific database URL.
+DB_DRIVER = os.getenv("DB_DRIVER", "postgresql+psycopg2") # Example: "postgresql+psycopg2" or "mysql+mysqlconnector"
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT", "5432") # Default PostgreSQL port
+DB_NAME = os.getenv("DB_NAME")
 
+# Schema configurations (can be used for table definitions or search_path modifications)
+CATALOG_SCHEMA = os.getenv("CATALOG_SERVICE_SCHEMA", "catalog") # Example default schema name
+BUSINESS_SCHEMA = os.getenv("BUSINESS_SERVICE_SCHEMA", "business") # Example default schema name
+
+# Construct the primary DATABASE_URL from component environment variables
+DATABASE_URL = None
+if all([DB_DRIVER, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME]):
+    DATABASE_URL = f"{DB_DRIVER}://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+else:
+    logger.error(
+        "One or more core database connection environment variables are missing "
+        "(DB_DRIVER, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME). "
+        "Database functionality will be impaired."
+    )
+    # Depending on application strictness, could raise an exception here.
+    # For now, DATABASE_URL will be None, and get_engine will fail if it's used.
+
+# --- Multi-Tenancy Connection Management ---
+
+# DATABASES dictionary can still be used for a database-per-tenant strategy,
+# but the "default" should now rely on the constructed DATABASE_URL.
 DATABASES = {
-    # Example: "biz_1001": "postgresql://user:pass@host_for_biz_1001:5432/db_for_biz_1001",
-    # For a generic local setup, you might have a single DB URL from env vars:
-    "default": os.getenv("DATABASE_URL", "postgresql://user:pass@localhost:5432/default_catalog_db")
+    # Example for specific tenant DB if it's different from the default construction:
+    # "biz_1001": "postgresql://user_biz1:pass_biz1@custom_host:5432/db_for_biz_1001",
+    "default": DATABASE_URL # Uses the URL constructed from individual env vars
 }
 
 def get_engine(business_id: str, strategy: str = "database_per_tenant"):
@@ -56,7 +80,7 @@ def get_session(business_id: str):
     # For this example, we'll assume a 'shared_database_with_schema_switching' strategy
     # to demonstrate the schema path setting as requested by the subtask.
     # In a real app, the strategy might be chosen based on configuration or business_id.
-    tenant_strategy = "shared_database_with_schema_switching"
+    tenant_strategy = "shared_database_with_schema_switching" # Example strategy
 
     engine = get_engine(business_id, strategy=tenant_strategy)
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -78,18 +102,24 @@ def get_session(business_id: str):
 
         try:
             # Example for PostgreSQL: Set the session's search_path.
-            # This tells PostgreSQL which schemas to look in, in order.
-            # The tenant's schema is first, followed by 'public' (for shared tables/extensions).
+            # This tells PostgreSQL which schemas to look in, in order for unqualified table names.
+            # The tenant's specific schema (`schema_name`) is first.
+            # `public` is often included for standard functions or extensions.
+            # `CATALOG_SCHEMA` and `BUSINESS_SCHEMA` (loaded from env vars) could be added if they
+            # contain shared tables or functions relevant across tenants, e.g.:
+            # session.execute(text(f"SET search_path TO {schema_name}, {CATALOG_SCHEMA}, {BUSINESS_SCHEMA}, public;"))
+            # For this example, we'll just show the tenant-specific and public.
             session.execute(text(f"SET search_path TO {schema_name}, public;"))
             logger.info(f"Successfully set search_path to '{schema_name}, public' for session of business_id {business_id}.")
+            # If using CATALOG_SCHEMA or BUSINESS_SCHEMA for Table definitions, e.g.,
+            # `class Product(Base): __table_args__ = {'schema': CATALOG_SCHEMA} ...`
+            # then those schemas are directly part of table references and might not need to be
+            # in the search_path unless you also have functions or other objects in them that
+            # are called without schema qualification.
         except Exception as e:
             logger.error(f"Failed to set search_path to '{schema_name}' for business_id {business_id}: {e}", exc_info=True)
-            # Depending on the application's requirements, you might:
-            # - Raise the exception to prevent operations on an incorrectly configured session.
-            # - Fallback to a default behavior if applicable.
-            # - Mark the session as invalid.
-            session.rollback() # Rollback any transaction started by session.execute() if it failed mid-way
-            raise # Re-raise the exception to make the caller aware of the failure.
+            session.rollback()
+            raise
 
     # Other strategies for multi-tenancy include:
     # 1. Row-Level Security (RLS):

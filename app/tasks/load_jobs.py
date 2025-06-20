@@ -13,14 +13,17 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-WASABI_BUCKET_NAME = os.getenv("WASABI_BUCKET_NAME", "your-default-bucket-name") # Already here
+# Name of the Wasabi bucket used for storing uploaded CSV files.
+WASABI_BUCKET_NAME = os.getenv("WASABI_BUCKET_NAME", "your-default-bucket-name")
 
+# Redis connection parameters for ID mapping and potentially other task-related data.
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+# Redis database number used for storing ID mappings by this service.
 REDIS_DB_ID_MAPPING = int(os.getenv("REDIS_DB_ID_MAPPING", 1))
 
-# TTL Configuration for Redis session keys
-DEFAULT_REDIS_SESSION_TTL_SECONDS = 24 * 60 * 60  # 24 hours
+# TTL Configuration for Redis session keys (e.g., id_map:session:{session_id}:{map_type})
+DEFAULT_REDIS_SESSION_TTL_SECONDS = 24 * 60 * 60  # Default: 24 hours
 REDIS_SESSION_TTL_SECONDS = int(os.getenv("REDIS_SESSION_TTL_SECONDS", DEFAULT_REDIS_SESSION_TTL_SECONDS))
 
 try:

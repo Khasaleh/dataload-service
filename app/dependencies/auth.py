@@ -5,11 +5,15 @@ import os
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/token")
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-default-secret-key-if-not-set")
+# Standardized JWT Secret environment variable
+SECRET_KEY = os.getenv("JWT_SECRET", "your-default-secret-key-if-not-set")
+# JWT Algorithm to be used for encoding/decoding tokens. HS256 is a common choice.
 ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 
 if SECRET_KEY == "your-default-secret-key-if-not-set":
-    print("WARNING (auth.py): Using default JWT_SECRET_KEY. This should be set via an environment variable for production.")
+    # It's generally better to use logging instead of print for warnings in applications.
+    # Consider replacing with: logger.warning("Using default JWT_SECRET...")
+    print("WARNING (auth.py): Using default JWT_SECRET. This should be set via an environment variable for production.")
 
 def get_current_user(token: str = Depends(oauth2_scheme)):
     try:
