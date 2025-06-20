@@ -44,24 +44,17 @@ def authenticate_user_placeholder(username: str, password: str) -> Optional[Dict
         return None
     return {"username": user["username"], "user_id": user["user_id"], "business_id": user["business_id"], "roles": user["roles"]}
 
-
-# Placeholder for actual database/service logic for UploadSession creation
-_mock_db_sessions_for_mutation: Dict[str, Dict[str, Any]] = {}
-def create_upload_session_in_db(session_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Mock function to simulate creating an upload session record in the database.
-    Returns the created session data.
-    """
-    # In a real app, this would save to DB (e.g., using SQLAlchemy model) and return the model instance or dict.
-    # Ensure session_id is unique if not already guaranteed.
-    _mock_db_sessions_for_mutation[session_data["session_id"]] = session_data
-    return session_data
-# --- End Placeholder Functions ---
+# --- End Placeholder Functions for Authentication ---
 
 
 # --- Actual Service/Task Imports ---
 from app.services.storage import upload_file as upload_to_wasabi
 from app.tasks.load_jobs import CELERY_TASK_MAP # Assuming this map is populated correctly in load_jobs
+from app.db.connection import get_session as get_db_session_sync # For DB operations
+from app.db.models import UploadSessionOrm # For DB operations
+import logging # For logging DB errors
+
+logger = logging.getLogger(__name__)
 
 
 # --- GraphQL Input Types ---
@@ -277,17 +270,58 @@ class Mutation:
             "error_count": None
         }
         # Simulate saving to DB and getting the saved data (could have defaults/triggers in real DB)
-        created_session_dict = create_upload_session_in_db(session_data_to_save)
+        # created_session_dict = create_upload_session_in_db(session_data_to_save) # Old placeholder
+
+        # --- Create UploadSession record in DB ---
+        db_session = None
+        new_session_orm_instance = None
+        try:
+            db_session = get_db_session_sync(business_id=business_id) # Get a synchronous session
+
+            # Create ORM instance from session_data_to_save (which already includes UTC timestamps)
+            new_session_orm_instance = UploadSessionOrm(**session_data_to_save)
+            db_session.add(new_session_orm_instance)
+            db_session.commit()
+            db_session.refresh(new_session_orm_instance) # To get DB-generated fields like 'id' (PK)
+
+            # Convert ORM instance to dict to pass to UploadSessionType
+            created_session_dict = {c.name: getattr(new_session_orm_instance, c.name) for c in new_session_orm_instance.__table__.columns}
+            logger.info(f"Upload session record created in DB for session_id: {session_id}")
+
+        except Exception as e_db:
+            logger.error(f"DB Error: Failed to create upload session record for session_id {session_id}: {e_db}", exc_info=True)
+            if db_session:
+                db_session.rollback()
+            raise strawberry.GraphQLError(f"Failed to create upload session record in DB: {str(e_db)}")
+        finally:
+            if db_session:
+                db_session.close()
 
         # --- Upload to Wasabi ---
         try:
-            # Pass the Strawberry Upload object `file` directly.
-            # Boto3's upload_fileobj can handle file-like objects that have a read() method.
             upload_to_wasabi(bucket=WASABI_BUCKET_NAME, path=wasabi_path, file_obj=file)
-        except Exception as e:
-            # Conceptual: Update session status to "failed" in DB
-            # update_session_status_in_db(session_id, "failed", f"Wasabi upload error: {str(e)}")
-            raise strawberry.GraphQLError(f"Failed to upload file to Wasabi: {str(e)}")
+            logger.info(f"File successfully uploaded to Wasabi: {wasabi_path} for session_id: {session_id}")
+        except Exception as e_wasabi:
+            logger.error(f"Wasabi Error: Failed to upload file for session_id {session_id}: {e_wasabi}", exc_info=True)
+            # Update session status to "failed_wasabi_upload" in DB
+            db_update_session = None
+            try:
+                db_update_session = get_db_session_sync(business_id=business_id)
+                session_to_update = db_update_session.query(UploadSessionOrm).filter(UploadSessionOrm.session_id == session_id).first()
+                if session_to_update:
+                    session_to_update.status = "failed_wasabi_upload"
+                    session_to_update.details = f"Failed to upload file to Wasabi: {str(e_wasabi)}"
+                    session_to_update.updated_at = datetime.datetime.utcnow()
+                    db_update_session.commit()
+                    logger.info(f"Updated session {session_id} status to 'failed_wasabi_upload' due to Wasabi error.")
+            except Exception as e_db_update:
+                logger.error(f"DB Error: Failed to update session {session_id} status after Wasabi failure: {e_db_update}", exc_info=True)
+                if db_update_session:
+                    db_update_session.rollback()
+            finally:
+                if db_update_session:
+                    db_update_session.close()
+            raise strawberry.GraphQLError(f"Failed to upload file to Wasabi: {str(e_wasabi)}")
 
         # --- Dispatch Celery Task ---
         celery_task_fn = CELERY_TASK_MAP.get(input.load_type)

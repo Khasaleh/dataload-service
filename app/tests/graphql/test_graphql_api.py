@@ -96,17 +96,32 @@ def test_query_me_unauthenticated():
     # The response will be FastAPI's error, not a GraphQL error with data:null.
     assert "Not authenticated" in response.json().get("detail", "") # Common FastAPI error
 
-@patch('app.graphql_queries.get_upload_session_from_db')
-def test_query_upload_session_found(mock_get_session_db):
+@patch('app.graphql_queries.get_db_session_sync') # Patched to actual DB session getter
+def test_query_upload_session_found(mock_get_db_session_sync):
     override_get_current_user(MOCK_USER_ADMIN)
-    mock_session_id = "sess_found"
-    mock_db_response = {
-        "session_id": mock_session_id, "business_id": MOCK_USER_ADMIN["business_id"],
-        "load_type": "products", "original_filename": "f.csv", "wasabi_path": "p/f.csv",
-        "status": "completed", "details": "OK", "record_count": 10, "error_count": 0,
-        "created_at": datetime.datetime.utcnow(), "updated_at": datetime.datetime.utcnow()
-    }
-    mock_get_session_db.return_value = mock_db_response
+    mock_session_id_str = "sess_found_db"
+
+    # Prepare a mock ORM object that query().filter().first() would return
+    mock_orm_session = MagicMock()
+    mock_orm_session.session_id = mock_session_id_str
+    mock_orm_session.business_id = MOCK_USER_ADMIN["business_id"]
+    mock_orm_session.load_type = "products"
+    mock_orm_session.original_filename = "f_db.csv"
+    mock_orm_session.wasabi_path = "p/f_db.csv"
+    mock_orm_session.status = "completed_from_db"
+    mock_orm_session.details = "DB OK"
+    mock_orm_session.record_count = 100
+    mock_orm_session.error_count = 1
+    mock_orm_session.created_at = datetime.datetime.utcnow()
+    mock_orm_session.updated_at = datetime.datetime.utcnow()
+    # Make __table__.columns accessible for the dict comprehension in resolver
+    mock_orm_session.__table__ = MagicMock()
+    mock_orm_session.__table__.columns = [MagicMock(name=c) for c in UploadSessionType.__strawberry_definition__.fields_lookup.keys()]
+
+
+    mock_db_session = MagicMock()
+    mock_db_session.query().filter().first.return_value = mock_orm_session
+    mock_get_db_session_sync.return_value = mock_db_session
 
     query = f"""
         query {{
@@ -123,16 +138,21 @@ def test_query_upload_session_found(mock_get_session_db):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["data"]["uploadSession"]["sessionId"] == mock_session_id
+    assert data["data"]["uploadSession"]["sessionId"] == mock_session_id_str
     assert data["data"]["uploadSession"]["businessId"] == MOCK_USER_ADMIN["business_id"]
-    assert data["data"]["uploadSession"]["status"] == "completed"
-    mock_get_session_db.assert_called_once_with(session_id=mock_session_id, business_id_context=MOCK_USER_ADMIN["business_id"])
+    assert data["data"]["uploadSession"]["status"] == "completed_from_db"
+    mock_get_db_session_sync.assert_called_once_with(business_id=MOCK_USER_ADMIN["business_id"])
+    mock_db_session.query().filter().first.assert_called_once()
 
-@patch('app.graphql_queries.get_upload_session_from_db')
-def test_query_upload_session_not_found(mock_get_session_db):
+
+@patch('app.graphql_queries.get_db_session_sync') # Patched to actual DB session getter
+def test_query_upload_session_not_found(mock_get_db_session_sync):
     override_get_current_user(MOCK_USER_ADMIN)
-    mock_session_id = "sess_not_found"
-    mock_get_session_db.return_value = None # Simulate not found
+    mock_session_id_str = "sess_not_found_db"
+
+    mock_db_session = MagicMock()
+    mock_db_session.query().filter().first.return_value = None # Simulate not found
+    mock_get_db_session_sync.return_value = mock_db_session
 
     query = f"""
         query {{
@@ -147,20 +167,20 @@ def test_query_upload_session_not_found(mock_get_session_db):
     assert response.status_code == 200
     data = response.json()
     assert data["data"]["uploadSession"] is None
-    mock_get_session_db.assert_called_once_with(session_id=mock_session_id, business_id_context=MOCK_USER_ADMIN["business_id"])
+    mock_get_db_session_sync.assert_called_once_with(business_id=MOCK_USER_ADMIN["business_id"])
+    mock_db_session.query().filter().first.assert_called_once()
 
-@patch('app.graphql_queries.get_upload_session_from_db')
-def test_query_upload_session_unauthorized(mock_get_session_db):
-    # Resolver's get_upload_session_from_db is called with current user's biz_id.
-    # If that function correctly returns None when a session belongs to another biz, this tests it.
-    override_get_current_user(MOCK_USER_OTHER_BIZ) # User from "biz_other"
+@patch('app.graphql_queries.get_db_session_sync') # Patched to actual DB session getter
+def test_query_upload_session_unauthorized(mock_get_db_session_sync):
+    # User from MOCK_USER_OTHER_BIZ tries to access a session.
+    # The resolver filters by UploadSessionOrm.business_id == user_business_id.
+    # So, if the session_id exists but for another biz, .first() will return None.
+    override_get_current_user(MOCK_USER_OTHER_BIZ)
+    mock_session_id_str = "sess_for_admin_biz_db" # A session ID that wouldn't match MOCK_USER_OTHER_BIZ
 
-    # Attempt to query a session that (conceptually) belongs to MOCK_USER_ADMIN["business_id"]
-    # The mock get_upload_session_from_db will be called with MOCK_USER_OTHER_BIZ's business_id
-    # and should return None if the session_id "sess_belongs_to_admin_biz" is not for "biz_other".
-    mock_session_id_for_admin_biz = "sess_belongs_to_admin_biz"
-    mock_get_session_db.return_value = None # Mocking that DB call returns None due to biz_id mismatch
-                                          # as per logic in graphql_queries.get_upload_session_from_db
+    mock_db_session = MagicMock()
+    mock_db_session.query().filter().first.return_value = None # Simulate not found due to business_id mismatch
+    mock_get_db_session_sync.return_value = mock_db_session
 
     query = f"""
         query {{
@@ -175,17 +195,33 @@ def test_query_upload_session_unauthorized(mock_get_session_db):
     assert response.status_code == 200
     data = response.json()
     assert data["data"]["uploadSession"] is None
-    mock_get_session_db.assert_called_once_with(session_id=mock_session_id_for_admin_biz, business_id_context=MOCK_USER_OTHER_BIZ["business_id"])
+    mock_get_db_session_sync.assert_called_once_with(business_id=MOCK_USER_OTHER_BIZ["business_id"])
+    mock_db_session.query().filter().first.assert_called_once()
 
 
-@patch('app.graphql_queries.get_upload_sessions_for_business_from_db')
-def test_query_upload_sessions_by_business(mock_get_sessions_db):
+@patch('app.graphql_queries.get_db_session_sync') # Patched to actual DB session getter
+def test_query_upload_sessions_by_business(mock_get_db_session_sync):
     override_get_current_user(MOCK_USER_ADMIN)
-    mock_db_response = [
-        {"session_id": "s1", "business_id": MOCK_USER_ADMIN["business_id"], "load_type": "products", "original_filename":"f1.csv", "wasabi_path":"p/f1.csv", "status":"completed", "created_at":datetime.datetime.utcnow(), "updated_at":datetime.datetime.utcnow()},
-        {"session_id": "s2", "business_id": MOCK_USER_ADMIN["business_id"], "load_type": "brands", "original_filename":"f2.csv", "wasabi_path":"p/f2.csv", "status":"pending", "created_at":datetime.datetime.utcnow(), "updated_at":datetime.datetime.utcnow()},
-    ]
-    mock_get_sessions_db.return_value = mock_db_response
+
+    # Prepare mock ORM objects
+    mock_orm_session1 = MagicMock()
+    mock_orm_session1.session_id = "s1_db"
+    mock_orm_session1.business_id = MOCK_USER_ADMIN["business_id"]
+    # ... other fields for session1 ...
+    mock_orm_session1.load_type="products"; mock_orm_session1.original_filename="f1.csv"; mock_orm_session1.wasabi_path="p/f1.csv"; mock_orm_session1.status="completed"; mock_orm_session1.created_at=datetime.datetime.utcnow(); mock_orm_session1.updated_at=datetime.datetime.utcnow(); mock_orm_session1.details=None; mock_orm_session1.record_count=None; mock_orm_session1.error_count=None
+    mock_orm_session1.__table__ = MagicMock(); mock_orm_session1.__table__.columns = [MagicMock(name=c) for c in UploadSessionType.__strawberry_definition__.fields_lookup.keys()]
+
+
+    mock_orm_session2 = MagicMock()
+    mock_orm_session2.session_id = "s2_db"
+    mock_orm_session2.business_id = MOCK_USER_ADMIN["business_id"]
+    # ... other fields for session2 ...
+    mock_orm_session2.load_type="brands"; mock_orm_session2.original_filename="f2.csv"; mock_orm_session2.wasabi_path="p/f2.csv"; mock_orm_session2.status="pending"; mock_orm_session2.created_at=datetime.datetime.utcnow(); mock_orm_session2.updated_at=datetime.datetime.utcnow(); mock_orm_session2.details=None; mock_orm_session2.record_count=None; mock_orm_session2.error_count=None
+    mock_orm_session2.__table__ = MagicMock(); mock_orm_session2.__table__.columns = [MagicMock(name=c) for c in UploadSessionType.__strawberry_definition__.fields_lookup.keys()]
+
+    mock_db_session = MagicMock()
+    mock_db_session.query().filter().order_by().offset().limit().all.return_value = [mock_orm_session1, mock_orm_session2]
+    mock_get_db_session_sync.return_value = mock_db_session
 
     query = """
         query {
@@ -201,8 +237,9 @@ def test_query_upload_sessions_by_business(mock_get_sessions_db):
     assert response.status_code == 200
     data = response.json()
     assert len(data["data"]["uploadSessionsByBusiness"]) == 2
-    assert data["data"]["uploadSessionsByBusiness"][0]["sessionId"] == "s1"
-    mock_get_sessions_db.assert_called_once_with(business_id=MOCK_USER_ADMIN["business_id"], skip=0, limit=5)
+    assert data["data"]["uploadSessionsByBusiness"][0]["sessionId"] == "s1_db"
+    mock_get_db_session_sync.assert_called_once_with(business_id=MOCK_USER_ADMIN["business_id"])
+    mock_db_session.query().filter().order_by().offset(0).limit(5).all.assert_called_once()
 
 
 # --- Mutation Tests ---
@@ -282,24 +319,47 @@ def test_mutation_generate_token_failure(mock_authenticate_user):
     mock_authenticate_user.assert_called_once_with(username="wronguser", password="badpassword")
 
 
+@patch('app.graphql_mutations.get_db_session_sync') # Patch DB session for upload_file
 @patch('app.graphql_mutations.upload_to_wasabi')
 @patch('app.graphql_mutations.CELERY_TASK_MAP')
-@patch('app.graphql_mutations.create_upload_session_in_db')
 @patch('uuid.uuid4') # To control session_id generation
 def test_mutation_upload_file_success(
-    mock_uuid4, mock_create_session_db, mock_celery_task_map, mock_upload_wasabi
+    mock_uuid4, mock_celery_task_map, mock_upload_wasabi, mock_get_db_session_sync_in_mutations
 ):
     override_get_current_user(MOCK_USER_ADMIN)
 
-    mock_session_id = "fixed_session_uuid"
-    mock_uuid4.return_value = mock_session_id
+    mock_generated_session_id = "fixed_session_uuid_db"
+    mock_uuid4.return_value = mock_generated_session_id
 
-    # Mock what create_upload_session_in_db returns
-    # It should return a dict representation of the session
-    def mock_create_session_side_effect(session_data):
-        # Add any DB-generated fields if your actual function does, e.g. updated created_at
-        return session_data
-    mock_create_session_db.side_effect = mock_create_session_side_effect
+    # Configure the mock DB session for create
+    mock_db_session_create = MagicMock()
+    # When get_db_session_sync is called the first time (for creating session)
+    # For the Wasabi failure case, we might need a side_effect if get_db_session_sync is called multiple times
+    mock_get_db_session_sync_in_mutations.return_value = mock_db_session_create
+
+    # Capture the instance passed to add() and simulate refresh()
+    # This mock_upload_session_orm_instance will be what db.refresh() acts upon.
+    mock_upload_session_orm_instance = None
+    def capture_add(instance):
+        nonlocal mock_upload_session_orm_instance
+        mock_upload_session_orm_instance = instance
+        # Simulate DB setting the 'id' (PK) on add/flush, not through refresh typically for new objects.
+        # However, refresh is used to get all DB-generated values.
+        # For this test, we primarily care that the ORM object is constructed correctly.
+        # The resolver converts it to dict for UploadSessionType.
+        # Ensure the instance passed to UploadSessionType has all fields.
+        # The resolver uses {c.name: getattr(orm_instance, c.name) ...}
+        # So, the mock_upload_session_orm_instance needs these attributes.
+        # The attributes are set from session_data_for_orm in the resolver.
+        # We need to ensure `id` (PK) is set if it's part of UploadSessionType.
+        # UploadSessionType does not have 'id' (PK), it has 'session_id' (UUID).
+        # So, refresh mainly ensures other DB defaults or triggers run. We can just pass here.
+        pass
+
+    mock_db_session_create.add.side_effect = capture_add
+    # mock_db_session_create.refresh = MagicMock() # refresh is called on the instance
+
+    # Mock Celery task dispatch (same as before)
 
     # Mock Celery task dispatch
     mock_celery_task_delay = MagicMock(return_value=MagicMock(id="celery_task_123"))
@@ -349,11 +409,20 @@ def test_mutation_upload_file_success(
     mock_celery_task_map.get.assert_called_once_with(load_type)
     mock_celery_task_delay.assert_called_once_with(
         business_id=MOCK_USER_ADMIN["business_id"],
-        session_id=mock_session_id,
+        session_id=mock_generated_session_id,
         wasabi_file_path=expected_wasabi_path,
         original_filename=file_name
     )
-    mock_create_session_db.assert_called_once()
+
+    # Verify DB interactions for create
+    mock_db_session_create.add.assert_called_once()
+    # Check attributes of the added instance if needed, using mock_upload_session_orm_instance
+    if mock_upload_session_orm_instance:
+        assert mock_upload_session_orm_instance.session_id == mock_generated_session_id
+        assert mock_upload_session_orm_instance.business_id == MOCK_USER_ADMIN["business_id"]
+        assert mock_upload_session_orm_instance.status == "pending"
+    mock_db_session_create.commit.assert_called_once()
+    mock_db_session_create.refresh.assert_called_once_with(mock_upload_session_orm_instance)
 
 
 def test_mutation_upload_file_invalid_load_type():
@@ -397,14 +466,39 @@ def test_mutation_upload_file_not_csv():
     assert len(data.get("errors", [])) == 1
     assert "Invalid file type. Only CSV files are allowed" in data["errors"][0]["message"]
 
+@patch('app.graphql_mutations.get_db_session_sync')
 @patch('app.graphql_mutations.upload_to_wasabi')
-def test_mutation_upload_file_wasabi_failure(mock_upload_wasabi):
+@patch('uuid.uuid4')
+def test_mutation_upload_file_wasabi_failure_db_update(mock_uuid4, mock_upload_wasabi, mock_get_db_session_sync_in_mutations):
     override_get_current_user(MOCK_USER_ADMIN)
-    mock_upload_wasabi.side_effect = Exception("S3 Upload Error")
+
+    mock_generated_session_id = "wasabi_fail_session_uuid"
+    mock_uuid4.return_value = mock_generated_session_id
+
+    # --- Mock setup for the two DB interactions ---
+    # 1. Initial session creation (success)
+    mock_db_session_create = MagicMock(name="create_session")
+    created_orm_instance = None
+    def capture_add_for_create(instance):
+        nonlocal created_orm_instance
+        created_orm_instance = instance
+    mock_db_session_create.add.side_effect = capture_add_for_create
+
+    # 2. Session update after Wasabi failure (this mock will be returned on the second call)
+    mock_db_session_update = MagicMock(name="update_session")
+    # This is the instance that query().filter().first() should return for the update path
+    mock_session_to_be_updated = MagicMock(spec=app.db.models.UploadSessionOrm) # Use spec for attribute safety
+    mock_session_to_be_updated.session_id = mock_generated_session_id # Ensure it has the ID
+    mock_db_session_update.query().filter().first.return_value = mock_session_to_be_updated
+
+    # get_db_session_sync will be called twice: once for create, once for update
+    mock_get_db_session_sync_in_mutations.side_effect = [mock_db_session_create, mock_db_session_update]
+
+    # --- Setup Wasabi mock to fail ---
+    mock_upload_wasabi.side_effect = Exception("S3 Critical Fail")
 
     file_content = b"header,col\nval1,val2"
-    file_name = "test_upload.csv"
-
+    file_name = "test_upload_wasabi_fail.csv"
     operations = {
         "query": "mutation ($file: Upload!, $inputType: UploadFileInput!) { uploadFile(file: $file, input: $inputType) { sessionId } }",
         "variables": {"file": None, "inputType": {"loadType": "products"}}
@@ -418,7 +512,18 @@ def test_mutation_upload_file_wasabi_failure(mock_upload_wasabi):
     data = response.json()
     assert data.get("data") is None or data.get("data", {}).get("uploadFile") is None
     assert len(data.get("errors", [])) == 1
-    assert "Failed to upload file to Wasabi: S3 Upload Error" in data["errors"][0]["message"]
+    assert "Failed to upload file to Wasabi: S3 Critical Fail" in data["errors"][0]["message"]
+
+    # Verify initial DB creation was attempted and completed
+    mock_db_session_create.add.assert_called_once()
+    mock_db_session_create.commit.assert_called_once()
+    mock_db_session_create.refresh.assert_called_once_with(created_orm_instance)
+
+    # Verify DB update was attempted for failure status
+    mock_db_session_update.query(app.db.models.UploadSessionOrm).filter(app.db.models.UploadSessionOrm.session_id == mock_generated_session_id).first.assert_called_once()
+    assert mock_session_to_be_updated.status == "failed_wasabi_upload"
+    assert "Failed to upload file to Wasabi: S3 Critical Fail" in mock_session_to_be_updated.details
+    mock_db_session_update.commit.assert_called_once()
 
 
 # --- Refresh Token Mutation Tests ---

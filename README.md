@@ -4,27 +4,7 @@ FastAPI + Celery-based upload and processing service.
 
 ## Configuration
 
-The application is configured using environment variables. A comprehensive list of all required and optional environment variables can be found in the `.env.example` file in the root of this repository.
-
-### Local Development
-
-For local development, follow these steps to set up your environment:
-
-1.  **Create a `.env` file**:
-    Copy the example file to a new file named `.env`:
-    ```bash
-    cp .env.example .env
-    ```
-
-2.  **Edit `.env`**:
-    Open the newly created `.env` file and replace the placeholder values with your actual development settings for databases, external services, secrets, etc.
-
-3.  **Automatic Loading**:
-    The project uses `python-dotenv` to automatically load variables from the `.env` file when the application starts up locally. There's no need to manually source the file.
-
-**Important**: The `.env` file often contains sensitive credentials and configuration specific to your local setup. It is already listed in `.gitignore` and **must not be committed to version control**.
-
-### Deployed Environments (Production, Staging, etc.)
+The application is configured using environment variables. A comprehensive list of all required and optional environment variables can be found in the `.env.example` file in the root of this repository. See the "Local Development Setup" section for details on using `.env` files.
 
 For deployed environments such as production or staging, environment variables should be set directly in the execution environment. This is typically managed through:
 
@@ -34,6 +14,110 @@ For deployed environments such as production or staging, environment variables s
 *   Other secure configuration management tools
 
 Do **not** deploy `.env` files to these environments. The `.env.example` file can serve as a reference for which variables need to be configured.
+
+## Getting Started / Local Development Setup
+
+### Prerequisites
+*   Python 3.8+ (or the version specified in your project, e.g., pyproject.toml)
+*   Poetry (recommended for managing dependencies - see `poetry.lock`) or `pip`.
+*   A running PostgreSQL instance (or the database type specified by `DB_DRIVER` in your `.env` file).
+*   A running Redis instance.
+*   Alembic (installed as part of project dependencies, used for database migrations).
+
+### Setup Instructions
+
+1.  **Clone the repository**:
+    ```bash
+    git clone <repository_url> # Replace <repository_url> with the actual URL
+    cd <repository_name>     # Replace <repository_name> with the project's directory name
+    ```
+
+2.  **Install dependencies**:
+    If using Poetry:
+    ```bash
+    poetry install
+    ```
+    If using pip with `requirements.txt`:
+    ```bash
+    python -m venv venv
+    source venv/bin/activate  # On Windows: venv\Scripts\activate
+    pip install -r requirements.txt
+    ```
+
+3.  **Configure Environment Variables**:
+    Copy the `.env.example` file to a new file named `.env`. This file will contain your local configuration.
+    ```bash
+    cp .env.example .env
+    ```
+    Open the `.env` file and edit the placeholder values with your actual development settings for:
+    *   Database connection (`DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_DRIVER`)
+    *   Wasabi S3 storage (`WASABI_ENDPOINT_URL`, `WASABI_ACCESS_KEY`, `WASABI_SECRET_KEY`, `WASABI_BUCKET_NAME`)
+    *   Redis connection (`REDIS_HOST`, `REDIS_PORT`, database numbers for mapping, Celery)
+    *   JWT secrets (`JWT_SECRET`, `JWT_ALGORITHM`, `ACCESS_TOKEN_EXPIRE_MINUTES`)
+
+    The project uses `python-dotenv` to automatically load variables from this `.env` file when the application starts up locally.
+
+    **Important**: The `.env` file contains sensitive credentials and is specific to your local setup. It is already listed in `.gitignore` and **must not be committed to version control**.
+
+4.  **Database Setup & Migrations**:
+    This application uses SQLAlchemy for database interaction and Alembic for managing schema migrations.
+
+    *   **Ensure your database instance is running** and accessible with the credentials provided in your `.env` file. You will need to create the main database (e.g., `your_db_name` from `.env`) if it doesn't exist:
+        ```sql
+        -- Example for PostgreSQL:
+        CREATE DATABASE your_db_name;
+        ```
+
+    *   **Multi-Tenant Schema Setup (Schema-per-Tenant)**:
+        This application is designed for multi-tenancy using a schema-per-tenant strategy (when using PostgreSQL, as configured in `app/db/connection.py`). This means data for each business (`business_id`) is stored in its own dedicated schema within the main database.
+        *   The convention used is `business_<business_id>` (e.g., `business_acme` for `business_id="acme"`).
+        *   **You must create these tenant-specific schemas manually in your database before you can apply migrations to them or load data for that tenant.**
+            ```sql
+            -- Example for PostgreSQL to create a schema for business_id 'acme':
+            CREATE SCHEMA IF NOT EXISTS business_acme;
+            ```
+        *   Repeat this for each `business_id` you plan to use during development or testing. The application's runtime (`app/db/connection.py`) will attempt to set the `search_path` to this schema for relevant database sessions.
+
+    *   **Apply Database Migrations**: Alembic is used to manage database schema versions. To apply migrations to a specific tenant schema (after creating it):
+        *   You'll need to ensure your database session for running Alembic targets the correct schema. One common way for local development is to connect to your database using a tool like `psql` or a GUI client, set the `search_path` for your session, and then run Alembic commands in a separate terminal where Alembic will use the default database connection (which should now resolve to the correct schema due to your session's `search_path`).
+            ```sql
+            -- In your SQL client, connected to your main database (DB_NAME):
+            SET search_path TO business_yourbusinessid, public;
+            ```
+        *   Alternatively, for more robust control, especially in scripts or automated environments, you can adapt `alembic/env.py` to accept a schema parameter (e.g., via `-x` option in Alembic CLI) and set the `search_path` or `version_table_schema` within `env.py` before migrations run.
+        *   Once targeting the desired schema, run:
+            ```bash
+            alembic upgrade head
+            ```
+        This will create all necessary tables (brands, products, etc.) inside that tenant's schema. Repeat this process for each tenant schema.
+        *(For advanced multi-tenant migration strategies with Alembic, refer to Alembic documentation on handling multiple schemas or programmable migration environments.)*
+
+    *   **Creating New Migrations (for developers)**: If you modify the SQLAlchemy ORM models in `app/db/models.py`, you'll need to generate a new migration script:
+        ```bash
+        # Ensure your virtual environment is active
+        alembic revision -m "short_description_of_your_model_changes" --autogenerate
+        ```
+        After generation, **always review and edit** the script created in the `alembic/versions/` directory to ensure it accurately reflects the intended changes. This script will then need to be applied to each tenant schema using the `alembic upgrade head` command as described above.
+
+5.  **Running the Application**:
+
+    *   **FastAPI Web Server**:
+        The application is served using Uvicorn. To run the development server:
+        ```bash
+        uvicorn app.main:app --reload
+        ```
+        This will typically start the server on `http://127.0.0.1:8000`. The `--reload` flag enables auto-reloading when code changes are detected.
+
+    *   **Celery Worker**:
+        For background task processing, you need to run at least one Celery worker. Open a new terminal window/tab, activate your virtual environment, and run:
+        ```bash
+        celery -A app.tasks.celery_worker.celery_app worker -l info
+        # For Windows or environments without eventlet/gevent, or for simpler local testing:
+        # celery -A app.tasks.celery_worker.celery_app worker -l info -P solo
+        ```
+        Ensure your Redis instance (used as the Celery broker and result backend) is running and accessible as per your `.env` configuration.
+
+    Once both the FastAPI server and Celery worker are running, you can access the GraphQL API (e.g., via the GraphiQL interface at `/graphql`).
 
 ## API Access (GraphQL)
 
