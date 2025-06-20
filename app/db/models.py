@@ -6,13 +6,13 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func # For server-side default timestamps
 
 from .base_class import Base
-# import datetime # No longer needed if using func.now() for all defaults
+import os # Added os import
 
 # Schema constants (can be imported from a config file or defined here)
 # These should align with what's set in app/db/connection.py via environment variables
-CATALOG_SCHEMA = os.getenv("CATALOG_SERVICE_SCHEMA", "catalog_management") # Default matches example
-BUSINESS_SCHEMA = os.getenv("BUSINESS_SERVICE_SCHEMA", "fazeal_business") # Default matches example
-PUBLIC_SCHEMA = "public" # Standard public schema
+CATALOG_SCHEMA = os.getenv("CATALOG_SERVICE_SCHEMA", "catalog_management")
+BUSINESS_SCHEMA = os.getenv("BUSINESS_SERVICE_SCHEMA", "fazeal_business")
+PUBLIC_SCHEMA = "public"
 
 # --- Upload Session Model ---
 class UploadSessionOrm(Base):
@@ -134,19 +134,57 @@ class BrandOrm(Base):
         {"schema": CATALOG_SCHEMA}
     )
 
-class AttributeOrm(Base): # General attributes, distinct from CategoryAttributeOrm
-    __tablename__ = "attributes"
-    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    business_details_id = Column(BigInteger, index=True, nullable=False) # Changed
-    attribute_name = Column(String, index=True, nullable=False)
-    allowed_values = Column(Text, nullable=True)
+class AttributeOrm(Base):
+    __tablename__ = "attribute" # Changed from "attributes" to match DDL
 
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True) # Changed to BigInteger
+    business_details_id = Column(BigInteger, index=True, nullable=False) # Confirmed
+    name = Column(String(150), index=True, nullable=False) # Renamed from attribute_name, added length
+
+    is_color = Column(Boolean, nullable=False, server_default=sa.false()) # New field
+    active = Column(String(255), nullable=True) # New field
+
+    # Audit fields as per DDL
+    created_by = Column(BigInteger, nullable=True)
+    created_date = Column(BigInteger, nullable=True)
+    updated_by = Column(BigInteger, nullable=True)
+    updated_date = Column(BigInteger, nullable=True)
+
+    # Removed old created_at, updated_at DateTime fields
+    # created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    # updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    attribute_values = relationship("AttributeValueOrm", back_populates="attribute", cascade="all, delete-orphan", lazy="selectin")
 
     __table_args__ = (
-        UniqueConstraint('business_details_id', 'attribute_name', name='uq_attribute_business_name'),
-        {"schema": CATALOG_SCHEMA} # Assigned schema
+        UniqueConstraint('business_details_id', 'name', name='uq_attribute_business_name'), # Updated to 'name'
+        {"schema": CATALOG_SCHEMA}
+    )
+
+class AttributeValueOrm(Base):
+    __tablename__ = "attribute_value"
+
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
+    value = Column(String(150), nullable=False) # The actual underlying value
+
+    attribute_id = Column(BigInteger, ForeignKey(f'{CATALOG_SCHEMA}.attribute.id'), nullable=False)
+    attribute = relationship("AttributeOrm", back_populates="attribute_values")
+
+    name = Column(String(150), nullable=True) # Display name for the value
+
+    attribute_image_url = Column(String(255), nullable=True)
+    active = Column(String(255), nullable=True, server_default="INACTIVE")
+
+    created_by = Column(BigInteger, nullable=True)
+    created_date = Column(BigInteger, nullable=True)
+    updated_by = Column(BigInteger, nullable=True)
+    updated_date = Column(BigInteger, nullable=True)
+    logo_name = Column(String(500), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint('attribute_id', 'name', name='uq_attribute_value_attribute_id_name'),
+        UniqueConstraint('attribute_id', 'value', name='uq_attribute_value_attribute_id_value'),
+        {"schema": CATALOG_SCHEMA}
     )
 
 class ReturnPolicyOrm(Base):

@@ -49,21 +49,49 @@ def upgrade() -> None:
     )
     # op.drop_index(op.f('ix_catalog_management_brands_brand_name'), table_name='brands', schema=CATALOG_SCHEMA) # Drop old index if name changed
     op.create_index(op.f('ix_catalog_management_brands_name'), 'brands', ['name'], unique=False, schema=CATALOG_SCHEMA) # Index on new 'name' field
+    op.create_index(op.f('ix_catalog_management_brands_name'), 'brands', ['name'], unique=False, schema=CATALOG_SCHEMA) # Index on new 'name' field
     op.create_index(op.f('ix_catalog_management_brands_business_details_id'), 'brands', ['business_details_id'], unique=False, schema=CATALOG_SCHEMA)
 
-    op.create_table('attributes',
-        sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+    op.create_table('attribute', # Renamed table from 'attributes'
+        sa.Column('id', sa.BigInteger(), autoincrement=True, nullable=False), # Changed to BigInteger
         sa.Column('business_details_id', sa.BigInteger(), nullable=False),
-        sa.Column('attribute_name', sa.String(), nullable=False),
-        sa.Column('allowed_values', sa.Text(), nullable=True),
-        sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-        sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), onupdate=sa.text('now()'), nullable=False),
-        sa.PrimaryKeyConstraint('id', name=op.f('pk_attributes')),
-        sa.UniqueConstraint('business_details_id', 'attribute_name', name=op.f('uq_attribute_business_name')),
+        sa.Column('name', sa.String(length=150), nullable=False), # Renamed from attribute_name, added length
+        sa.Column('is_color', sa.Boolean(), nullable=False, server_default=sa.false_()), # New field
+        sa.Column('active', sa.String(length=255), nullable=True), # New field
+        sa.Column('created_by', sa.BigInteger(), nullable=True),   # New field
+        sa.Column('created_date', sa.BigInteger(), nullable=True), # New field
+        sa.Column('updated_by', sa.BigInteger(), nullable=True),   # New field
+        sa.Column('updated_date', sa.BigInteger(), nullable=True), # New field
+        # Removed 'allowed_values', 'created_at', 'updated_at'
+        sa.PrimaryKeyConstraint('id', name=op.f('pk_attribute')), # Updated pk name
+        sa.UniqueConstraint('business_details_id', 'name', name=op.f('uq_attribute_business_name')), # Updated to 'name'
         schema=CATALOG_SCHEMA
     )
-    op.create_index(op.f('ix_catalog_management_attributes_attribute_name'), 'attributes', ['attribute_name'], unique=False, schema=CATALOG_SCHEMA)
-    op.create_index(op.f('ix_catalog_management_attributes_business_details_id'), 'attributes', ['business_details_id'], unique=False, schema=CATALOG_SCHEMA)
+    op.create_index(op.f('ix_catalog_management_attribute_name'), 'attribute', ['name'], unique=False, schema=CATALOG_SCHEMA) # Updated index
+    op.create_index(op.f('ix_catalog_management_attribute_business_details_id'), 'attribute', ['business_details_id'], unique=False, schema=CATALOG_SCHEMA)
+
+    op.create_table('attribute_value',
+        sa.Column('id', sa.BigInteger(), autoincrement=True, nullable=False),
+        sa.Column('value', sa.String(length=150), nullable=False),
+        sa.Column('attribute_id', sa.BigInteger(), nullable=False),
+        sa.Column('name', sa.String(length=150), nullable=True),
+        sa.Column('attribute_image_url', sa.String(length=255), nullable=True),
+        sa.Column('active', sa.String(length=255), nullable=True, server_default='INACTIVE'),
+        sa.Column('created_by', sa.BigInteger(), nullable=True),
+        sa.Column('created_date', sa.BigInteger(), nullable=True),
+        sa.Column('updated_by', sa.BigInteger(), nullable=True),
+        sa.Column('updated_date', sa.BigInteger(), nullable=True),
+        sa.Column('logo_name', sa.String(length=500), nullable=True),
+        sa.ForeignKeyConstraint(['attribute_id'], [f'{CATALOG_SCHEMA}.attribute.id'], name=op.f('fk_attribute_value_attribute_id_attribute')),
+        sa.PrimaryKeyConstraint('id', name=op.f('pk_attribute_value')),
+        sa.UniqueConstraint('attribute_id', 'name', name=op.f('uq_attribute_value_attribute_id_name')),
+        sa.UniqueConstraint('attribute_id', 'value', name=op.f('uq_attribute_value_attribute_id_value')),
+        schema=CATALOG_SCHEMA
+    )
+    op.create_index(op.f('ix_catalog_management_attribute_value_attribute_id'), 'attribute_value', ['attribute_id'], unique=False, schema=CATALOG_SCHEMA)
+    op.create_index(op.f('ix_catalog_management_attribute_value_name'), 'attribute_value', ['name'], unique=False, schema=CATALOG_SCHEMA)
+    op.create_index(op.f('ix_catalog_management_attribute_value_value'), 'attribute_value', ['value'], unique=False, schema=CATALOG_SCHEMA)
+    # op.create_index(op.f('ix_catalog_management_attribute_value_id'), 'attribute_value', ['id'], unique=False, schema=CATALOG_SCHEMA) # PKs are auto-indexed
 
     op.create_table('return_policies',
         sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
@@ -276,9 +304,14 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_fazeal_business_return_policies_business_details_id'), table_name='return_policies', schema=BUSINESS_SCHEMA)
     op.drop_table('return_policies', schema=BUSINESS_SCHEMA)
 
-    op.drop_index(op.f('ix_catalog_management_attributes_business_details_id'), table_name='attributes', schema=CATALOG_SCHEMA)
-    op.drop_index(op.f('ix_catalog_management_attributes_attribute_name'), table_name='attributes', schema=CATALOG_SCHEMA) # Corrected from create_index to drop_index
-    op.drop_table('attributes', schema=CATALOG_SCHEMA)
+    op.drop_index(op.f('ix_catalog_management_attribute_value_value'), table_name='attribute_value', schema=CATALOG_SCHEMA)
+    op.drop_index(op.f('ix_catalog_management_attribute_value_name'), table_name='attribute_value', schema=CATALOG_SCHEMA)
+    op.drop_index(op.f('ix_catalog_management_attribute_value_attribute_id'), table_name='attribute_value', schema=CATALOG_SCHEMA)
+    op.drop_table('attribute_value', schema=CATALOG_SCHEMA)
+
+    op.drop_index(op.f('ix_catalog_management_attribute_business_details_id'), table_name='attribute', schema=CATALOG_SCHEMA)
+    op.drop_index(op.f('ix_catalog_management_attribute_name'), table_name='attribute', schema=CATALOG_SCHEMA)
+    op.drop_table('attribute', schema=CATALOG_SCHEMA)
 
     op.drop_index(op.f('ix_catalog_management_brands_business_details_id'), table_name='brands', schema=CATALOG_SCHEMA)
     op.drop_index(op.f('ix_catalog_management_brands_name'), table_name='brands', schema=CATALOG_SCHEMA) # Updated from brand_name to name

@@ -24,15 +24,89 @@ class BrandCsvModel(BaseModel): # Renamed from BrandModel
         anystr_strip_whitespace = True
         # extra = "forbid" # If no other columns are allowed from CSV
 
-class AttributeModel(BaseModel):
-    attribute_name: str
-    allowed_values: str
+class AttributeCsvModel(BaseModel):
+    """
+    Pydantic model for validating a row from an Attributes CSV file.
+    A single row defines an attribute and all its associated values.
+    """
+    attribute_name: constr(strip_whitespace=True, min_length=1) # Name of the parent attribute, e.g., "Color", "Size"
+    is_color: bool = False # Mandatory, True if this attribute represents color swatches
+    attribute_active: Optional[str] = None # Active status of the attribute itself (e.g., "ACTIVE", "INACTIVE")
 
-    @validator('attribute_name', 'allowed_values')
-    def attribute_fields_must_not_be_empty(cls, value):
-        if not value.strip():
-            raise ValueError('field must not be empty')
-        return value
+    # Pipe-separated strings for attribute values
+    values_name: Optional[str] = None       # e.g., "Red|Blue|Green" or "Small|Medium|Large"
+    value_value: Optional[str] = None       # e.g., "FF0000|0000FF|00FF00" or "S|M|L" (optional for non-colors if same as name)
+    img_url: Optional[str] = None           # e.g., "url1|url2|url3"
+    values_active: Optional[str] = None     # e.g., "ACTIVE|INACTIVE|ACTIVE" (defaults to INACTIVE if not specified for a value part)
+
+    # Optional audit fields for the parent attribute, if sourced from CSV
+    # created_by: Optional[int] = None
+    # created_date: Optional[int] = None # Epoch timestamp
+    # updated_by: Optional[int] = None
+    # updated_date: Optional[int] = None # Epoch timestamp
+
+    class Config:
+        anystr_strip_whitespace = True
+        # extra = "forbid"
+
+    @validator('values_name', 'value_value', 'img_url', 'values_active', pre=True, always=True)
+    def ensure_optional_fields_are_not_empty_strings(cls, v):
+        # If an optional field is provided as an empty string in CSV, convert to None
+        # so that Pydantic's Optional typing works as expected (None vs. actual value)
+        if v == "":
+            return None
+        return v
+
+    @validator('values_name', always=True)
+    def check_values_name_provided_if_any_value_list_is_provided(cls, v, values):
+        # If any of value_value, img_url, or values_active are provided, values_name must also be provided.
+        # This ensures we have display names for the values.
+        # 'values' here is a dict of already validated/processed fields by Pydantic up to this point for this model instance.
+        if (values.get('value_value') is not None or \
+            values.get('img_url') is not None or \
+            values.get('values_active') is not None) and not v: # v is values_name
+            raise ValueError("'values_name' must be provided if 'value_value', 'img_url', or 'values_active' are specified.")
+        return v
+
+    @validator('values_active', always=True) # This validator should ideally run after the others
+    def check_list_lengths_consistency(cls, v, values):
+        # This validator checks if all provided pipe-separated value lists have the same number of elements.
+
+        names_str = values.get('values_name')
+        # If values_name is None (either not provided or converted from "" by previous validator),
+        # then other lists should also be None for consistency.
+        if names_str is None:
+            if values.get('value_value') is not None or \
+               values.get('img_url') is not None or \
+               v is not None: # v is values_active
+                # This situation might indicate an issue if, for example, values_name was truly missing
+                # but other lists were provided. The check_values_name_provided... validator aims to catch this.
+                # However, if values_name was an empty string and became None, and others were also empty strings
+                # and became None, this is consistent.
+                # If one of the others is not None here, it means values_name was None but others were not.
+                # This should have been caught by check_values_name_provided_if_any_value_list_is_provided.
+                # This check remains as a safeguard for direct instantiation or complex cases.
+                pass # Let previous validator handle mandatory nature of names_str if others are present.
+            return v # All value lists are None or consistently handled.
+
+        num_names = len(names_str.split('|'))
+
+        lists_to_check = {
+            "value_value": values.get('value_value'),
+            "img_url": values.get('img_url'),
+            "values_active": v # 'v' is the current field being validated ('values_active')
+        }
+
+        for field_name, val_str in lists_to_check.items():
+            if val_str is not None: # Only check if the string is provided (was not an empty string from CSV)
+                num_parts = len(val_str.split('|'))
+                if num_parts != num_names:
+                    raise ValueError(
+                        f"Mismatch in number of pipe-separated parts: "
+                        f"'{field_name}' has {num_parts} parts, "
+                        f"but 'values_name' ({names_str}) has {num_names} parts."
+                    )
+        return v # Return the original value for 'values_active'
 
 class ReturnPolicyModel(BaseModel):
     return_policy_code: str
