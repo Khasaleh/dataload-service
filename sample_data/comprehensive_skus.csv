@@ -1,0 +1,35 @@
+product_name,business_details_id,main_attribute,attribute_combination,is_default_sku,price,discount_price,quantity,status,published,order_limit,package_size_length,package_size_width,package_size_height,package_weight,images
+# Valid Scenarios
+Valid T-Shirt,VD001,Color,Red|M,True,25.99,19.99,100,ACTIVE,Published,10,30,20,2,0.5,https://example.com/tshirt_red_main.jpg|main_image:true|https://example.com/tshirt_red_side.jpg|main_image:false
+Valid T-Shirt,VD001,Color,Blue|M,False,25.99,,80,ACTIVE,Published,10,30,20,2,0.5,https://example.com/tshirt_blue_main.jpg|main_image:true
+Valid T-Shirt,VD001,Color,Green|L,False,27.99,22.99,50,INACTIVE,Unpublished,,32,22,2,0.6,https://example.com/tshirt_green_main.jpg|main_image:true
+Minimal Valid SKU,VD002,Size,Small,True,15.00,,10,ACTIVE,Published,,,,,,
+Six Image SKU,VD003,Pattern,Striped,True,35.00,30.00,20,ACTIVE,Published,5,30,20,2,0.5,https://img.com/1.jpg|main_image:true|https://img.com/2.jpg|main_image:false|https://img.com/3.jpg|main_image:false|https://img.com/4.jpg|main_image:false|https://img.com/5.jpg|main_image:false|https://img.com/6.jpg|main_image:false
+No Image SKU,VD004,Finish,Matte,True,10.00,,5,ACTIVE,Published,,,,,,
+# Parsing Error Scenarios
+ParseError Price,PE001,Color,Red,True,Twenty continuité,15,10,ACTIVE,Published,,,,,,,
+ParseError Quantity,PE002,Color,Blue,True,20,15,Ten,ACTIVE,Published,,,,,,,
+ParseError ImageFormat,PE003,Color,Green,True,20,15,10,ACTIVE,Published,,,,,,https://img.com/a.jpg|main_image:true|https://img.com/b.jpg|main_image:WRONG|https://img.com/c.jpg
+ParseError ImageOddParts,PE004,Color,Black,True,20,15,10,ACTIVE,Published,,,,,,https://img.com/a.jpg|main_image:true|https://img.com/b.jpg
+# Validation Error Scenarios
+ValError MultiDefault A,VE001,Color,Red,True,30,25,10,ACTIVE,Published,,,,,,,https://img.com/red.jpg|main_image:true
+ValError MultiDefault A,VE001,Color,Blue,True,30,25,10,ACTIVE,Published,,,,,,,https://img.com/blue.jpg|main_image:true
+ValError MultiDefault B,VE002,Size,M,True,40,,5,ACTIVE,Published,,,,,,,
+ValError MultiDefault B,VE002,Size,L,True,40,,5,ACTIVE,Published,,,,,,,
+ValError ImageCount,VE003,Color,Red,True,20,15,10,ACTIVE,Published,,,,,,https://img.com/1.jpg|main_image:true|https://img.com/2.jpg|main_image:false|https://img.com/3.jpg|main_image:false|https://img.com/4.jpg|main_image:false|https://img.com/5.jpg|main_image:false|https://img.com/6.jpg|main_image:false|https://img.com/7.jpg|main_image:false
+ValError NoMainImage,VE004,Color,Blue,True,20,15,10,ACTIVE,Published,,,,,,https://img.com/1.jpg|main_image:false|https://img.com/2.jpg|main_image:false
+ValError MultiMainImage,VE005,Color,Green,True,20,15,10,ACTIVE,Published,,,,,,https://img.com/1.jpg|main_image:true|https://img.com/2.jpg|main_image:true
+ValError InvalidStatus,VE006,Color,Purple,True,20,15,10,DRAFT,Published,,,,,,,
+ValError InvalidPublished,VE007,Color,Yellow,True,20,15,10,ACTIVE,Archived,,,,,,,
+ValError NegativePrice,VE008,Color,Orange,True,-5,0,10,ACTIVE,Published,,,,,,,
+ValError NegativeQty,VE009,Color,White,True,5,0,-10,ACTIVE,Published,,,,,,,
+ValError MissingProductName,,VE010,Color,Red,True,10,5,10,ACTIVE,Published,,,,,,,
+ValError MissingBizID,ProductX,,Color,Red,True,10,5,10,ACTIVE,Published,,,,,,,
+ValError MissingMainAttr,ProductY,VE011,,Red,True,10,5,10,ACTIVE,Published,,,,,,,
+ValError MissingAttrCombo,ProductZ,VE012,Color,,True,10,5,10,ACTIVE,Published,,,,,,,
+ValError EmptyAttrValue,ProductW,VE013,Color,Red|,True,10,5,10,ACTIVE,Published,,,,,,,https://img.com/w.jpg|main_image:true
+# Edge Cases
+SingleAttrSKU,EC001,Scent,Lavender,True,12.50,,25,ACTIVE,Published,,,,,,https://img.com/lavender.jpg|main_image:true
+MultiAttrSKU,EC002,Flavor,Vanilla|Large,True,5.00,,60,ACTIVE,Published,,,,,,https://img.com/vanilla_large.jpg|main_image:true
+AllOptionalEmpty,EC003,Type,A,True,9.99,,5,ACTIVE,Published,,,,,,https://img.com/typea.jpg|main_image:true
+AllOptionalFull,EC004,Type,B,True,19.99,15.99,3,ACTIVE,Published,1,10,10,10,1,https://img.com/typeb.jpg|main_image:true

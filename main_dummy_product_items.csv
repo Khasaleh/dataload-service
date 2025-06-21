@@ -1,0 +1,5 @@
+product_name,business_details_id,main_attribute,attribute_combination,is_default_sku,price,discount_price,quantity,status,published,order_limit,package_size_length,package_size_width,package_size_height,package_weight,images
+Demo Product A,101,Color,Red,True,50,45,10,ACTIVE,Published,1,,,,https://cdn.example.com/red.jpg|main_image:true
+Demo Product A,101,Color,Blue,False,50,,5,ACTIVE,Published,,,,,https://cdn.example.com/blue.jpg|main_image:true
+Demo Product B,102,Size,Large,True,100,90,20,INACTIVE,Unpublished,1,,,,,https://cdn.example.com/large.jpg|main_image:true|https://cdn.example.com/large_detail.jpg|main_image:false
+Demo Product C (Error),103,Flavor,Vanilla,True,invalid_price,,10,ACTIVE,Published,,,,,https://cdn.example.com/vanilla.jpg|main_image:true
