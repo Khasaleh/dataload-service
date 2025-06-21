@@ -34,8 +34,16 @@ from app.db.models import (
     ReturnPolicyOrm,
     ProductOrm,
     ProductItemOrm,
-    ProductPriceOrm,
-    MetaTagOrm
+    # ProductPriceOrm, # This is the old price table, replaced by PriceOrm
+    MetaTagOrm,
+    # New models related to recent DDL and Price feature
+    BusinessDetailsOrm,
+    CategoryOrm,
+    CategoryAttributeOrm,
+    ProductImageOrm,
+    ProductSpecificationOrm,
+    ShoppingCategoryOrm, # Make sure this is correctly imported if defined elsewhere
+    PriceOrm # The new Price table
 )
 
 # target_metadata should point to your Base.metadata
@@ -114,4 +122,3 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-```
