@@ -1,9 +1,11 @@
+import sqlalchemy as sa # Added for sa.false()
 from sqlalchemy import (
     Column, Integer, String, DateTime, Float, Boolean, ForeignKey,
     UniqueConstraint, Index, Text, BigInteger # Added BigInteger
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func # For server-side default timestamps
+# from sqlalchemy.sql.expression import nextval # Removed incorrect import
 
 from .base_class import Base
 import os # Added os import
@@ -146,7 +148,7 @@ class BrandOrm(Base):
     # created_at = Column(DateTime, server_default=func.now(), nullable=False)
     # updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
-    products = relationship("ProductOrm", back_populates="brand")
+    # products = relationship("ProductOrm", back_populates="brand") # ProductOrm DDL does not have brand_id
 
     __table_args__ = (
         UniqueConstraint('business_details_id', 'name', name='uq_brand_business_name'), # Updated to 'name'
@@ -211,73 +213,201 @@ class ReturnPolicyOrm(Base):
 
     id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
 
-    # DDL: created_date timestamp without time zone NOT NULL
-    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    # Fields based on the DDL for return_policy table and product linking needs
+    # (id, policy_name, return_type, return_fee_type, return_fee, business_details_id are key)
 
-    # DDL: grace_period_return bigint
-    grace_period_return = Column(BigInteger, nullable=True)
+    # DDL: created_date timestamp without time zone NOT NULL (or similar audit fields)
+    # Using created_by/created_date/updated_by/updated_date from typical patterns if available
+    created_by = Column(BigInteger, nullable=True)
+    created_date_ts = Column("created_date", DateTime, server_default=func.now(), nullable=True) # aliasing if 'created_date' is used differently
+    updated_by = Column(BigInteger, nullable=True)
+    updated_date_ts = Column("updated_date", DateTime, onupdate=func.now(), nullable=True) # aliasing
 
-    # DDL: policy_name text COLLATE pg_catalog."default"
-    policy_name = Column(Text, nullable=True)
+    policy_name = Column(Text, nullable=False, index=True) # DDL: policy_name text
 
-    # DDL: return_policy_type character varying(255) COLLATE pg_catalog."default" NOT NULL
-    return_policy_type = Column(String(255), nullable=False)
+    # Fields crucial for product linking and lookup from products.csv
+    return_type = Column(String(255), nullable=False, index=True) # e.g., SALES_RETURN_ALLOWED, SALES_ARE_FINAL
+    return_fee_type = Column(String(255), nullable=True, index=True) # e.g., FIXED, PERCENTAGE, FREE
+    return_fee = Column(Float, nullable=True) # The actual fee amount or percentage
 
-    # DDL: time_period_return bigint
-    time_period_return = Column(BigInteger, nullable=True)
+    # Other potential fields from a typical return_policy table
+    return_days = Column(Integer, nullable=True) # Or time_period_return, grace_period_return from old DDL
+    is_default = Column(Boolean, default=False, nullable=True) # If there's a concept of a default policy
 
-    # DDL: updated_date timestamp without time zone
-    updated_date = Column(DateTime, nullable=True, onupdate=func.now())
-
-    # DDL: business_details_id bigint (FK to public.business_details.id)
-    business_details_id = Column(BigInteger, ForeignKey(f'{PUBLIC_SCHEMA}.business_details.id'), index=True, nullable=True)
+    business_details_id = Column(BigInteger, ForeignKey(f'{PUBLIC_SCHEMA}.business_details.id'), index=True, nullable=False)
 
     # Relationships
     business_detail = relationship("BusinessDetailsOrm", back_populates="return_policies")
-
-    # The 'products' relationship target (ProductOrm.return_policy_id) will need to be updated
-    # to ForeignKey('public.return_policy.id') when ProductOrm is revised.
-    # TODO: Review ProductOrm.return_policy_id FK and relationship back_populates.
     products = relationship("ProductOrm", back_populates="return_policy")
 
     __table_args__ = (
-        Index('idx_return_policy_business_type', "business_details_id", "return_policy_type"),
-        {"schema": PUBLIC_SCHEMA}, # Moved to PUBLIC_SCHEMA
+        UniqueConstraint('business_details_id', 'policy_name', name='uq_return_policy_business_name'),
+        Index('idx_return_policy_lookup', "business_details_id", "return_type", "return_fee_type", "return_fee"),
+        {"schema": PUBLIC_SCHEMA},
     )
 
+# --- Shopping Category Model (Basic for FK reference) ---
+# This will be defined in a separate file app/models/shopping_category.py
+from app.models.shopping_category import ShoppingCategoryOrm # Import for relationship
+
+# class ShoppingCategoryOrm(Base):
+#     __tablename__ = "shopping_categories"
+#     id = Column(BigInteger, primary_key=True)
+#     name = Column(String(150), nullable=False, unique=True) # Assuming name is unique for lookup
+#     # Other fields from DDL: created_at, updated_at, parent_id, business_type
+#     __table_args__ = ({"schema": PUBLIC_SCHEMA})
+
+
+# --- Product Model (Revised based on DDL) ---
 class ProductOrm(Base):
     __tablename__ = "products"
-    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    business_details_id = Column(BigInteger, index=True, nullable=False) # Changed
-    product_name = Column(String, index=True, nullable=False)
-    product_url = Column(String, nullable=True)
+    __table_args__ = ({"schema": PUBLIC_SCHEMA}) # DDL implies public schema
 
-    brand_id = Column(Integer, ForeignKey(f'{CATALOG_SCHEMA}.brands.id'), nullable=False) # Schema-qualified FK
-    brand = relationship("BrandOrm", back_populates="products")
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True) # DDL: bigint, nextval handled by DB
+    created_by = Column(BigInteger, nullable=True)
+    created_date = Column(BigInteger, nullable=True) # DDL: bigint (epoch or similar)
+    updated_by = Column(BigInteger, nullable=True)
+    updated_date = Column(BigInteger, nullable=True) # DDL: bigint
 
-    category_path = Column(String, nullable=True, index=True)
+    barcode = Column(Text, nullable=False) # DDL: text NOT NULL
+    brand_name = Column(String(256), nullable=True) # DDL: character varying(256) - Storing name, linking via brand_id
+    business_details_id = Column(BigInteger, nullable=False, index=True) # DDL: bigint NOT NULL
+    description = Column(Text, nullable=False) # DDL: text NOT NULL
+    is_child_item = Column(Integer, nullable=True) # DDL: integer
+    name = Column(String(256), nullable=False, index=True) # DDL: character varying(256) NOT NULL
+    product_type_status = Column(Integer, nullable=True) # DDL: integer
+    self_gen_product_id = Column(String(256), nullable=False, index=True) # DDL: character varying(256) NOT NULL
 
-    return_policy_id = Column(Integer, ForeignKey(f'{BUSINESS_SCHEMA}.return_policies.id'), nullable=False) # Schema-qualified FK
+    category_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.categories.id"), nullable=False, index=True) # DDL: bigint NOT NULL
+    category = relationship("CategoryOrm") # Relationship to CategoryOrm
+
+    discount = Column(Float, nullable=True) # DDL: real
+    price = Column(Float, nullable=True) # DDL: real
+    sale_price = Column(Float, nullable=True) # DDL: real
+    quantity = Column(BigInteger, nullable=True) # DDL: bigint
+    size_chart_image = Column(String(255), nullable=True)
+    product_dimentions = Column(Text, nullable=True) # Note: DDL typo "dimentions"
+    product_weight = Column(String(255), nullable=True)
+    cost_price = Column(Float, nullable=True) # DDL: real
+    active = Column(String(255), nullable=True, index=True) # DDL: character varying(255)
+    ean = Column(String(256), nullable=True)
+    isbn = Column(String(256), nullable=True)
+    keywords = Column(String(512), nullable=True)
+    mpn = Column(String(256), nullable=True)
+    seo_description = Column(String(512), nullable=True)
+    seo_title = Column(String(256), nullable=True)
+    upc = Column(String(256), nullable=True)
+    url = Column(String(256), nullable=True, index=True) # DDL: character varying(256)
+
+    shopping_category_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.shopping_categories.id"), nullable=True, index=True) # DDL: bigint
+    shopping_category = relationship("ShoppingCategoryOrm") # Relationship to ShoppingCategoryOrm
+
+    package_size_height = Column(Float, nullable=True) # DDL: real
+    package_size_length = Column(Float, nullable=True) # DDL: real
+    package_size_width = Column(Float, nullable=True) # DDL: real
+    product_weights = Column(Float, nullable=True) # DDL: real (Note: CSV has 'product_weights', DDL 'product_weights')
+    size_unit = Column(String(255), nullable=True)
+    weight_unit = Column(String(255), nullable=True)
+    average_review = Column(Float, default=0) # DDL: double precision DEFAULT 0
+    review_count = Column(BigInteger, default=0) # DDL: bigint DEFAULT 0
+    is_item_package_dimentions = Column(Boolean, default=False) # DDL: boolean DEFAULT false (Note: DDL typo "dimentions")
+    is_item_level_weight = Column(Boolean, default=False) # DDL: boolean DEFAULT false
+    order_limit = Column(BigInteger, nullable=True)
+
+    # Return Policy Fields from Product DDL
+    return_fee = Column(Float, nullable=True) # DDL: real
+    return_fee_type = Column(String(255), nullable=True) # DDL: character varying(255)
+    return_policy_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.return_policy.id"), nullable=True, index=True) # DDL: bigint
+    return_type = Column(String(255), nullable=True) # DDL: character varying(255)
+
+    video_url = Column(String(255), nullable=True)
+    main_image_url = Column(String(255), nullable=True) # Main image for the product itself
+    mobile_barcode = Column(Text, nullable=True)
+    highest_price = Column(Float, default=0) # DDL: double precision DEFAULT 0
+    thumbnail_url = Column(String(255), nullable=True)
+
+    # Relationships
+    # Brand relationship: CSV provides brand_name, we'll look up brand_id.
+    # The products table DDL does not have a direct brand_id FK.
+    # If linking to brands is required, it might be conceptual or via brand_name.
+    # For now, removing direct brand_id FK from ProductOrm as per its DDL.
+    # brand_id = Column(BigInteger, ForeignKey(f'{CATALOG_SCHEMA}.brands.id'), nullable=True)
+    # brand = relationship("BrandOrm", back_populates="products")
+
+    # ReturnPolicyOrm relationship (if we link via return_policy_id)
     return_policy = relationship("ReturnPolicyOrm", back_populates="products")
 
-    package_length = Column(Float, nullable=True)
-    package_width = Column(Float, nullable=True)
-    package_height = Column(Float, nullable=True)
-    package_weight = Column(Float, nullable=True)
-    status = Column(String, nullable=True, index=True)
+    # Product Images (for is_child_item = 0)
+    images = relationship("ProductImageOrm", back_populates="product", cascade="all, delete-orphan")
 
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    # Product Specifications
+    specifications = relationship("ProductSpecificationOrm", back_populates="product", cascade="all, delete-orphan")
 
-    items = relationship("ProductItemOrm", back_populates="product", cascade="all, delete-orphan")
-    prices = relationship("ProductPriceOrm", back_populates="product", cascade="all, delete-orphan") # Should be one-to-one based on ProductPriceOrm.product_id unique
-    meta_tag = relationship("MetaTagOrm", uselist=False, back_populates="product", cascade="all, delete-orphan")
+    # Relationship to items (SKUs) - Assuming ProductItemOrm will be defined/updated later for is_child_item = 1
+    # items = relationship("ProductItemOrm", back_populates="product", cascade="all, delete-orphan")
 
-    __table_args__ = (
-        UniqueConstraint('business_details_id', 'product_name', name='uq_product_business_name'),
-        Index('idx_product_business_status', "business_details_id", "status"),
-        {"schema": CATALOG_SCHEMA} # Assigned schema
-    )
+    # Removing old relationships that are not in the new DDL context
+    # prices = relationship("ProductPriceOrm", back_populates="product", cascade="all, delete-orphan")
+    # meta_tag = relationship("MetaTagOrm", uselist=False, back_populates="product", cascade="all, delete-orphan")
+
+    # Constraints from DDL: products_pkey PRIMARY KEY (id)
+    # fkc6f144ia6250x7b32f06ofd6o FOREIGN KEY (shopping_category_id) REFERENCES public.shopping_categories (id)
+    # fkog2rp4qthbtt2lfyhfo32lsw9 FOREIGN KEY (category_id) REFERENCES public.categories (id)
+    # (Return policy FK is not explicitly named in DDL but implied by return_policy_id column)
+
+    # Unique constraints based on common practice or previous definitions if applicable
+    # For example: UniqueConstraint('business_details_id', 'self_gen_product_id', name='uq_product_business_self_gen_id')
+    # UniqueConstraint('business_details_id', 'name', name='uq_product_business_name') - if name is unique per business
+
+
+# --- Product Image Model ---
+class ProductImageOrm(Base):
+    __tablename__ = "product_images"
+    __table_args__ = ({"schema": PUBLIC_SCHEMA}) # DDL implies public schema
+
+    # DDL: id integer NOT NULL DEFAULT nextval('product_images_id_seq'::regclass)
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True) # nextval handled by DB
+
+    name = Column(String(255), nullable=False) # URL or path to the image
+    product_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.products.id"), nullable=True, index=True) # Nullable if linked to SKU
+    main_image = Column(Boolean, default=False, nullable=True)
+
+    # DDL: main_sku_id bigint (references public.main_skus.id) - Will handle when main_skus/items are implemented
+    main_sku_id = Column(BigInteger, nullable=True) # ForeignKey to main_skus.id will be added later
+
+    active = Column(String(255), nullable=True) # DDL: character varying(255)
+    created_by = Column(BigInteger, nullable=True)
+    created_date = Column(BigInteger, nullable=True)
+    updated_by = Column(BigInteger, nullable=True)
+    updated_date = Column(BigInteger, nullable=True)
+
+    product = relationship("ProductOrm", back_populates="images")
+
+    #CONSTRAINT fk3jss75rmr7hpgc0m8iptl84tw FOREIGN KEY (main_sku_id) REFERENCES public.main_skus (id)
+    #CONSTRAINT fkqnq71xsohugpqwf3c9gxmsuy FOREIGN KEY (product_id) REFERENCES public.products (id)
+
+# --- Product Specification Model ---
+class ProductSpecificationOrm(Base):
+    __tablename__ = "product_specification"
+    __table_args__ = ({"schema": PUBLIC_SCHEMA}) # DDL implies public schema
+
+    # DDL: id bigint NOT NULL DEFAULT nextval('product_specification_id_seq'::regclass)
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True) # nextval handled by DB
+
+    name = Column(String(255), nullable=True) # Specification name (e.g., "Color", "Material")
+    value = Column(Text, nullable=True) # Specification value (e.g., "Red", "Cotton")
+
+    product_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.products.id"), nullable=True, index=True)
+
+    active = Column(String(255), nullable=True) # DDL: character varying(255)
+    created_by = Column(BigInteger, nullable=True)
+    created_date = Column(BigInteger, nullable=True)
+    updated_by = Column(BigInteger, nullable=True)
+    updated_date = Column(BigInteger, nullable=True)
+
+    product = relationship("ProductOrm", back_populates="specifications")
+    # CONSTRAINT fkcshw23fru6i7sk0p9qq8fu4gt FOREIGN KEY (product_id) REFERENCES public.products (id)
+
 
 class ProductItemOrm(Base):
     __tablename__ = "product_items"
@@ -343,4 +473,3 @@ class MetaTagOrm(Base):
         # UniqueConstraint('business_details_id', 'product_id', name='uq_metatag_business_product'), # product_id is already unique
         {"schema": CATALOG_SCHEMA} # Assigned schema
     )
-```

@@ -226,6 +226,72 @@ This CSV format is used to upload return policy information.
 **Sample File**:
 A sample CSV file demonstrating this structure can be found at `sample_data/return_policies.csv`.
 
+### Products (`load_type: "products"`)
+
+This CSV format is used to upload core product information, including links to categories, brands, return policies, and optionally shopping categories. It also handles product specifications and images for non-variant products.
+
+**Key Columns**:
+
+*   `product_name` (Mandatory, String): The display name of the product. Used in conjunction with `business_details_id` as a unique key for upserting.
+*   `self_gen_product_id` (Mandatory, String): A unique identifier for the product within the business's scope (e.g., an internal SKU or product code). This is the primary key used for database upserts.
+*   `business_details_id` (Mandatory, Integer): The ID of the business this product belongs to. While the uploader's business context is used, this can be in the CSV for explicit assignment or validation.
+*   `description` (Mandatory, String): A detailed description of the product.
+*   `brand_name` (Mandatory, String): The name of the brand. Must match an existing brand name previously loaded for this business.
+*   `category_id` (Mandatory, Integer): The database ID of the category this product belongs to. This category must exist and belong to the business.
+*   `shopping_category_name` (Optional, String): The name of the shopping category. If provided, must match an existing shopping category name (which are considered global or pre-defined).
+*   `price` (Mandatory, Float): The standard selling price of the product. Must be greater than 0.
+*   `sale_price` (Optional, Float): The discounted sale price. Must be non-negative if provided.
+*   `cost_price` (Optional, Float): The cost price of the product. Must be non-negative if provided.
+*   `quantity` (Mandatory, Integer): The available stock quantity. Must be non-negative.
+*   `package_size_length` (Mandatory, Float): Length of the product packaging. Must be greater than 0.
+*   `package_size_width` (Mandatory, Float): Width of the product packaging. Must be greater than 0.
+*   `package_size_height` (Mandatory, Float): Height of the product packaging. Must be greater than 0.
+*   `product_weights` (Mandatory, Float): Weight of the product. Must be greater than 0.
+*   `size_unit` (Mandatory, String): Unit for package dimensions (e.g., "CM", "INCHES").
+*   `weight_unit` (Mandatory, String): Unit for product weight (e.g., "KG", "POUNDS").
+*   `active` (Mandatory, String): Status of the product. Must be "ACTIVE" or "INACTIVE" (case-insensitive, stored as uppercase).
+*   `return_type` (Mandatory, String): Defines the return eligibility. Must be one of:
+    *   `SALES_RETURN_ALLOWED`: Returns are allowed. `return_fee_type` becomes mandatory.
+    *   `SALES_ARE_FINAL`: Sales are final. `return_fee_type` and `return_fee` must be empty/null.
+*   `return_fee_type` (Optional, String): Required if `return_type` is "SALES_RETURN_ALLOWED". Must be one of:
+    *   `FIXED`: A fixed fee is charged for returns. `return_fee` is the amount.
+    *   `PERCENTAGE`: A percentage of the price is charged. `return_fee` is the percentage value (e.g., 10 for 10%).
+    *   `FREE`: Returns are free. `return_fee` will be 0.
+*   `return_fee` (Optional, Float): The fee amount or percentage, corresponding to `return_fee_type`. Required and must be non-negative if `return_fee_type` is "FIXED" or "PERCENTAGE". Ignored and set to 0 if `return_fee_type` is "FREE". Must be empty/null if `return_type` is "SALES_ARE_FINAL".
+*   `url` (Optional, String): A custom URL slug for the product (e.g., "my-product-slug"). If not provided, a slug is auto-generated from `product_name`. Must be lowercase, alphanumeric with hyphens.
+*   `video_url` (Optional, String): URL to a product video.
+*   `images` (Optional, String): Pipe-separated list of image URLs and their main image status. Format: `url1|main_image:true/false|url2|main_image:true/false|...`. Example: `https://cdn.com/img1.jpg|main_image:true|https://cdn.com/img2.jpg|main_image:false`. Images are processed only if `is_child_item` is 0.
+*   `specifications` (Optional, String): Pipe-separated list of product specifications. Format: `Name1:Value1|Name2:Value2|...`. Example: `Color:Red|Material:Steel`.
+*   `is_child_item` (Mandatory, Integer): Flag indicating if this is a parent product (1) with variants (items/SKUs to be loaded separately) or a standalone/non-variant product (0). If 0, `images` from this CSV are associated with this product. If 1, product-level images from this CSV are ignored (item-level images are expected in an items/SKUs dataload).
+*   `ean` (Optional, String): European Article Number.
+*   `isbn` (Optional, String): International Standard Book Number.
+*   `keywords` (Optional, String): Comma-separated keywords for search or tagging.
+*   `mpn` (Optional, String): Manufacturer Part Number.
+*   `seo_description` (Optional, String): SEO meta description.
+*   `seo_title` (Optional, String): SEO meta title.
+*   `upc` (Optional, String): Universal Product Code.
+
+**Database Table Interactions**:
+The product dataload interacts with the following tables:
+*   `public.products`: Core product data is stored here.
+*   `public.product_images`: Populated from the `images` column if `is_child_item` is 0.
+*   `public.product_specification`: Populated from the `specifications` column.
+*   `public.brands`: `brand_name` is used to look up an existing brand ID.
+*   `public.categories`: `category_id` is used directly (existence is verified).
+*   `public.shopping_categories`: `shopping_category_name` (if provided) is used to look up an existing shopping category ID.
+*   `public.return_policy`: The combination of `return_type`, `return_fee_type`, and `return_fee` is used to look up an existing return policy ID. An exact match must be found for the business.
+
+**Barcode Handling**:
+The `products` table has a non-null `barcode` column. Since the CSV does not provide this, the system currently generates a placeholder barcode in the format `BARCODE-{self_gen_product_id}`.
+
+**Sample Mockup Row (Illustrative)**:
+```
+product_name,self_gen_product_id,business_details_id,description,brand_name,category_id,shopping_category_name,price,sale_price,cost_price,quantity,package_size_length,package_size_width,package_size_height,product_weights,size_unit,weight_unit,active,return_type,return_fee_type,return_fee,url,video_url,images,specifications,is_child_item
+Samsung Smart TV 55inch,PROD-001,10,High-resolution smart TV,Samsung,101,Electronics,700,649,500,50,123.5,15.3,77.2,18.5,CENTIMETERS,KILOGRAMS,ACTIVE,SALES_RETURN_ALLOWED,FIXED,20,samsung-smart-tv-55inch,https://cdn.example.com/video.mp4,https://cdn.example.com/img1.jpg|main_image:true,Resolution:4K|HDMI Ports:3,0
+```
+
+*(A full sample `products.csv` would be beneficial here if available.)*
+
 
 ## API Access (GraphQL)
 
