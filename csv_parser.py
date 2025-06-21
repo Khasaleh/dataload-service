@@ -201,13 +201,42 @@ def load_skus_from_csv(file_path: str) -> List[SKU]:
     skus: List[SKU] = []
     try:
         with open(file_path, mode='r', encoding='utf-8') as infile:
+            # Read lines manually to skip comments before passing to DictReader
+            # This is a bit more involved; an easier way is to filter rows from DictReader.
+            # However, DictReader needs a file-like object.
+            # Alternative: check the raw line if possible, or check first field.
+
+            # Simpler: filter rows after DictReader yields them, but adjust row indexing.
+            # For DictReader to work, it needs to read the header correctly.
+            # We can filter rows if they are "comment-like" based on their content.
+
             reader = csv.DictReader(infile)
+            processed_data_row_idx = 0 # For calculating original_row_index correctly
             for i, row_dict in enumerate(reader):
+                # Check if the row is a comment row or empty
+                # A simple check: if the first field's value starts with #, or if all values are empty
+                first_field_name = reader.fieldnames[0] if reader.fieldnames else None
+                if first_field_name and row_dict.get(first_field_name, "").strip().startswith("#"):
+                    # This is a comment line, skip it.
+                    # original_row_index still increments based on physical line number.
+                    # The 'i' from enumerate(reader) is the physical data row index (0-based after header).
+                    print(f"Skipping comment line in CSV (approx physical row {i+2}): {row_dict.get(first_field_name)}")
+                    continue
+
+                # Check for completely empty rows (all values are None or empty strings)
+                if all(not value for value in row_dict.values()):
+                    print(f"Skipping empty line in CSV (approx physical row {i+2})")
+                    continue
+
                 # CSV row numbers are typically 1-based. Header is row 1. Data starts row 2.
-                # DictReader processes from the first data row. `i` is 0-based for data rows.
-                # So, original_row_index = i + 2.
-                sku = parse_csv_row(row_dict, original_row_index=i + 2)
+                # 'i' is the 0-based index of rows yielded by DictReader *including* filtered ones.
+                # To maintain correct original_row_index for error reporting relative to the physical file:
+                # We use 'i + 2' because 'i' is the 0-based index from the header.
+                current_physical_row_in_file = i + 2
+                sku = parse_csv_row(row_dict, original_row_index=current_physical_row_in_file)
                 skus.append(sku)
+                processed_data_row_idx +=1
+
     except FileNotFoundError:
         print(f"Error: File not found at {file_path}")
     except Exception as e:
