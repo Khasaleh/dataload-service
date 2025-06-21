@@ -202,6 +202,30 @@ This CSV format is used to upload attribute definitions and their possible value
 **Sample File**:
 A sample CSV file demonstrating this structure can be found at `sample_data/attributes.csv`.
 
+### Return Policies (`load_type: "return_policies"`)
+
+This CSV format is used to upload return policy information.
+
+**Key Columns**:
+
+*   `id` (Optional, Integer): The existing database ID of the policy if you are updating a specific record. If this field is blank, or if the ID is not found for the associated business, a new return policy record will be created.
+*   `created_date` (Optional, DateTime String): The creation timestamp (e.g., "YYYY-MM-DD HH:MM:SS.ffffff"). If omitted for new policies, this is automatically set by the database.
+*   `grace_period_return` (Optional, Integer): The grace period (in days) allowed for returns. This field is typically applicable if `return_policy_type` is "SALES_RETURN_ALLOWED". It will be ignored (nulled) if `return_policy_type` is "SALES_ARE_FINAL".
+*   `policy_name` (Optional, String): A descriptive name for the return policy (e.g., "14 Day Full Refund", "No Returns"). This field is typically applicable if `return_policy_type` is "SALES_RETURN_ALLOWED". It will be ignored (nulled) if `return_policy_type` is "SALES_ARE_FINAL".
+*   `return_policy_type` (Mandatory, String): Defines the type of policy. Must be one of:
+    *   `SALES_RETURN_ALLOWED`: Indicates returns are allowed under specified conditions.
+    *   `SALES_ARE_FINAL`: Indicates all sales are final, and no returns are accepted.
+*   `time_period_return` (Optional, Integer): The time period (in days) during which a return is allowed. This field is **required if `return_policy_type` is "SALES_RETURN_ALLOWED"**. It will be ignored (nulled) if `return_policy_type` is "SALES_ARE_FINAL".
+*   `updated_date` (Optional, DateTime String): The last update timestamp. If omitted, this is automatically set by the database when a record is updated.
+*   `business_details_id` (Optional, Integer): The integer ID of the business this policy belongs to. While this can be included in the CSV, the system will primarily associate the policy with the `business_details_id` derived from the authenticated user's context during upload.
+
+**Conditional Fields based on `return_policy_type`**:
+*   If `return_policy_type` is "SALES_RETURN_ALLOWED", the `time_period_return` field is mandatory. `policy_name` and `grace_period_return` are typically provided.
+*   If `return_policy_type` is "SALES_ARE_FINAL", the system will ensure `policy_name`, `grace_period_return`, and `time_period_return` are stored as `NULL` in the database, regardless of any values provided for them in the CSV for that row.
+
+**Sample File**:
+A sample CSV file demonstrating this structure can be found at `sample_data/return_policies.csv`.
+
 
 ## API Access (GraphQL)
 
@@ -461,7 +485,7 @@ mutation UploadMyFile($theFile: Upload!, $type: String!) {
 ```json
 {
   "theFile": null, /* Actual file data sent as part of multipart form */
-  "type": "products" /* Valid types include "categories", "brands", "attributes", "products", etc. */
+  "type": "products" /* Valid types include "categories", "brands", "attributes", "return_policies", "products", etc. */
 }
 ```
 
