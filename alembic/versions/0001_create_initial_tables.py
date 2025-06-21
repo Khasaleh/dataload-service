@@ -335,4 +335,3 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_catalog_management_brands_name'), table_name='brands', schema=CATALOG_SCHEMA) # Updated from brand_name to name
     op.drop_table('brands', schema=CATALOG_SCHEMA)
     # ### end Alembic commands ###
-```

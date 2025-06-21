@@ -359,6 +359,8 @@ class ProductOrm(Base):
     # For example: UniqueConstraint('business_details_id', 'self_gen_product_id', name='uq_product_business_self_gen_id')
     # UniqueConstraint('business_details_id', 'name', name='uq_product_business_name') - if name is unique per business
 
+    prices = relationship("PriceOrm", back_populates="product", cascade="all, delete-orphan", foreign_keys="[PriceOrm.product_id]")
+
 
 # --- Product Image Model ---
 class ProductImageOrm(Base):
@@ -373,7 +375,11 @@ class ProductImageOrm(Base):
     main_image = Column(Boolean, default=False, nullable=True)
 
     # DDL: main_sku_id bigint (references public.main_skus.id) - Will handle when main_skus/items are implemented
-    main_sku_id = Column(BigInteger, nullable=True) # ForeignKey to main_skus.id will be added later
+    # main_sku_id = Column(BigInteger, nullable=True) # ForeignKey to main_skus.id will be added later
+    # For Price MVP, linking ProductImageOrm directly to main_skus might be out of scope if main_skus is not yet fully defined/used.
+    # Temporarily commenting out main_sku_id if it's not immediately used or causes FK issues without a main_skus table.
+    main_sku_id = Column(BigInteger, ForeignKey(f'{CATALOG_SCHEMA}.product_items.id', name='fk_product_images_main_sku_id', use_alter=True), nullable=True, index=True)
+
 
     active = Column(String(255), nullable=True) # DDL: character varying(255)
     created_by = Column(BigInteger, nullable=True)
@@ -433,6 +439,43 @@ class ProductItemOrm(Base):
         Index('idx_item_product_id', "product_id"), # Kept manual name for index
         {"schema": CATALOG_SCHEMA} # Assigned schema
     )
+
+    prices = relationship("PriceOrm", back_populates="sku", cascade="all, delete-orphan", foreign_keys="[PriceOrm.sku_id]")
+
+
+class PriceOrm(Base):
+    __tablename__ = "prices"
+    __table_args__ = ({"schema": CATALOG_SCHEMA})
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    business_details_id = Column(BigInteger, index=True, nullable=False)
+
+    product_id = Column(BigInteger, ForeignKey(f'{PUBLIC_SCHEMA}.products.id'), nullable=True, index=True)
+    product = relationship("ProductOrm", back_populates="prices", foreign_keys=[product_id])
+
+    sku_id = Column(Integer, ForeignKey(f'{CATALOG_SCHEMA}.product_items.id'), nullable=True, index=True)
+    sku = relationship("ProductItemOrm", back_populates="prices", foreign_keys=[sku_id])
+
+    price = Column(Float, nullable=False)
+    discount_price = Column(Float, nullable=True)
+    cost_price = Column(Float, nullable=True)
+    currency = Column(String(10), nullable=True, default="USD") # Default currency
+
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('product_id', name='uq_price_product_id'), # A product can only have one direct price entry
+        UniqueConstraint('sku_id', name='uq_price_sku_id'),         # An SKU can only have one price entry
+        # Ensure that either product_id or sku_id is set, but not both (handled by check constraint or application logic)
+        # CheckConstraint('(product_id IS NOT NULL AND sku_id IS NULL) OR (product_id IS NULL AND sku_id IS NOT NULL)', name='cc_price_target_exclusive'),
+        # The above CheckConstraint might be too restrictive if you want to allow prices not linked to product/SKU initially.
+        # Application logic should enforce this based on price_type.
+        Index('idx_price_business_product', "business_details_id", "product_id", unique=True, postgresql_where=sa.text("product_id IS NOT NULL")),
+        Index('idx_price_business_sku', "business_details_id", "sku_id", unique=True, postgresql_where=sa.text("sku_id IS NOT NULL")),
+        {"schema": CATALOG_SCHEMA}
+    )
+
 
 class ProductPriceOrm(Base):
     __tablename__ = "product_prices"
