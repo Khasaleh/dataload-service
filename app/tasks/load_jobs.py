@@ -60,7 +60,11 @@ def get_from_id_map(session_id: str, map_type: str, key: str, pipeline=None):
 # from app.db.models import UploadSessionOrm # Already imported with other ORM models
 from app.db.models import CategoryOrm, AttributeOrm, AttributeValueOrm # Ensure Attribute ORM models are available if needed for context, though not directly used in process_csv_task
 # from app.db.connection import get_session as get_db_session_sync # Already imported as get_session
-from app.services.db_loaders import load_category_to_db, load_brand_to_db, load_attribute_to_db, load_return_policy_to_db # Import the new loaders
+from app.services.db_loaders import load_category_to_db, load_brand_to_db, load_attribute_to_db, load_return_policy_to_db
+
+# Import product specific loader and model
+from app.dataload.product_loader import load_product_record_to_db
+from app.dataload.models.product_csv import ProductCsvModel
 
 # Function to update session status in DB
 def _update_session_status(
@@ -223,8 +227,38 @@ def process_csv_task(business_id, session_id, wasabi_file_path, original_filenam
                     logger.error(f"Error calling load_return_policy_to_db for record {record_data}: {e_loader}", exc_info=True)
                     db_pk = None
 
-            # TODO: Add elif blocks for other map_types (products, etc.)
-            # when their specific loader functions are implemented.
+            elif map_type == "products":
+                try:
+                    # Ensure business_id is in record_data for Pydantic model if it expects it
+                    # ProductCsvModel has 'business_details_id', which is 'business_id' here.
+                    record_data_for_model = record_data.copy() # Avoid modifying original validated_record dict
+                    record_data_for_model['business_details_id'] = business_id
+
+                    product_csv_instance = ProductCsvModel(**record_data_for_model)
+
+                    db_pk = load_product_record_to_db(
+                        db=db_engine_session, # Renamed from db_session to db_engine_session
+                        business_details_id=business_id,
+                        product_data=product_csv_instance,
+                        session_id=session_id
+                    )
+                    if db_pk is not None:
+                        # Map self_gen_product_id -> ProductOrm.id for potential SKU linking etc.
+                        if db_pk_redis_pipeline:
+                             add_to_id_map(
+                                session_id,
+                                f"products{DB_PK_MAP_SUFFIX}", # e.g., products_db_pk
+                                product_csv_instance.self_gen_product_id, # Key for this map
+                                db_pk,
+                                pipeline=db_pk_redis_pipeline
+                            )
+                        else: # Fallback, though pipeline is expected
+                             add_to_id_map(session_id, f"products{DB_PK_MAP_SUFFIX}", product_csv_instance.self_gen_product_id, db_pk)
+
+                except Exception as e_loader:
+                    logger.error(f"Row {csv_row_number}: Error during product processing for self_gen_id {record_data.get('self_gen_product_id', 'N/A')}: {e_loader}", exc_info=True)
+                    db_pk = None
+
 
             else:
                 # For map_types without a specific loader yet, we skip specific DB interaction.
