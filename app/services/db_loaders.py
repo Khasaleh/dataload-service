@@ -20,9 +20,11 @@ from app.db.models import (
     BrandOrm,
     AttributeOrm,      # Added AttributeOrm
     AttributeValueOrm, # Added AttributeValueOrm
-    # ProductOrm, ReturnPolicyOrm,
+    ReturnPolicyOrm,   # Added ReturnPolicyOrm
+    # ProductOrm,
     # ProductItemOrm, ProductPriceOrm, MetaTagOrm
 )
+from datetime import datetime # Added datetime
 # from sqlalchemy.exc import SQLAlchemyError # For more specific DB error handling if needed
 
 
@@ -494,6 +496,94 @@ def load_attribute_to_db(
 
     except Exception as e:
         logger.error(f"Error processing attribute record '{parent_attribute_name}' for business {business_details_id}: {e}", exc_info=True)
+        return None
+
+def load_return_policy_to_db(
+    db_session: Session,
+    business_details_id: int, # This is the integer business ID
+    record_data: Dict[str, Any], # Dict from ReturnPolicyCsvModel
+    session_id: str, # Used for logging context and potentially future Redis use
+    db_pk_redis_pipeline: Any # Redis pipeline, not used in this loader for now
+) -> Optional[int]:
+    """
+    Loads or updates a single return policy record in the database.
+    Handles conditional nullification of fields based on return_policy_type.
+    No Redis _db_pk mapping is done here as products are expected to link by integer ID.
+
+    Args:
+        db_session: SQLAlchemy session.
+        business_details_id: The integer ID for the business.
+        record_data: A dictionary representing a row from the return policy CSV,
+                     validated by ReturnPolicyCsvModel.
+        session_id: The current upload session ID (for logging).
+        db_pk_redis_pipeline: Redis pipeline (not used by this function for _db_pk map).
+
+    Returns:
+        The database primary key (integer) of the processed return policy,
+        or None if processing failed for this record.
+    """
+
+    csv_policy_id = record_data.get("id") # ID from CSV, if provided (for updates)
+    return_policy_type = record_data.get("return_policy_type")
+
+    if not return_policy_type: # Mandatory field
+        logger.error(f"Missing 'return_policy_type' in record_data for business {business_details_id}, session {session_id}. Record: {record_data}")
+        return None
+
+    db_pk: Optional[int] = None
+    db_policy: Optional[ReturnPolicyOrm] = None
+
+    try:
+        # Prepare data for ORM, applying conditional logic first
+        policy_data_for_orm = {
+            "policy_name": record_data.get("policy_name"),
+            "return_policy_type": return_policy_type,
+            "grace_period_return": record_data.get("grace_period_return"),
+            "time_period_return": record_data.get("time_period_return"),
+            "business_details_id": business_details_id,
+        }
+        if record_data.get('created_date') is not None: # Pydantic model makes it datetime
+            policy_data_for_orm['created_date'] = record_data.get('created_date')
+        if record_data.get('updated_date') is not None:
+            policy_data_for_orm['updated_date'] = record_data.get('updated_date')
+
+
+        if return_policy_type == "SALES_ARE_FINAL":
+            policy_data_for_orm["policy_name"] = None
+            policy_data_for_orm["grace_period_return"] = None
+            policy_data_for_orm["time_period_return"] = None
+
+        # Upsert logic
+        if csv_policy_id is not None:
+            db_policy = db_session.query(ReturnPolicyOrm).filter_by(
+                id=csv_policy_id,
+                business_details_id=business_details_id # Ensure it belongs to this business
+            ).first()
+
+        if db_policy:  # Existing policy, update it
+            logger.info(f"Updating existing return policy ID '{csv_policy_id}' for business {business_details_id}")
+            for key, value in policy_data_for_orm.items():
+                setattr(db_policy, key, value)
+            # db_policy.updated_date = datetime.utcnow() # Handled by onupdate=func.now() in ORM
+            db_pk = db_policy.id
+        else:  # New policy or ID from CSV not found (treat as new)
+            if csv_policy_id is not None:
+                logger.warning(f"Return policy ID '{csv_policy_id}' provided in CSV not found for business {business_details_id}. Creating as new.")
+
+            new_policy_orm = ReturnPolicyOrm(**policy_data_for_orm)
+            db_session.add(new_policy_orm)
+            db_session.flush()
+
+            if new_policy_orm.id is None:
+                logger.error(f"Failed to obtain DB ID for new return policy after flush. Name: {policy_data_for_orm.get('policy_name')}")
+                return None
+            db_pk = new_policy_orm.id
+            logger.info(f"Created new return policy with DB ID {db_pk}. Name: {policy_data_for_orm.get('policy_name')}")
+
+        return db_pk
+
+    except Exception as e:
+        logger.error(f"Error processing return policy record for business {business_details_id}: {record_data} - {e}", exc_info=True)
         return None
 
 # ... other loader functions for products, attributes, etc. ...
