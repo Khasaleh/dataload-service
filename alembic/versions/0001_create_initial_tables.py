@@ -93,22 +93,32 @@ def upgrade() -> None:
     op.create_index(op.f('ix_catalog_management_attribute_value_value'), 'attribute_value', ['value'], unique=False, schema=CATALOG_SCHEMA)
     # op.create_index(op.f('ix_catalog_management_attribute_value_id'), 'attribute_value', ['id'], unique=False, schema=CATALOG_SCHEMA) # PKs are auto-indexed
 
-    op.create_table('return_policies',
-        sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column('business_details_id', sa.BigInteger(), nullable=False),
-        sa.Column('return_policy_code', sa.String(), nullable=False),
-        sa.Column('name', sa.String(), nullable=False),
-        sa.Column('return_window_days', sa.Integer(), nullable=False),
-        sa.Column('grace_period_days', sa.Integer(), server_default=sa.text('0'), nullable=False),
-        sa.Column('description', sa.Text(), nullable=True),
-        sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-        sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), onupdate=sa.text('now()'), nullable=False),
-        sa.PrimaryKeyConstraint('id', name=op.f('pk_return_policies')),
-        sa.UniqueConstraint('business_details_id', 'return_policy_code', name=op.f('uq_returnpolicy_business_code')),
-        schema=BUSINESS_SCHEMA
+    # Placeholder for business_details table in PUBLIC_SCHEMA
+    op.create_table('business_details',
+        sa.Column('id', sa.BigInteger(), autoincrement=True, nullable=False),
+        # Add other columns here if they become managed by this Alembic flow later.
+        sa.PrimaryKeyConstraint('id', name=op.f('pk_business_details')),
+        schema=PUBLIC_SCHEMA
     )
-    op.create_index(op.f('ix_fazeal_business_return_policies_business_details_id'), 'return_policies', ['business_details_id'], unique=False, schema=BUSINESS_SCHEMA)
-    op.create_index(op.f('ix_fazeal_business_return_policies_return_policy_code'), 'return_policies', ['return_policy_code'], unique=False, schema=BUSINESS_SCHEMA)
+    op.create_index(op.f('ix_public_business_details_id'), 'business_details', ['id'], unique=False, schema=PUBLIC_SCHEMA)
+
+    # New return_policy table in PUBLIC_SCHEMA
+    op.create_table('return_policy',
+        sa.Column('id', sa.BigInteger(), autoincrement=True, nullable=False),
+        sa.Column('created_date', sa.DateTime(), nullable=False, server_default=sa.text('now()')),
+        sa.Column('grace_period_return', sa.BigInteger(), nullable=True),
+        sa.Column('policy_name', sa.Text(), nullable=True),
+        sa.Column('return_policy_type', sa.String(length=255), nullable=False),
+        sa.Column('time_period_return', sa.BigInteger(), nullable=True),
+        sa.Column('updated_date', sa.DateTime(), nullable=True, onupdate=sa.text('now()')),
+        sa.Column('business_details_id', sa.BigInteger(), nullable=True),
+        sa.ForeignKeyConstraint(['business_details_id'], [f'{PUBLIC_SCHEMA}.business_details.id'], name=op.f('fk_return_policy_business_details_id_business_details')),
+        sa.PrimaryKeyConstraint('id', name=op.f('pk_return_policy')),
+        schema=PUBLIC_SCHEMA
+    )
+    op.create_index(op.f('ix_public_return_policy_id'), 'return_policy', ['id'], unique=False, schema=PUBLIC_SCHEMA)
+    op.create_index(op.f('ix_public_return_policy_business_details_id'), 'return_policy', ['business_details_id'], unique=False, schema=PUBLIC_SCHEMA)
+    op.create_index(op.f('ix_public_return_policy_business_details_id_return_policy_type'), 'return_policy', ['business_details_id', 'return_policy_type'], unique=False, schema=PUBLIC_SCHEMA)
 
     op.create_table('upload_sessions',
         sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
@@ -300,9 +310,17 @@ def downgrade() -> None:
     op.drop_index('idx_upload_session_business_created_at', table_name='upload_sessions', schema=PUBLIC_SCHEMA)
     op.drop_table('upload_sessions', schema=PUBLIC_SCHEMA)
 
-    op.drop_index(op.f('ix_fazeal_business_return_policies_return_policy_code'), table_name='return_policies', schema=BUSINESS_SCHEMA)
-    op.drop_index(op.f('ix_fazeal_business_return_policies_business_details_id'), table_name='return_policies', schema=BUSINESS_SCHEMA)
-    op.drop_table('return_policies', schema=BUSINESS_SCHEMA)
+    # Drop new return_policy table (PUBLIC_SCHEMA) and its indexes first
+    op.drop_index(op.f('ix_public_return_policy_business_details_id_return_policy_type'), table_name='return_policy', schema=PUBLIC_SCHEMA)
+    op.drop_index(op.f('ix_public_return_policy_business_details_id'), table_name='return_policy', schema=PUBLIC_SCHEMA)
+    op.drop_index(op.f('ix_public_return_policy_id'), table_name='return_policy', schema=PUBLIC_SCHEMA)
+    op.drop_table('return_policy', schema=PUBLIC_SCHEMA)
+
+    # Drop business_details table (PUBLIC_SCHEMA) and its index
+    op.drop_index(op.f('ix_public_business_details_id'), table_name='business_details', schema=PUBLIC_SCHEMA)
+    op.drop_table('business_details', schema=PUBLIC_SCHEMA)
+
+    # Old return_policies table in BUSINESS_SCHEMA and its indexes are already removed from drop sequence
 
     op.drop_index(op.f('ix_catalog_management_attribute_value_value'), table_name='attribute_value', schema=CATALOG_SCHEMA)
     op.drop_index(op.f('ix_catalog_management_attribute_value_name'), table_name='attribute_value', schema=CATALOG_SCHEMA)

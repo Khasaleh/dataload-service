@@ -3,11 +3,11 @@ from pydantic import ValidationError
 from datetime import datetime
 
 from app.models.schemas import (
-    BrandModel,
-    AttributeModel,
-    ReturnPolicyModel,
-    ProductModel,
-    ProductItemModel,
+    BrandCsvModel,      # Renamed
+    AttributeCsvModel,  # Renamed
+    ReturnPolicyCsvModel, # Renamed
+    ProductModel,       # Assuming ProductModel is still the name or will be updated later
+    ProductItemModel,   # Assuming ProductItemModel is still the name
     ProductPriceModel,
     MetaTagModel,
     UploadSessionModel
@@ -54,27 +54,82 @@ class TestBrandModel:
 
 class TestAttributeModel:
     def test_attribute_name_validation(self):
-        check_non_empty_validator(AttributeModel, "attribute_name", valid_value="Color")
+        check_non_empty_validator(AttributeCsvModel, "attribute_name", valid_value="Color") # Renamed model
 
     def test_allowed_values_validation(self):
-        # For AttributeModel, allowed_values is also a string that shouldn't be empty
-        check_non_empty_validator(AttributeModel, "allowed_values", valid_value="Red,Blue")
+        # For AttributeCsvModel, 'values_name' and other pipe-separated fields have complex validation.
+        # This old test for 'allowed_values' is no longer applicable as 'allowed_values' field was removed.
+        # New tests for AttributeCsvModel's root validators would be needed if not already present.
+        # For now, just commenting out or removing this specific test.
+        # check_non_empty_validator(AttributeCsvModel, "allowed_values", valid_value="Red,Blue")
+        pass
 
-class TestReturnPolicyModel:
-    def test_text_fields_validation(self):
-        check_non_empty_validator(ReturnPolicyModel, "return_policy_code", valid_value="RP123")
-        check_non_empty_validator(ReturnPolicyModel, "name", valid_value="Standard Policy")
-        # description is not validated for non-empty, so it can be empty.
-        ReturnPolicyModel(return_policy_code="c", name="n", return_window_days=1, grace_period_days=0, description="")
+class TestReturnPolicyCsvModel: # Renamed class
+    # Old tests removed as the model structure and validators have changed significantly.
+
+    def test_return_policy_csv_sales_return_allowed_valid(self):
+        data = {
+            "return_policy_type": "SALES_RETURN_ALLOWED",
+            "time_period_return": 14,
+            "policy_name": "14 Day Returns",
+        }
+        model = ReturnPolicyCsvModel(**data)
+        assert model.return_policy_type == "SALES_RETURN_ALLOWED"
+        assert model.time_period_return == 14
+        assert model.policy_name == "14 Day Returns"
+
+    def test_return_policy_csv_sales_return_allowed_missing_time_period(self):
+        data = {
+            "return_policy_type": "SALES_RETURN_ALLOWED",
+            "policy_name": "Test Policy",
+        }
+        with pytest.raises(ValidationError) as excinfo:
+            ReturnPolicyCsvModel(**data)
+
+        # Check Pydantic v1 style:
+        # assert any(
+        #     "'time_period_return' is required when 'return_policy_type' is 'SALES_RETURN_ALLOWED'" in str(e.exc)
+        #     for e in excinfo.value.raw_errors
+        # )
+        # Check Pydantic v2 style (more robust):
+        errors = excinfo.value.errors()
+        assert len(errors) == 1
+        assert errors[0]['type'] == 'value_error' # Generic type for root_validator errors often
+        # The exact message might be part of context or a custom code in Pydantic v2
+        # For now, checking if the specific message is present in the error details
+        assert "'time_period_return' is required when 'return_policy_type' is 'SALES_RETURN_ALLOWED'." in str(excinfo.value)
 
 
-    def test_return_window_days_validation(self):
-        check_positive_number_validator(ReturnPolicyModel, "return_window_days", valid_value=30, invalid_value=0)
-        check_positive_number_validator(ReturnPolicyModel, "return_window_days", valid_value=30, invalid_value=-5)
+    def test_return_policy_csv_sales_return_allowed_policy_name_optional(self):
+        data = {
+            "return_policy_type": "SALES_RETURN_ALLOWED",
+            "time_period_return": 7,
+            # policy_name is missing
+        }
+        model = ReturnPolicyCsvModel(**data)
+        assert model.policy_name is None
+        assert model.time_period_return == 7
 
-    def test_grace_period_days_validation(self):
-        check_non_negative_validator(ReturnPolicyModel, "grace_period_days", valid_value=0, invalid_value=-1)
-        check_non_negative_validator(ReturnPolicyModel, "grace_period_days", valid_value=5, invalid_value=-1)
+    def test_return_policy_csv_sales_are_final_valid_with_nulls(self):
+        data = {"return_policy_type": "SALES_ARE_FINAL"}
+        model = ReturnPolicyCsvModel(**data)
+        assert model.return_policy_type == "SALES_ARE_FINAL"
+        assert model.time_period_return is None
+        assert model.policy_name is None
+        assert model.grace_period_return is None
+
+    def test_return_policy_csv_sales_are_final_valid_with_disregarded_values(self):
+        # The Pydantic model itself allows these values; the loader service is responsible for nullifying them.
+        data = {
+            "return_policy_type": "SALES_ARE_FINAL",
+            "time_period_return": 10,
+            "policy_name": "This policy name will be ignored by loader",
+            "grace_period_return": 5
+        }
+        model = ReturnPolicyCsvModel(**data)
+        assert model.time_period_return == 10
+        assert model.policy_name == "This policy name will be ignored by loader"
+        assert model.grace_period_return == 5
 
 
 class TestProductModel:
