@@ -1,0 +1,9 @@
+meta_type,target_identifier,business_details_id,meta_title,meta_description,meta_keywords
+PRODUCT,"Super Widget Model X",101,"Buy Super Widget Model X Online","Get the best Super Widget Model X, high performance and durable.","widget,super widget,model x,electronics"
+PRODUCT,"Basic Gadget",102,"Basic Gadget For Sale",,"gadget,basic"
+PRODUCT,"Luxury Item Z",101,"Luxury Item Z - Limited Edition","Experience ultimate luxury with Item Z. Limited stock.","luxury,item z,collectible,premium"
+PRODUCT,"Clearance Blender",10,"Powerful Blender Deals","Final sale on powerful blenders – limited stock.","blender,sale,kitchen appliance"
+CATEGORY,"Electronics",,"Top Electronics Deals","Find the latest and greatest in electronics, from TVs to smartphones.","electronics,gadgets,tv,smartphones,deals"
+CATEGORY,"Home Appliances",,"Best Home Appliances Online","Explore a wide range of home appliances, kitchen gadgets, and more.","home appliances,kitchen,laundry,vacuum"
+CATEGORY,"Footwear",,"Stylish Footwear Collection","Discover trendy and comfortable shoes, boots, and sneakers for all occasions.","shoes,sneakers,boots,sandals,footwear"
+CATEGORY,"Books",,,,"books,novels,fiction,non-fiction,reading"

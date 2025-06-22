@@ -1,16 +1,17 @@
 
 from app.models.schemas import (
-    BrandModel, AttributeModel, ReturnPolicyModel, ProductModel,
+    BrandCsvModel, AttributeCsvModel, ReturnPolicyCsvModel, ProductModel, # Corrected model names
     ProductItemModel, ProductPriceModel, MetaTagModel
+    # Assuming AttributeModel was meant to be AttributeCsvModel, and ReturnPolicyModel to be ReturnPolicyCsvModel
 )
 from pydantic import ValidationError
-from app.services.storage import get_from_id_map
+from app.utils.redis_utils import get_from_id_map # Corrected import path to redis_utils
 from collections import defaultdict
 
 MODEL_MAP = {
-    "brands": BrandModel,
-    "attributes": AttributeModel,
-    "return_policies": ReturnPolicyModel,
+    "brands": BrandCsvModel,
+    "attributes": AttributeCsvModel,
+    "return_policies": ReturnPolicyCsvModel,
     "products": ProductModel,
     "product_items": ProductItemModel,
     "product_prices": ProductPriceModel,

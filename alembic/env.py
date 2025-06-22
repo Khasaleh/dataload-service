@@ -35,7 +35,14 @@ from app.db.models import (
     ProductOrm,
     ProductItemOrm,
     ProductPriceOrm,
-    MetaTagOrm
+    MetaTagOrm,
+    CategoryOrm,
+    CategoryAttributeOrm,
+    BusinessDetailsOrm,
+    ProductImageOrm,
+    ProductSpecificationOrm,
+    # Make sure ShoppingCategoryOrm is also imported if it's defined in models.py and part of Base
+    from app.models.shopping_category import ShoppingCategoryOrm # Ensure this path is correct
 )
 
 # target_metadata should point to your Base.metadata
@@ -114,4 +121,3 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-```

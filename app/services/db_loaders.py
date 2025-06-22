@@ -31,13 +31,11 @@ from datetime import datetime # Added datetime
 # Import Redis utilities. These are used to map CSV keys (e.g., category_path, brand_name)
 # to their database Primary Keys (PKs) during an upload session. This allows subsequent
 # CSV files in the same session to resolve foreign key relationships.
-# Assuming they are currently defined in app.tasks.load_jobs:
-from app.tasks.load_jobs import add_to_id_map, get_from_id_map
+from app.utils.redis_utils import add_to_id_map, get_from_id_map, DB_PK_MAP_SUFFIX
 
 logger = logging.getLogger(__name__)
 
-# Suffix for Redis keys that map CSV identifiers to Database Primary Keys
-DB_PK_MAP_SUFFIX = "_db_pk"
+# DB_PK_MAP_SUFFIX is now imported from redis_utils
 
 
 # --- Placeholder for Loader Functions ---
@@ -587,4 +585,3 @@ def load_return_policy_to_db(
         return None
 
 # ... other loader functions for products, attributes, etc. ...
-```

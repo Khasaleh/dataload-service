@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from app.main import app # Main FastAPI application with GraphQL router
 from app.dependencies.auth import get_current_user, SECRET_KEY, ALGORITHM # For overriding and token decoding
 from app.graphql_types import UploadSessionType, UserType, TokenResponseType
+from app.db.models import UploadSessionOrm # Import the ORM model for spec
 
 client = TestClient(app)
 
@@ -116,7 +117,8 @@ def test_query_upload_session_found(mock_get_db_session_sync):
     mock_orm_session.updated_at = datetime.datetime.utcnow()
     # Make __table__.columns accessible for the dict comprehension in resolver
     mock_orm_session.__table__ = MagicMock()
-    mock_orm_session.__table__.columns = [MagicMock(name=c) for c in UploadSessionType.__strawberry_definition__.fields_lookup.keys()]
+    # Corrected way to get field names from Strawberry type
+    mock_orm_session.__table__.columns = [MagicMock(name=f.name) for f in UploadSessionType.__strawberry_definition__.fields]
 
 
     mock_db_session = MagicMock()
@@ -156,7 +158,7 @@ def test_query_upload_session_not_found(mock_get_db_session_sync):
 
     query = f"""
         query {{
-            uploadSession(sessionId: "{mock_session_id}") {{
+            uploadSession(sessionId: "{mock_session_id_str}") {{
                 sessionId
             }}
         }}
@@ -184,7 +186,7 @@ def test_query_upload_session_unauthorized(mock_get_db_session_sync):
 
     query = f"""
         query {{
-            uploadSession(sessionId: "{mock_session_id_for_admin_biz}") {{
+            uploadSession(sessionId: "{mock_session_id_str}") {{
                 sessionId
             }}
         }}
@@ -209,7 +211,7 @@ def test_query_upload_sessions_by_business(mock_get_db_session_sync):
     mock_orm_session1.business_id = MOCK_USER_ADMIN["business_id"]
     # ... other fields for session1 ...
     mock_orm_session1.load_type="products"; mock_orm_session1.original_filename="f1.csv"; mock_orm_session1.wasabi_path="p/f1.csv"; mock_orm_session1.status="completed"; mock_orm_session1.created_at=datetime.datetime.utcnow(); mock_orm_session1.updated_at=datetime.datetime.utcnow(); mock_orm_session1.details=None; mock_orm_session1.record_count=None; mock_orm_session1.error_count=None
-    mock_orm_session1.__table__ = MagicMock(); mock_orm_session1.__table__.columns = [MagicMock(name=c) for c in UploadSessionType.__strawberry_definition__.fields_lookup.keys()]
+    mock_orm_session1.__table__ = MagicMock(); mock_orm_session1.__table__.columns = [MagicMock(name=f.name) for f in UploadSessionType.__strawberry_definition__.fields]
 
 
     mock_orm_session2 = MagicMock()
@@ -217,7 +219,7 @@ def test_query_upload_sessions_by_business(mock_get_db_session_sync):
     mock_orm_session2.business_id = MOCK_USER_ADMIN["business_id"]
     # ... other fields for session2 ...
     mock_orm_session2.load_type="brands"; mock_orm_session2.original_filename="f2.csv"; mock_orm_session2.wasabi_path="p/f2.csv"; mock_orm_session2.status="pending"; mock_orm_session2.created_at=datetime.datetime.utcnow(); mock_orm_session2.updated_at=datetime.datetime.utcnow(); mock_orm_session2.details=None; mock_orm_session2.record_count=None; mock_orm_session2.error_count=None
-    mock_orm_session2.__table__ = MagicMock(); mock_orm_session2.__table__.columns = [MagicMock(name=c) for c in UploadSessionType.__strawberry_definition__.fields_lookup.keys()]
+    mock_orm_session2.__table__ = MagicMock(); mock_orm_session2.__table__.columns = [MagicMock(name=f.name) for f in UploadSessionType.__strawberry_definition__.fields]
 
     mock_db_session = MagicMock()
     mock_db_session.query().filter().order_by().offset().limit().all.return_value = [mock_orm_session1, mock_orm_session2]
@@ -468,6 +470,8 @@ def test_mutation_upload_file_not_csv():
 
 @patch('app.graphql_mutations.get_db_session_sync')
 @patch('app.graphql_mutations.upload_to_wasabi')
+# Removed import from here, it should be at the top of the file.
+
 @patch('uuid.uuid4')
 def test_mutation_upload_file_wasabi_failure_db_update(mock_uuid4, mock_upload_wasabi, mock_get_db_session_sync_in_mutations):
     override_get_current_user(MOCK_USER_ADMIN)
@@ -622,4 +626,3 @@ def test_mutation_refresh_token_disabled_user(mock_users_db_in_mutations):
     assert data.get("data") is None or data.get("data", {}).get("refreshToken") is None
     assert len(data.get("errors", [])) == 1
     assert "User account is disabled." in data["errors"][0]["message"]
-```

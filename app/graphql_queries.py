@@ -39,8 +39,10 @@ class Query:
             return None
         # Assuming current_user_data is a dict with 'business_id' and 'role'
         return UserType(
+            user_id=strawberry.ID(current_user_data.get("user_id", "")), # Add user_id
+            username=current_user_data.get("username", ""),             # Add username
             business_id=current_user_data.get("business_id", ""),
-            role=current_user_data.get("role", "")
+            roles=current_user_data.get("roles", []) # Corrected role to roles and ensure it's a list
         )
 
     @strawberry.field
@@ -149,4 +151,3 @@ class Query:
         finally:
             if db:
                 db.close()
-```

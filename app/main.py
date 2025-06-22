@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Request, Depends # Added Request
+from typing import Optional # Ensure this is at the very top or very early
+from fastapi import FastAPI, Request, Depends
 from dotenv import load_dotenv
 import os
 import logging

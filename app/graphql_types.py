@@ -79,4 +79,3 @@ class StandardMessageType:
 # class GenerateTokenInput:
 #     username: str
 #     password: str # Or other credentials like client_id/client_secret for machine auth
-```

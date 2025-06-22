@@ -87,9 +87,9 @@ class CategoryOrm(Base):
     order_type = Column(String(255), nullable=True)
     shipping_type = Column(String(255), nullable=True)
     active = Column(String(255), nullable=True) # DDL: varchar(255). Consider Boolean if it's 'true'/'false' strings.
-    seo_description = Column(String(255), nullable=True)
-    seo_keywords = Column(String(255), nullable=True)
-    seo_title = Column(String(255), nullable=True)
+    seo_description = Column(String(255), nullable=True) # Max 255 chars
+    seo_keywords = Column(String(255), nullable=True) # Max 255 chars
+    seo_title = Column(String(255), nullable=True) # Max 255 chars
     url = Column(String(255), nullable=True, unique=True) # DDL implies unique url
     position_on_site = Column(BigInteger, nullable=True)
 
@@ -292,10 +292,10 @@ class ProductOrm(Base):
     active = Column(String(255), nullable=True, index=True) # DDL: character varying(255)
     ean = Column(String(256), nullable=True)
     isbn = Column(String(256), nullable=True)
-    keywords = Column(String(512), nullable=True)
+    keywords = Column(String(512), nullable=True) # Max 512 chars
     mpn = Column(String(256), nullable=True)
-    seo_description = Column(String(512), nullable=True)
-    seo_title = Column(String(256), nullable=True)
+    seo_description = Column(String(512), nullable=True) # Max 512 chars
+    seo_title = Column(String(256), nullable=True) # Max 256 chars
     upc = Column(String(256), nullable=True)
     url = Column(String(256), nullable=True, index=True) # DDL: character varying(256)
 
@@ -344,11 +344,11 @@ class ProductOrm(Base):
     specifications = relationship("ProductSpecificationOrm", back_populates="product", cascade="all, delete-orphan")
 
     # Relationship to items (SKUs) - Assuming ProductItemOrm will be defined/updated later for is_child_item = 1
-    # items = relationship("ProductItemOrm", back_populates="product", cascade="all, delete-orphan")
+    items = relationship("ProductItemOrm", back_populates="product", cascade="all, delete-orphan")
 
     # Removing old relationships that are not in the new DDL context
-    # prices = relationship("ProductPriceOrm", back_populates="product", cascade="all, delete-orphan")
-    # meta_tag = relationship("MetaTagOrm", uselist=False, back_populates="product", cascade="all, delete-orphan")
+    prices = relationship("ProductPriceOrm", back_populates="product", cascade="all, delete-orphan")
+    meta_tag = relationship("MetaTagOrm", uselist=False, back_populates="product", cascade="all, delete-orphan")
 
     # Constraints from DDL: products_pkey PRIMARY KEY (id)
     # fkc6f144ia6250x7b32f06ofd6o FOREIGN KEY (shopping_category_id) REFERENCES public.shopping_categories (id)
@@ -414,7 +414,7 @@ class ProductItemOrm(Base):
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     business_details_id = Column(BigInteger, index=True, nullable=False) # Changed
 
-    product_id = Column(Integer, ForeignKey(f'{CATALOG_SCHEMA}.products.id'), nullable=False) # Schema-qualified FK
+    product_id = Column(BigInteger, ForeignKey(f'{PUBLIC_SCHEMA}.products.id'), nullable=False) # Corrected schema to PUBLIC and type to BigInteger
     product = relationship("ProductOrm", back_populates="items")
 
     variant_sku = Column(String, index=True, nullable=False)
@@ -439,7 +439,7 @@ class ProductPriceOrm(Base):
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     business_details_id = Column(BigInteger, index=True, nullable=False) # Changed
 
-    product_id = Column(Integer, ForeignKey(f'{CATALOG_SCHEMA}.products.id'), nullable=False, unique=True)
+    product_id = Column(BigInteger, ForeignKey(f'{PUBLIC_SCHEMA}.products.id'), nullable=False, unique=True) # Corrected schema and type
     product = relationship("ProductOrm", back_populates="prices")
 
     price = Column(Float, nullable=False)
@@ -459,7 +459,7 @@ class MetaTagOrm(Base):
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     business_details_id = Column(BigInteger, index=True, nullable=False) # Changed
 
-    product_id = Column(Integer, ForeignKey(f'{CATALOG_SCHEMA}.products.id'), nullable=False, unique=True)
+    product_id = Column(BigInteger, ForeignKey(f'{PUBLIC_SCHEMA}.products.id'), nullable=False, unique=True) # Corrected schema and type
     product = relationship("ProductOrm", back_populates="meta_tag")
 
     meta_title = Column(String(255), nullable=True) # Specify length for String if appropriate
