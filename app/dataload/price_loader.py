@@ -3,7 +3,7 @@ from typing import List, Dict, Any
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 from app.dataload.models.price_csv import PriceCsv
-from app.db.models import Product, SKU # Price model will be created later
+from app.db.models import ProductOrm as Product, ProductItemOrm as SKU # Price model will be created later
 # from app.core.logging import logger # Assuming a logger utility exists
 import logging # Using standard logging for now
 
@@ -65,7 +65,7 @@ class PriceLoader:
         except FileNotFoundError:
             logger.error(f"CSV file not found: {file_path}")
             self.errors.append({"error": "File not found", "path": file_path})
-            self.error_count = self.processed_count # Or handle differently
+            self.error_count = 1 # File not found is one error
         except Exception as e:
             logger.error(f"Failed to read or process CSV file {file_path}: {str(e)}")
             self.db_session.rollback()

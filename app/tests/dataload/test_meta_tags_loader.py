@@ -13,10 +13,37 @@ class TestLoadMetaTagsFromCsv:
     @pytest.fixture
     def mock_db_session(self):
         session = MagicMock(spec=Session)
-        # Configure query chain to return a mock that can have first() called.
-        mock_query = MagicMock()
-        mock_query.filter.return_value.first.return_value = None # Default: target not found
-        session.query.return_value = mock_query
+
+        # Create separate mock query objects for each model we expect to query
+        mock_product_query_obj = MagicMock(name="ProductQuery")
+        # Configure the chain for product queries
+        mock_product_filter_chain = MagicMock(name="ProductFilterChain")
+        mock_product_filter_chain.first.return_value = None # Default for product not found
+        mock_product_query_obj.filter.return_value = mock_product_filter_chain
+
+        mock_category_query_obj = MagicMock(name="CategoryQuery")
+        # Configure the chain for category queries
+        mock_category_filter_chain = MagicMock(name="CategoryFilterChain")
+        mock_category_filter_chain.first.return_value = None # Default for category not found
+        mock_category_query_obj.filter.return_value = mock_category_filter_chain
+
+        # Default mock for any other unexpected queries
+        mock_default_query_obj = MagicMock(name="DefaultQuery")
+        mock_default_filter_chain = MagicMock(name="DefaultFilterChain")
+        mock_default_filter_chain.first.return_value = None
+        mock_default_query_obj.filter.return_value = mock_default_filter_chain
+
+        def query_side_effect(model_class):
+            if model_class == ProductOrm:
+                # print(f"DEBUG_MOCK: Returning ProductOrm query mock: {mock_product_query_obj.filter.return_value.first}")
+                return mock_product_query_obj
+            elif model_class == CategoryOrm:
+                # print(f"DEBUG_MOCK: Returning CategoryOrm query mock: {mock_category_query_obj.filter.return_value.first}")
+                return mock_category_query_obj
+            # print(f"DEBUG_MOCK: Returning Default query mock for {model_class}")
+            return mock_default_query_obj
+
+        session.query.side_effect = query_side_effect
         return session
 
     def test_successful_product_update(self, mock_db_session):
@@ -24,7 +51,7 @@ class TestLoadMetaTagsFromCsv:
         # Adjust mock to simulate product found
         mock_db_session.query(ProductOrm).filter.return_value.first.return_value = mock_product
 
-        csv_data = CSV_HEADERS + "PRODUCT,Prod1,100,New Title,New Desc,new,keys"
+        csv_data = CSV_HEADERS + 'PRODUCT,Prod1,100,New Title,New Desc,"new,keys"\n' # Quoted keywords
 
         with patch("builtins.open", mock_open(read_data=csv_data)) as mock_file_open:
             summary = load_meta_tags_from_csv(mock_db_session, "dummy_path.csv")
@@ -39,6 +66,7 @@ class TestLoadMetaTagsFromCsv:
 
         assert mock_product.seo_title == "New Title"
         assert mock_product.seo_description == "New Desc"
+        # print(f"DEBUG_TEST: mock_product.keywords before final assert: {repr(mock_product.keywords)}") # REMOVED
         assert mock_product.keywords == "new,keys"
         mock_db_session.commit.assert_called_once()
 
@@ -46,7 +74,7 @@ class TestLoadMetaTagsFromCsv:
         mock_category = CategoryOrm(id=1, name="Cat1")
         mock_db_session.query(CategoryOrm).filter.return_value.first.return_value = mock_category
 
-        csv_data = CSV_HEADERS + "CATEGORY,Cat1,,New Cat Title,New Cat Desc,newcat,keys"
+        csv_data = CSV_HEADERS + 'CATEGORY,Cat1,,New Cat Title,New Cat Desc,"newcat,keys"\n' # Added newline and quoted keywords
 
         with patch("builtins.open", mock_open(read_data=csv_data)):
             summary = load_meta_tags_from_csv(mock_db_session, "dummy_path.csv")
@@ -150,16 +178,21 @@ class TestLoadMetaTagsFromCsv:
         mock_category1 = CategoryOrm(id=1, name="Cat1")
 
         # query.filter().first() results for each call
-        # 1st product call (Prod1), 2nd category call (Cat1), 3rd product call (ProdX - validation fail, no DB), 4th product call (Prod2 - not found)
-        mock_db_session.query(ProductOrm).filter.return_value.first.side_effect = [mock_product1, None]
+        # Prod1 (found), ProdX (validation error, no query), Prod2 (not found)
+        # So, ProductOrm query's .first() will be called for Prod1 and Prod2.
+        mock_db_session.query(ProductOrm).filter.return_value.first.side_effect = [
+            mock_product1, # For Prod1
+            None           # For Prod2
+        ]
+        # CategoryOrm query's .first() will be called for Cat1
         mock_db_session.query(CategoryOrm).filter.return_value.first.return_value = mock_category1
 
         csv_data = (
             CSV_HEADERS +
-            "PRODUCT,Prod1,100,P1 Title,P1 Desc,p1k\n" +
-            "CATEGORY,Cat1,,C1 Title,C1 Desc,c1k\n" +
-            "PRODUCT,ProdX,,Invalid Product,Desc,Key\n" +
-            "PRODUCT,Prod2,101,P2 Title,P2 Desc,p2k\n"
+            'PRODUCT,Prod1,100,P1 Title,P1 Desc,"p1k"\n' +  # Assuming p1k might have commas in future, ensure quoting, add newline
+            'CATEGORY,Cat1,,C1 Title,C1 Desc,"c1k"\n' + # Quote keywords, add newline
+            'PRODUCT,ProdX,,Invalid Product,Desc,"Key"\n' + # Quote keywords, add newline
+            'PRODUCT,Prod2,101,P2 Title,P2 Desc,"p2k"\n'  # Quote keywords, add newline
         )
         with patch("builtins.open", mock_open(read_data=csv_data)):
             summary = load_meta_tags_from_csv(mock_db_session, "dummy_path.csv")
@@ -185,7 +218,7 @@ class TestLoadMetaTagsFromCsv:
         )
         mock_db_session.query(ProductOrm).filter.return_value.first.return_value = mock_product
 
-        csv_data = CSV_HEADERS + "PRODUCT,Prod1,100,Existing Title,Existing Desc,existing,keys"
+        csv_data = CSV_HEADERS + 'PRODUCT,Prod1,100,Existing Title,Existing Desc,"existing,keys"\n' # Quoted, added newline
 
         with patch("builtins.open", mock_open(read_data=csv_data)):
             summary = load_meta_tags_from_csv(mock_db_session, "dummy_path.csv")

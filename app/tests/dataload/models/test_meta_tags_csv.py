@@ -112,7 +112,7 @@ class TestMetaTagCsvRow:
         with pytest.raises(ValidationError) as excinfo:
             MetaTagCsvRow(**data)
         assert "meta_title" in str(excinfo.value)
-        assert "ensure this value has at most 256 characters" in str(excinfo.value) # Pydantic v1 message for constr
+        assert "String should have at most 256 characters" in str(excinfo.value) # Pydantic v2 message
 
     # Product description/keywords length tests
     def test_product_meta_description_too_long(self):

@@ -2,6 +2,7 @@ import strawberry
 import datetime
 import uuid # For strawberry.ID or if we use uuid.UUID directly
 from typing import Optional, List # List might be used for future types
+import enum # Added for Enum base class
 
 # Note: Strawberry automatically handles conversion for many Python built-in types
 # (str, int, float, bool, datetime.datetime, uuid.UUID) to corresponding GraphQL scalars.
@@ -82,7 +83,7 @@ class StandardMessageType:
 
 
 @strawberry.enum
-class PriceTypeGQL(str): # Using str as the base for Enum values
+class PriceTypeGQL(enum.Enum): # Inherit from enum.Enum
     PRODUCT = "PRODUCT"
     SKU = "SKU"
 
@@ -125,5 +126,4 @@ class PriceInput:
     discount_price: Optional[float] = None
     cost_price: Optional[float] = None
     currency: Optional[str] = "USD"
-```
 

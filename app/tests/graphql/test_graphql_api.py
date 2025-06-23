@@ -127,7 +127,7 @@ def test_query_upload_session_found(mock_get_db_session_sync):
 
     query = f"""
         query {{
-            uploadSession(sessionId: "{mock_session_id}") {{
+                uploadSession(sessionId: "{mock_session_id_str}") {{
                 sessionId
                 businessId
                 status
@@ -491,7 +491,7 @@ def test_mutation_upload_file_wasabi_failure_db_update(mock_uuid4, mock_upload_w
     # 2. Session update after Wasabi failure (this mock will be returned on the second call)
     mock_db_session_update = MagicMock(name="update_session")
     # This is the instance that query().filter().first() should return for the update path
-    mock_session_to_be_updated = MagicMock(spec=app.db.models.UploadSessionOrm) # Use spec for attribute safety
+    mock_session_to_be_updated = MagicMock(spec=UploadSessionOrm) # Use imported UploadSessionOrm
     mock_session_to_be_updated.session_id = mock_generated_session_id # Ensure it has the ID
     mock_db_session_update.query().filter().first.return_value = mock_session_to_be_updated
 

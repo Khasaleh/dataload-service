@@ -27,19 +27,7 @@ def load_meta_tags_from_csv(db: Session, csv_file_path: str) -> DataloadSummary:
 
     try:
         with open(csv_file_path, mode='r', encoding='utf-8-sig') as csvfile: # utf-8-sig handles potential BOM
-            # Standardize header processing: strip whitespace, lowercase, replace space with underscore
-            # This makes matching with Pydantic model fields more robust.
-            fieldnames = [header.strip().lower().replace(' ', '_') for header in csvfile.readline().split(',')]
-
-            # Re-initialize DictReader with the processed fieldnames and the rest of the file
-            # We need to "give back" the header line if we consumed it for fieldname processing,
-            # or ensure DictReader uses our processed fieldnames.
-            # A simpler way if DictReader handles first line as header and we clean its output:
-            # For DictReader, it uses the first line as fieldnames by default.
-            # We can either trust it and clean its keys, or pre-process fieldnames.
-            # Let's stick to DictReader's default and clean keys from `row` dict.
-            csvfile.seek(0) # Reset file pointer to the beginning to include header for DictReader
-            reader = csv.DictReader(csvfile)
+            reader = csv.DictReader(csvfile) # Let DictReader handle the header line directly
 
             for i, raw_row_data in enumerate(reader):
                 summary.total_rows_processed += 1
@@ -52,7 +40,6 @@ def load_meta_tags_from_csv(db: Session, csv_file_path: str) -> DataloadSummary:
                 }
                 # Filter out any entry that might have resulted from an empty header
                 cleaned_row_input = {k: v for k, v in cleaned_row_input.items() if k != '_unknown_empty_header_'}
-
 
                 try:
                     validated_row = MetaTagCsvRow(**cleaned_row_input)
@@ -85,6 +72,7 @@ def load_meta_tags_from_csv(db: Session, csv_file_path: str) -> DataloadSummary:
                                 update_applied = True
                             if validated_row.meta_keywords is not None and product.keywords != validated_row.meta_keywords:
                                 product.keywords = validated_row.meta_keywords
+                                # print(f"DEBUG: Row {current_row_number} | Immediately after assignment, product.keywords: {repr(product.keywords)}") # REMOVED
                                 update_applied = True
 
                             if update_applied:
@@ -110,14 +98,20 @@ def load_meta_tags_from_csv(db: Session, csv_file_path: str) -> DataloadSummary:
 
                         if category:
                             update_applied = False
+                            # print(f"DEBUG_CAT: Row {current_row_number} | Validated Title: {repr(validated_row.meta_title)}, Category SEO Title: {repr(category.seo_title)}") # REMOVED
                             if validated_row.meta_title is not None and category.seo_title != validated_row.meta_title:
                                 category.seo_title = validated_row.meta_title
+                                # print(f"DEBUG: Row {current_row_number} | Immediately after assignment, category.seo_title: {repr(category.seo_title)}") # REMOVED
                                 update_applied = True
+                            # print(f"DEBUG_CAT: Row {current_row_number} | Validated Desc: {repr(validated_row.meta_description)}, Category SEO Desc: {repr(category.seo_description)}") # REMOVED
                             if validated_row.meta_description is not None and category.seo_description != validated_row.meta_description:
                                 category.seo_description = validated_row.meta_description
+                                # print(f"DEBUG: Row {current_row_number} | Immediately after assignment, category.seo_description: {repr(category.seo_description)}") # REMOVED
                                 update_applied = True
+                            # print(f"DEBUG_CAT: Row {current_row_number} | Validated Keywords: {repr(validated_row.meta_keywords)}, Category SEO Keywords: {repr(category.seo_keywords)}") # REMOVED
                             if validated_row.meta_keywords is not None and category.seo_keywords != validated_row.meta_keywords:
                                 category.seo_keywords = validated_row.meta_keywords
+                                # print(f"DEBUG: Row {current_row_number} | Immediately after assignment, category.seo_keywords: {repr(category.seo_keywords)}") # REMOVED
                                 update_applied = True
 
                             if update_applied:

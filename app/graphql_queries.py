@@ -7,6 +7,7 @@ from app.graphql_types import UploadSessionType, UserType
 # from app.dependencies.auth import get_current_user # Not directly called in resolvers in this pattern
                                                     # but its output format is what we expect in info.context
 import logging # For logging DB errors
+from strawberry.exceptions import GraphQLError # Added import
 
 # --- Database/Service Layer Imports ---
 # (Assuming get_session can provide a synchronous session for resolver logic)
@@ -65,7 +66,7 @@ class Query:
             db = get_db_session_sync(business_id=user_business_id) # Get session scoped to user's business
             session_orm = db.query(UploadSessionOrm).filter(
                 UploadSessionOrm.session_id == str(session_id), # Convert strawberry.ID to string for query
-                UploadSessionOrm.business_id == user_business_id # Authorize: session must belong to user's business
+                UploadSessionOrm.business_details_id == user_business_id # Authorize: session must belong to user's business
             ).first()
 
             if session_orm:
@@ -118,7 +119,7 @@ class Query:
         try:
             db = get_db_session_sync(business_id=user_business_id)
 
-            query = db.query(UploadSessionOrm).filter(UploadSessionOrm.business_id == user_business_id)
+            query = db.query(UploadSessionOrm).filter(UploadSessionOrm.business_details_id == user_business_id)
 
             # Add ordering for consistent pagination results
             query = query.order_by(UploadSessionOrm.created_at.desc()) # Example: newest first
