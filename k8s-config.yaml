@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: catalog-app-config
+data:
+  PROJECT_NAME: "Catalog Data Load Service K8s"
+  API_PREFIX: "/graphql"
+  ENVIRONMENT: "production" # Options: development, staging, production
+  LOG_LEVEL: "INFO" # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  RELOAD: "False"
+
+  DB_DRIVER: "postgresql+psycopg2"
+  DB_HOST: "postgresql-service" # K8s service name for your PostgreSQL
+  DB_PORT: "5432"
+  DB_NAME: "catalogdb" # Example DB name
+  CATALOG_SERVICE_SCHEMA: "catalog"
+  BUSINESS_SERVICE_SCHEMA: "business"
+
+  WASABI_ENDPOINT_URL: "https://s3.your-wasabi-region.wasabisys.com" # !!! REPLACE with actual !!!
+  WASABI_BUCKET_NAME: "your-production-bucket-name" # !!! REPLACE with actual !!!
+  WASABI_REGION: "your-wasabi-region" # e.g., us-east-1, us-west-1 !!! REPLACE if needed !!!
+
+  JWT_ALGORITHM: "HS512"
+  ACCESS_TOKEN_EXPIRE_MINUTES: "30"
+
+  REDIS_HOST: "redis-service" # K8s service name for your Redis
+  REDIS_PORT: "6379"
+  REDIS_DB_ID_MAPPING: "1"
+  CELERY_BROKER_DB_NUMBER: "0"
+  CELERY_RESULT_BACKEND_DB_NUMBER: "0"
+  REDIS_SESSION_TTL_SECONDS: "86400"
+  # CELERY_BROKER_URL: "redis://redis-service:6379/0" # Can be set if preferred over components
+  # CELERY_RESULT_BACKEND_URL: "redis://redis-service:6379/0" # Can be set
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: catalog-app-secrets
+type: Opaque
+data:
+  # Values must be base64 encoded.
+  # Use: echo -n "your_actual_value" | base64
+  # !!! REPLACE placeholder encoded values below with your actual encoded secrets !!!
+  DB_USER: "eW91cl9kYl91c2VyX3BsYWNlaG9sZGVy"  # Replace with: echo -n "your_db_user" | base64
+  DB_PASSWORD: "eW91cl9kYl9wYXNzd29yZF9wbGFjZWhvbGRlcg==" # Replace with: echo -n "your_db_password" | base64
+  WASABI_ACCESS_KEY: "eW91cl93YXNhYmlfYWNjZXNzX2tleV9wbGFjZWhvbGRlcg==" # Replace with: echo -n "your_wasabi_access_key" | base64
+  WASABI_SECRET_KEY: "eW91cl93YXNhYmlfc2VjcmV0X2tleV9wbGFjZWhvbGRlcg==" # Replace with: echo -n "your_wasabi_secret_key" | base64
+  JWT_SECRET: "eW91cl9qd3Rfc2VjcmV0X3BsYWNlaG9sZGVyX21pbjMyY2hhcnM=" # Replace with: echo -n "your_jwt_secret_min_32_chars" | base64
+  # If providing full DATABASE_URL with password, encode and add here:
+  # DATABASE_URL: "cG9zdGdyZXNxbDovL3VzZXI6cGFzc3dvcmRAaG9zdDo1NDMyL2RiX25hbWU="
+  # If providing full CELERY_BROKER_URL/CELERY_RESULT_BACKEND_URL with password (not typical for Redis), add here:
+  # CELERY_BROKER_URL: "cmVkaXM6Ly86cGFzc3dvcmRAcmVkaXMtaG9zdDo2Mzc5LzA="

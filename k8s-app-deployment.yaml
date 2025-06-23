@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-fastapi-app
+  labels:
+    app: catalog-app
+    component: fastapi
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: catalog-app
+      component: fastapi
+  template:
+    metadata:
+      labels:
+        app: catalog-app
+        component: fastapi
+    spec:
+      containers:
+      - name: fastapi-app-container
+        image: your-docker-registry/your-repo/catalog-app:latest # !!! REPLACE with your actual image URI !!!
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+        envFrom:
+        - configMapRef:
+            name: catalog-app-config
+        - secretRef:
+            name: catalog-app-secrets
+        readinessProbe:
+          httpGet:
+            path: / # Root path of the FastAPI app
+            port: 8000
+          initialDelaySeconds: 20 # Give more time for app to start, connect to DB/Redis
+          periodSeconds: 25
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: / # Root path of the FastAPI app
+            port: 8000
+          initialDelaySeconds: 40 # Longer delay for liveness
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      # If using a private image registry:
+      # imagePullSecrets:
+      # - name: my-registry-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-fastapi-service
+  labels:
+    app: catalog-app
+    component: fastapi
+spec:
+  type: NodePort # Or ClusterIP for internal, LoadBalancer if MetalLB is set up
+  selector:
+    app: catalog-app
+    component: fastapi
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: 8000
+    # nodePort: 30080 # Optional: Specify NodePort (30000-32767) or let K8s assign
