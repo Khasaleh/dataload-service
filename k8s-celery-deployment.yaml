@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-celery-worker
+  labels:
+    app: catalog-app
+    component: celery-worker
+spec:
+  replicas: 2 # Adjust based on task load
+  selector:
+    matchLabels:
+      app: catalog-app
+      component: celery-worker
+  template:
+    metadata:
+      labels:
+        app: catalog-app
+        component: celery-worker
+    spec:
+      containers:
+      - name: celery-worker-container
+        image: your-docker-registry/your-repo/catalog-app:latest # !!! REPLACE with your actual image URI (same as FastAPI app) !!!
+        imagePullPolicy: Always
+        command: ["celery"]
+        args:
+        - "-A"
+        - "app.tasks.celery_worker.celery_app" # Path to your Celery app instance
+        - "worker"
+        - "-l"
+        - "INFO" # Default log level, can be overridden by LOG_LEVEL from ConfigMap if Celery logger is adapted
+        # - "-P"
+        # - "eventlet" # Example: using eventlet for I/O bound tasks
+        # - "-c"
+        # - "4" # Example: 4 concurrent worker processes
+        envFrom:
+        - configMapRef:
+            name: catalog-app-config
+        - secretRef:
+            name: catalog-app-secrets
+        resources:
+          requests:
+            memory: "512Mi" # Celery workers might need more memory
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1"
+      # If using a private image registry:
+      # imagePullSecrets:
+      # - name: my-registry-secret
