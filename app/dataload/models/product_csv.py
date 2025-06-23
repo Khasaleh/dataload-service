@@ -44,6 +44,7 @@ class ProductCsvModel(BaseModel):
 
     url: Optional[str] = None # Will be auto-generated if None, or validated
     video_url: Optional[str] = None
+    video_thumbnail_url: Optional[str] = None # New field for video thumbnail
 
     images: Optional[str] = None # Pipe-separated: "url1|main_image:true", "url2|main_image:false"
     specifications: Optional[str] = None # Pipe-separated: "SpecName1:Value1|SpecName2:Value2"

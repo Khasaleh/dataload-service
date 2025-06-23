@@ -187,6 +187,7 @@ def load_product_record_to_db(
         product_orm_instance.return_policy_id = return_policy_orm_id
         product_orm_instance.url = product_data.url # From Pydantic model (auto-generated or validated)
         product_orm_instance.video_url = product_data.video_url
+        # thumbnail_url will be handled after image processing, potentially using video_thumbnail_url
         product_orm_instance.is_child_item = product_data.is_child_item
         product_orm_instance.ean = product_data.ean
         product_orm_instance.isbn = product_data.isbn
@@ -211,24 +212,33 @@ def load_product_record_to_db(
                 active="ACTIVE", created_by=SYSTEM_USER_ID, created_date=current_time_epoch # Assuming new specs are active
             ))
 
-        # 4. Handle Product Images (only if is_child_item == 0)
-        # Reset main_image_url on product, it will be re-derived if a main image is found in current CSV data
+        # 4. Handle Product Images (only if is_child_item == 0) and Thumbnail
+        # Reset main_image_url and thumbnail_url on product.
+        # thumbnail_url will be populated by video_thumbnail_url if provided,
+        # otherwise by main_image_url if available.
         product_orm_instance.main_image_url = None
-        product_orm_instance.thumbnail_url = None
+        product_orm_instance.thumbnail_url = product_data.video_thumbnail_url # Prioritize dedicated video thumbnail
 
-        if not is_new_product: # Clear old ones on update
+        if not is_new_product: # Clear old product images on update
             db.query(ProductImageOrm).filter(ProductImageOrm.product_id == product_orm_instance.id).delete(synchronize_session='fetch')
 
         if product_data.is_child_item == 0 and product_data.images:
             parsed_imgs = parse_images(product_data.images)
+            found_main_image_url = None
             for img_data in parsed_imgs:
                 db.add(ProductImageOrm(
                     product_id=product_orm_instance.id, name=img_data["name"], main_image=img_data["main_image"],
                     active="ACTIVE", created_by=SYSTEM_USER_ID, created_date=current_time_epoch # Assuming new images are active
                 ))
                 if img_data["main_image"]:
-                    product_orm_instance.main_image_url = img_data["name"]
-                    product_orm_instance.thumbnail_url = img_data["name"] # Basic default for thumbnail
+                    found_main_image_url = img_data["name"]
+
+            product_orm_instance.main_image_url = found_main_image_url
+
+            # If video_thumbnail_url was not provided from CSV, and a main product image exists,
+            # use the main product image URL as the fallback for thumbnail_url.
+            if not product_orm_instance.thumbnail_url and found_main_image_url:
+                product_orm_instance.thumbnail_url = found_main_image_url
 
         # The calling function (process_csv_task) will handle session commit/rollback.
         # db.flush() # Called earlier to get ID, further flushes might occur before commit by caller.
