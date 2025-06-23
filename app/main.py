@@ -1,14 +1,20 @@
-from typing import Optional # Ensure this is at the very top or very early
+from typing import Optional
 from fastapi import FastAPI, Request, Depends
-from dotenv import load_dotenv
-import os
+# from dotenv import load_dotenv # dotenv loading is handled by Pydantic BaseSettings now
 import logging
-import strawberry # Added Strawberry
-from strawberry.fastapi import GraphQLRouter # Added GraphQLRouter
+import strawberry
+from strawberry.fastapi import GraphQLRouter
 
-# Load environment variables from .env file for local development.
-# This should be called as early as possible.
-load_dotenv()
+from app.core.config import settings # Import centralized settings
+
+# --- Logging Configuration ---
+# Configure logging level based on settings
+# BasicConfig should be called only once.
+# Pydantic settings are loaded before this, so settings.LOG_LEVEL is available.
+logging.basicConfig(level=settings.LOG_LEVEL.upper())
+logger = logging.getLogger(__name__) # Get logger for this module
+logger.info(f"Logging configured with level: {settings.LOG_LEVEL.upper()}")
+
 
 # --- GraphQL Setup ---
 # Import your Root Query and Mutation types
@@ -59,26 +65,26 @@ graphql_app_router = GraphQLRouter(
 
 
 # Initialize FastAPI app
-# Updated title and description for GraphQL focus.
+# Title, description, version can be sourced from settings for more configurability
 app = FastAPI(
-    title="Catalog Data Load Service - GraphQL API",
-    description="Provides GraphQL interface for catalog data uploads, status tracking, and user authentication.",
-    version="2.0.0", # Assuming version bump for API change
-    contact={"name": "Fazeal Dev Team", "email": "support@fazeal.com"},
-    license_info={"name": "MIT"}
+    title=settings.PROJECT_NAME,
+    description="Provides GraphQL interface for catalog data uploads, status tracking, and user authentication.", # Could also be from settings
+    version="2.0.0", # Could be from settings, e.g., settings.APP_VERSION
+    contact={"name": "Fazeal Dev Team", "email": "support@fazeal.com"}, # Could be from settings
+    license_info={"name": "MIT"}, # Could be from settings
     # openapi_tags are not typically used for GraphQL as it's one endpoint.
-    # swagger_ui_init_oauth might also be less relevant unless you have specific OAuth for GraphiQL.
+    # swagger_ui_init_oauth might also be less relevant.
+    # Configure `reload` based on settings for development
+    reload=settings.RELOAD if settings.ENVIRONMENT == "development" else False
 )
 
-# Configure logging (basic example)
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
-logger = logging.getLogger(__name__)
-logger.info("FastAPI application startup...")
+# Logging is already configured above using settings.LOG_LEVEL
+logger.info(f"FastAPI application startup... Environment: {settings.ENVIRONMENT}, Reload: {app.reload}")
 
 
 # Include the GraphQL router
-# All GraphQL operations will be available under the /graphql prefix.
-app.include_router(graphql_app_router, prefix="/graphql", tags=["GraphQL"])
+# All GraphQL operations will be available under the settings.API_PREFIX.
+app.include_router(graphql_app_router, prefix=settings.API_PREFIX, tags=["GraphQL"])
 
 
 # --- Old REST Router inclusions are now removed/commented out ---

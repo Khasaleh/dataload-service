@@ -1,26 +1,43 @@
 import redis
-import os
 import logging
 from typing import Any, Iterator
 from contextlib import contextmanager
 from redis.client import Pipeline
+from app.core.config import settings # Import centralized settings
 
 logger = logging.getLogger(__name__)
 
-REDIS_HOST = os.getenv("REDIS_HOST", "redis")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-REDIS_DB_ID_MAPPING = int(os.getenv("REDIS_DB_ID_MAPPING", 1))
-DEFAULT_REDIS_SESSION_TTL_SECONDS = 24 * 60 * 60
-REDIS_SESSION_TTL_SECONDS = int(os.getenv("REDIS_SESSION_TTL_SECONDS", DEFAULT_REDIS_SESSION_TTL_SECONDS))
+# Redis configuration from centralized settings
+REDIS_HOST = settings.REDIS_HOST
+REDIS_PORT = settings.REDIS_PORT
+REDIS_DB_ID_MAPPING = settings.REDIS_DB_ID_MAPPING
+REDIS_SESSION_TTL_SECONDS = settings.REDIS_SESSION_TTL_SECONDS
 
 redis_client_instance = None
-try:
-    redis_client_instance = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB_ID_MAPPING, decode_responses=True)
-    redis_client_instance.ping()
-    logger.info(f"Connected to Redis for ID mapping utilities: {REDIS_HOST}:{REDIS_PORT}, DB: {REDIS_DB_ID_MAPPING}")
-except redis.exceptions.ConnectionError as e:
-    logger.error(f"Redis connection failed for ID mapping utilities: {e}")
-    redis_client_instance = None
+if REDIS_HOST and REDIS_PORT is not None and REDIS_DB_ID_MAPPING is not None:
+    try:
+        # Construct URL for redis-py, though it also accepts host/port/db directly
+        # Using host/port/db for clarity matching previous setup
+        redis_client_instance = redis.Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            db=REDIS_DB_ID_MAPPING,
+            decode_responses=True
+        )
+        redis_client_instance.ping()
+        logger.info(f"Connected to Redis for ID mapping utilities: {REDIS_HOST}:{REDIS_PORT}, DB: {REDIS_DB_ID_MAPPING}")
+    except redis.exceptions.ConnectionError as e:
+        logger.error(f"Redis connection failed for ID mapping utilities ({REDIS_HOST}:{REDIS_PORT}, DB: {REDIS_DB_ID_MAPPING}): {e}")
+        redis_client_instance = None
+    except Exception as e: # Catch other potential errors like config issues if REDIS_PORT is somehow not int
+        logger.error(f"Failed to initialize Redis client for ID mapping utilities: {e}", exc_info=True)
+        redis_client_instance = None
+else:
+    logger.warning(
+        "Redis client for ID mapping utilities is not configured. Missing one or more settings: "
+        "REDIS_HOST, REDIS_PORT, REDIS_DB_ID_MAPPING."
+    )
+
 
 DB_PK_MAP_SUFFIX = "_db_pk"
 
