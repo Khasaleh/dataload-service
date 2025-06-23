@@ -538,21 +538,21 @@ def load_return_policy_to_db(
         # Prepare data for ORM, applying conditional logic first
         policy_data_for_orm = {
             "policy_name": record_data.get("policy_name"),
-            "return_policy_type": return_policy_type,
-            "grace_period_return": record_data.get("grace_period_return"),
-            "time_period_return": record_data.get("time_period_return"),
+            "return_type": return_policy_type,
+            "return_days": record_data.get("time_period_return"), # Mapped to return_days
             "business_details_id": business_details_id,
+            # grace_period_return is not directly mapped as ORM has no such field
         }
         if record_data.get('created_date') is not None: # Pydantic model makes it datetime
-            policy_data_for_orm['created_date'] = record_data.get('created_date')
+            policy_data_for_orm['created_date_ts'] = record_data.get('created_date') # Changed key
         if record_data.get('updated_date') is not None:
-            policy_data_for_orm['updated_date'] = record_data.get('updated_date')
+            policy_data_for_orm['updated_date_ts'] = record_data.get('updated_date') # Changed key
 
 
         if return_policy_type == "SALES_ARE_FINAL":
             policy_data_for_orm["policy_name"] = None
-            policy_data_for_orm["grace_period_return"] = None
-            policy_data_for_orm["time_period_return"] = None
+            policy_data_for_orm["return_days"] = None # Changed from time_period_return
+            # grace_period_return is already not in policy_data_for_orm
 
         # Upsert logic
         if csv_policy_id is not None:

@@ -347,7 +347,7 @@ class ProductOrm(Base):
     items = relationship("ProductItemOrm", back_populates="product", cascade="all, delete-orphan")
 
     # Removing old relationships that are not in the new DDL context
-    prices = relationship("ProductPriceOrm", back_populates="product", cascade="all, delete-orphan")
+    legacy_prices = relationship("ProductPriceOrm", back_populates="product", cascade="all, delete-orphan")
     meta_tag = relationship("MetaTagOrm", uselist=False, back_populates="product", cascade="all, delete-orphan")
 
     # Constraints from DDL: products_pkey PRIMARY KEY (id)
@@ -483,7 +483,7 @@ class ProductPriceOrm(Base):
     business_details_id = Column(BigInteger, index=True, nullable=False) # Changed
 
     product_id = Column(BigInteger, ForeignKey(f'{PUBLIC_SCHEMA}.products.id'), nullable=False, unique=True) # Corrected schema and type
-    product = relationship("ProductOrm", back_populates="prices")
+    product = relationship("ProductOrm", back_populates="legacy_prices")
 
     price = Column(Float, nullable=False)
     cost_per_item = Column(Float, nullable=True)

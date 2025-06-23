@@ -269,10 +269,11 @@ def process_csv_task(business_id, session_id, wasabi_file_path, original_filenam
             # fk_resolution_errors was removed from the return dict as well, as it's not defined in this scope if db_error_count > 0
             return {"status": "db_error", "message": f"DB processing failed for {db_error_count} records.", "processed_db_count": 0, "session_id": session_id}
         else:
-        # This is the 'else' block of the main try...except
-        # It runs only if no exceptions occurred in the 'try' block up to db_error_count check.
-        if string_id_redis_pipeline : string_id_redis_pipeline.execute()
-        if db_pk_redis_pipeline: db_pk_redis_pipeline.execute()
+            # This 'else' block corresponds to 'if db_error_count > 0',
+            # meaning no DB errors occurred during the loop.
+            summary = {} # Initialize summary dict
+            if string_id_redis_pipeline : string_id_redis_pipeline.execute()
+            if db_pk_redis_pipeline: db_pk_redis_pipeline.execute()
 
         # Set TTL for the session ID maps
         # Pass the global redis_client from this module, which is patched by the fixture in tests
@@ -306,21 +307,20 @@ def process_csv_task(business_id, session_id, wasabi_file_path, original_filenam
             return_payload["message"] = summary["message"]
         return return_payload
 
-except Exception as e: # Catches errors from the main 'try' block
+    except Exception as e: # Catches errors from the main 'try' block
         logger.error(f"Major error processing {map_type} for session {session_id}, file {original_filename}: {e}", exc_info=True)
-    if db_engine_session:
-        db_engine_session.rollback()
-        logger.info(f"DB session rolled back for session {session_id} due to major error.")
-    summary["status"] = "error"
-    summary["message"] = f"Major processing error: {str(e)}"
-    _update_session_status(session_id, business_id, status="failed", details=summary["message"])
-    return {"status": "error", "message": str(e), "session_id": session_id} # Ensure this is the only return in except
+        if db_engine_session:
+            db_engine_session.rollback()
+            logger.info(f"DB session rolled back for session {session_id} due to major error.")
+        # 'summary' might not be defined here if error occurred before its initialization
+        _update_session_status(session_id, business_id, status="failed", details=f"Major processing error: {str(e)}")
+        return {"status": "error", "message": str(e), "session_id": session_id}
     finally:
         if db_engine_session:
-        # The commit or rollback should have already happened.
-        # This finally block is now only for closing the session.
+            # The commit or rollback should have already happened.
+            # This finally block is now only for closing the session.
             db_engine_session.close()
-        logger.info(f"DB session closed for session {session_id}.")
+            logger.info(f"DB session closed for session {session_id}.")
 
 # Specific loaders (ensure they pass all necessary params if process_csv_task signature changes)
 # These should ideally pass the 'record_key' specific to their map_type for CSV key -> DB PK mapping.

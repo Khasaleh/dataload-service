@@ -209,18 +209,19 @@ class TestProductItemModel:
         base_data = {
             'product_name': 'Test Item', 'variant_sku': 'SKU123',
             'attribute_combination': 'Color=Red,Size=M', 'status': 'active',
-            'published': 'Yes', 'default_sku': 'SKU123-D', 'quantity': 10
+            'published': 'Yes', 'default_sku': 'SKU123-D', 'quantity': 10,
+            'image_urls': None # Explicitly provide None for the optional field
         }
         check_non_negative_validator(ProductItemModel, "quantity", valid_value=0, invalid_value=-5, **base_data)
 
 
 class TestProductPriceModel:
     def test_product_name_validation(self):
-        base_data = {'product_name': 'Test Price Prod', 'price': 10.0, 'cost_per_item': 5.0}
+        base_data = {'product_name': 'Test Price Prod', 'price': 10.0, 'cost_per_item': 5.0, 'offer_price': None}
         check_non_empty_validator(ProductPriceModel, "product_name", **base_data)
 
     def test_price_cost_validation(self):
-        base_data = {'product_name': 'Test Price Prod', 'price': 10.0, 'cost_per_item': 5.0}
+        base_data = {'product_name': 'Test Price Prod', 'price': 10.0, 'cost_per_item': 5.0, 'offer_price': None}
         check_positive_number_validator(ProductPriceModel, "price", **base_data)
         check_positive_number_validator(ProductPriceModel, "cost_per_item", **base_data)
 
@@ -240,7 +241,12 @@ class TestProductPriceModel:
 
 class TestMetaTagModel:
     def test_product_name_validation(self):
-        base_data = {'product_name': 'Test Meta Prod'} # other fields are optional
+        base_data = {
+            'product_name': 'Test Meta Prod',
+            'meta_title': None,
+            'meta_keywords': None,
+            'meta_description': None
+        } # other fields are optional
         check_non_empty_validator(MetaTagModel, "product_name", **base_data)
 
 

@@ -500,5 +500,3 @@ class Mutation:
 
         return None # Should ideally not be reached
 
-```
-

@@ -183,7 +183,7 @@ class ProductItemModel(BaseModel):
     published: str
     default_sku: str
     quantity: int
-    image_urls: Optional[str]
+    image_urls: Optional[str] = None
 
     @validator('product_name', 'variant_sku', 'attribute_combination', 'status', 'published', 'default_sku')
     def item_text_fields_must_not_be_empty(cls, value):
@@ -201,13 +201,19 @@ class ProductPriceModel(BaseModel):
     product_name: str
     price: float
     cost_per_item: float
-    offer_price: Optional[float]
+    offer_price: Optional[float] = None
 
     @validator('product_name')
     def price_product_name_must_not_be_empty(cls, value):
         if not value.strip():
             raise ValueError('product_name must not be empty')
         return value
+
+    @validator('offer_price')
+    def offer_price_must_be_positive(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError('offer_price must be positive if provided')
+        return v
 
 
 # --- Category CSV Model ---
@@ -284,9 +290,9 @@ class UploadSessionModel(BaseModel):
 
 class MetaTagModel(BaseModel):
     product_name: str
-    meta_title: Optional[str]
-    meta_keywords: Optional[str]
-    meta_description: Optional[str]
+    meta_title: Optional[str] = None
+    meta_keywords: Optional[str] = None
+    meta_description: Optional[str] = None
 
     @validator('product_name')
     def meta_product_name_must_not_be_empty(cls, value):

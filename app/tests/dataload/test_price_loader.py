@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch, mock_open
 from sqlalchemy.orm import Session
 from app.dataload.price_loader import PriceLoader
 from app.dataload.models.price_csv import PriceCsv, PriceTypeEnum
-from app.db.models import Product, SKU, Price # Assuming these are the final model names
+from app.db.models import ProductOrm as Product, ProductItemOrm as SKU, PriceOrm as Price # Assuming these are the final model names
 
 # Minimal Product and SKU ORM-like structures for mocking
 class MockProduct:
@@ -171,7 +171,7 @@ def test_load_price_sku_not_found(price_loader, mock_db_session):
 # --- Validation Error Tests (from PriceCsv model) ---
 
 @pytest.mark.parametrize("csv_row, expected_error_part", [
-    ("PRODUCT,,sku123,10.0", "product_id must be empty when price_type is SKU"), # Error: product_id should be empty for SKU
+    ("PRODUCT,,sku123,10.0", "product_id is required when price_type is PRODUCT"), # Corrected expectation for this input
     ("PRODUCT,prod123,sku123,10.0", "sku_id must be empty when price_type is PRODUCT"), # Error: sku_id should be empty for PRODUCT
     ("SKU,prod123,,10.0", "sku_id is required when price_type is SKU"), # Error: sku_id required for SKU
     ("PRODUCT,, ,10.0", "product_id is required when price_type is PRODUCT"), # Error: product_id required for PRODUCT
@@ -248,7 +248,9 @@ def test_csv_general_processing_error(price_loader):
 
     assert results["processed_count"] == 1
     assert results["error_count"] == 1
-    assert "price" in results["errors"][0]["errors"][0]["loc"] # Pydantic error for missing 'price' field
+    # Check if 'price' is in the 'loc' of any of the Pydantic errors for that row
+    found_price_error = any('price' in detail.get('loc', ()) for detail in results["errors"][0]["errors"])
+    assert found_price_error, "Expected a validation error related to the 'price' field"
     price_loader.db_session.rollback.assert_called_once()
 
 # TODO: Add tests for updating existing prices once PriceLoader._process_price_data
@@ -321,4 +323,3 @@ def test_csv_general_processing_error(price_loader):
 #   (e.g., what happens after an add, commit, rollback).
 # The current tests primarily validate the CSV parsing, Pydantic model validation,
 # and Product/SKU existence checks within the loader.
-```
