@@ -18,13 +18,16 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     CategoryOrm,
     BrandOrm,
-    AttributeOrm,      # Added AttributeOrm
-    AttributeValueOrm, # Added AttributeValueOrm
-    ReturnPolicyOrm,   # Added ReturnPolicyOrm
-    # ProductOrm,
-    # ProductItemOrm, ProductPriceOrm, MetaTagOrm
+    AttributeOrm,
+    AttributeValueOrm,
+    ReturnPolicyOrm,
+    PriceOrm,          # Added PriceOrm
+    ProductOrm,        # Ensure ProductOrm is imported
+    ProductItemOrm,    # Ensure ProductItemOrm is imported
+    # MetaTagOrm
 )
-from datetime import datetime # Added datetime
+from datetime import datetime
+from app.dataload.models.price_csv import PriceCsv, PriceTypeEnum as PriceCsvTypeEnum # For type hint
 # from sqlalchemy.exc import SQLAlchemyError # For more specific DB error handling if needed
 
 
@@ -582,6 +585,135 @@ def load_return_policy_to_db(
 
     except Exception as e:
         logger.error(f"Error processing return policy record for business {business_details_id}: {record_data} - {e}", exc_info=True)
+        return None
+
+def load_price_to_db(
+    db_session: Session,
+    business_details_id: int, # Integer business ID from context/token
+    record_data: Dict[str, Any], # This is a dict from PriceCsv model
+    session_id: str, # For logging context
+    db_pk_redis_pipeline: Any # Redis pipeline, not directly used for _db_pk map here
+) -> Optional[int]:
+    """
+    Loads or updates a single price record in the database for a product or SKU.
+    Validates that the target product/SKU exists and belongs to the business.
+
+    Args:
+        db_session: SQLAlchemy session.
+        business_details_id: The integer ID for the business.
+        record_data: A dictionary representing a row from the price CSV,
+                     validated by PriceCsv.
+        session_id: The current upload session ID (for logging).
+        db_pk_redis_pipeline: Redis pipeline (not used by this function for _db_pk map).
+
+    Returns:
+        The database primary key (integer) of the processed PriceOrm record,
+        or None if processing failed for this record.
+    """
+    try:
+        # Pydantic model PriceCsv has already done primary validation.
+        # Here we focus on DB interaction and foreign key integrity.
+        price_type_csv_enum = PriceCsvTypeEnum(record_data["price_type"]) # Convert string to Enum
+
+        target_product_id: Optional[int] = None
+        target_sku_id: Optional[int] = None
+
+        if price_type_csv_enum == PriceCsvTypeEnum.PRODUCT:
+            csv_product_id_str = record_data.get("product_id")
+            if not csv_product_id_str:
+                logger.error(f"Price load: product_id missing for PRODUCT type. Business: {business_details_id}, Data: {record_data}")
+                return None
+            # Assuming product_id from CSV is the DB PK of the product.
+            # Product IDs in ProductOrm are BigInteger.
+            try:
+                # ProductOrm.id is BigInteger, PriceOrm.product_id is BigInteger
+                target_product_id = int(csv_product_id_str)
+            except ValueError:
+                logger.error(f"Price load: Invalid product_id format '{csv_product_id_str}'. Must be integer. Business: {business_details_id}")
+                return None
+
+            # Verify product exists and belongs to this business
+            product_check = db_session.query(ProductOrm.id).filter(
+                ProductOrm.id == target_product_id,
+                ProductOrm.business_details_id == business_details_id # business_details_id is BigInteger
+            ).first()
+            if not product_check:
+                logger.warning(f"Price load: Product ID {target_product_id} not found or not associated with business {business_details_id}.")
+                return None
+
+        elif price_type_csv_enum == PriceCsvTypeEnum.SKU:
+            csv_sku_id_str = record_data.get("sku_id")
+            if not csv_sku_id_str:
+                logger.error(f"Price load: sku_id missing for SKU type. Business: {business_details_id}, Data: {record_data}")
+                return None
+            # SKU IDs in ProductItemOrm are Integer. PriceOrm.sku_id is Integer.
+            try:
+                target_sku_id = int(csv_sku_id_str)
+            except ValueError:
+                logger.error(f"Price load: Invalid sku_id format '{csv_sku_id_str}'. Must be integer. Business: {business_details_id}")
+                return None
+
+            # Verify SKU exists and belongs to this business
+            sku_check = db_session.query(ProductItemOrm.id).filter(
+                ProductItemOrm.id == target_sku_id,
+                ProductItemOrm.business_details_id == business_details_id # business_details_id is BigInteger
+            ).first()
+            if not sku_check:
+                logger.warning(f"Price load: SKU ID {target_sku_id} not found or not associated with business {business_details_id}.")
+                return None
+        else:
+            # This case should ideally be caught by Pydantic validation if PriceTypeEnum was used there.
+            logger.error(f"Price load: Unknown price_type '{record_data['price_type']}'. Business: {business_details_id}")
+            return None
+
+        # Upsert logic for PriceOrm
+        existing_price_query = db_session.query(PriceOrm).filter(
+            PriceOrm.business_details_id == business_details_id
+        )
+        if target_product_id:
+            existing_price_query = existing_price_query.filter(PriceOrm.product_id == target_product_id)
+        elif target_sku_id:
+            existing_price_query = existing_price_query.filter(PriceOrm.sku_id == target_sku_id)
+
+        existing_price: Optional[PriceOrm] = existing_price_query.first()
+
+        price_orm_instance: PriceOrm
+        if existing_price:
+            logger.info(f"Updating price for business {business_details_id}, {'product ' + str(target_product_id) if target_product_id else 'SKU ' + str(target_sku_id)}")
+            existing_price.price = record_data["price"]
+            existing_price.discount_price = record_data.get("discount_price")
+            existing_price.cost_price = record_data.get("cost_price")
+            existing_price.currency = record_data.get("currency", "USD") # Default if not provided
+            # updated_at is handled by ORM default onupdate
+            price_orm_instance = existing_price
+        else:
+            logger.info(f"Creating new price for business {business_details_id}, {'product ' + str(target_product_id) if target_product_id else 'SKU ' + str(target_sku_id)}")
+            new_price_data = {
+                "business_details_id": business_details_id,
+                "product_id": target_product_id,
+                "sku_id": target_sku_id,
+                "price": record_data["price"],
+                "discount_price": record_data.get("discount_price"),
+                "cost_price": record_data.get("cost_price"),
+                "currency": record_data.get("currency", "USD"),
+                # created_at and updated_at handled by ORM server_default
+            }
+            price_orm_instance = PriceOrm(**new_price_data)
+            db_session.add(price_orm_instance)
+
+        db_session.flush() # To get ID if new, or ensure instance is tracked for commit.
+        if price_orm_instance.id is None:
+             logger.error(f"Failed to obtain DB ID for price record after flush. Data: {record_data}")
+             raise Exception("DB flush failed to return an ID for price record.")
+
+        return price_orm_instance.id
+
+    except ValueError as ve: # Catch specific value errors e.g. from ID conversion
+        logger.error(f"Value error processing price record for business {business_details_id}: {record_data} - {ve}", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"Generic error processing price record for business {business_details_id}: {record_data} - {e}", exc_info=True)
+        # Do not rollback here; let the calling task manage the transaction.
         return None
 
 # ... other loader functions for products, attributes, etc. ...

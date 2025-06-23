@@ -34,6 +34,7 @@ from app.db.models import (
     ReturnPolicyOrm,
     ProductOrm,
     ProductItemOrm,
+
     ProductPriceOrm,
     MetaTagOrm,
     CategoryOrm,
@@ -43,6 +44,7 @@ from app.db.models import (
     ProductSpecificationOrm,
     # Make sure ShoppingCategoryOrm is also imported if it's defined in models.py and part of Base
     from app.models.shopping_category import ShoppingCategoryOrm # Ensure this path is correct
+
 )
 
 # target_metadata should point to your Base.metadata

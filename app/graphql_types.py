@@ -79,3 +79,51 @@ class StandardMessageType:
 # class GenerateTokenInput:
 #     username: str
 #     password: str # Or other credentials like client_id/client_secret for machine auth
+
+
+@strawberry.enum
+class PriceTypeGQL(str): # Using str as the base for Enum values
+    PRODUCT = "PRODUCT"
+    SKU = "SKU"
+
+@strawberry.type
+class PriceType:
+    id: strawberry.ID
+    business_id: str # Assuming prices are scoped by business
+    product_id: Optional[strawberry.ID] = None
+    sku_id: Optional[strawberry.ID] = None
+    price: float
+    discount_price: Optional[float] = None
+    cost_price: Optional[float] = None
+    currency: Optional[str] = "USD" # Default currency
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+
+    # Resolver for product (if product_id is set)
+    # @strawberry.field
+    # async def product(self, info: strawberry.types.Info) -> Optional['ProductTypeGQL']: # Forward reference if ProductTypeGQL is defined later
+    #     if self.product_id:
+    #         # Logic to fetch product by self.product_id
+    #         # return await get_product_by_id_loader(info).load(self.product_id)
+    #         pass
+    #     return None
+
+    # Resolver for sku (if sku_id is set)
+    # @strawberry.field
+    # async def sku(self, info: strawberry.types.Info) -> Optional['SKUTypeGQL']: # Forward reference
+    #     if self.sku_id:
+    #         # Logic to fetch SKU by self.sku_id
+    #         # return await get_sku_by_id_loader(info).load(self.sku_id)
+    #         pass
+    #     return None
+
+@strawberry.input
+class PriceInput:
+    price_type: PriceTypeGQL # PRODUCT or SKU
+    target_id: strawberry.ID # product_id if PRODUCT, sku_id if SKU
+    price: float
+    discount_price: Optional[float] = None
+    cost_price: Optional[float] = None
+    currency: Optional[str] = "USD"
+```
+

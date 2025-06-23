@@ -58,12 +58,17 @@ from app.tasks.load_jobs import (
     process_return_policies_file,
     process_products_file,
     process_product_items_file,
-    process_product_prices_file,
-    process_meta_tags_file
+    # process_product_prices_file, # This will be replaced by the new price loader logic
+    process_meta_tags_file,
     # process_categories_file # This will be imported once created in load_jobs.py
+    # process_prices_file, # Assuming a new task for prices will be created
 )
 from app.db.connection import get_session as get_db_session_sync # For DB operations
-from app.db.models import UploadSessionOrm # For DB operations
+from app.db.models import UploadSessionOrm, PriceOrm, ProductOrm, ProductItemOrm # For DB operations
+# Import PriceTypeGQL and PriceInput from graphql_types
+from app.graphql_types import PriceTypeGQL, PriceInput, PriceType as PriceResponseType
+# Pydantic model for validation, if needed, or use direct validation logic
+from app.dataload.models.price_csv import PriceCsv, PriceTypeEnum as PriceCsvTypeEnum
 import logging # For logging DB errors
 
 logger = logging.getLogger(__name__)
@@ -359,3 +364,141 @@ class Mutation:
 
         # Return the UploadSessionType based on the (conceptually) created DB record
         return UploadSessionType(**created_session_dict)
+
+
+    @strawberry.mutation
+    async def upsert_price(
+        self,
+        info: strawberry.types.Info,
+        input: PriceInput
+    ) -> Optional[PriceResponseType]:
+        """
+        Creates or updates a price for a given product or SKU.
+        Requires authentication.
+        """
+        current_user_data = info.context.get("current_user")
+        if not current_user_data or not current_user_data.get("business_id"):
+            raise strawberry.GraphQLError("Authentication required: User or business ID not found in context.")
+
+        business_id_from_token_str = str(current_user_data["business_id"]) # Ensure string
+        # Assuming business_id in DB (BigInteger) needs to be compared with string from token context.
+        # Convert token's business_id to BigInteger for DB queries if necessary, or ensure DB stores it as string.
+        # For this example, let's assume business_details_id in ORM models is BigInteger.
+        # We'll need to ensure consistent type for comparison or cast appropriately.
+        # For simplicity, let's assume business_id_from_token can be cast to int for DB lookups.
+        try:
+            business_id_for_db = int(business_id_from_token_str)
+        except ValueError:
+            raise strawberry.GraphQLError("Invalid business ID format in token.")
+
+
+        # Basic validation based on PriceCsv model logic
+        if input.price <= 0:
+            raise strawberry.GraphQLError("Price must be a positive number.")
+        if input.discount_price is not None and input.discount_price >= input.price:
+            raise strawberry.GraphQLError("Discount price must be less than price.")
+        if input.cost_price is not None and input.cost_price < 0:
+            raise strawberry.GraphQLError("Cost price must be non-negative.")
+
+        db_session = None
+        try:
+            # Using the business_id from token for scoping the DB session, if applicable by get_db_session_sync
+            db_session = get_db_session_sync(business_id=business_id_from_token_str)
+
+            target_product_id: Optional[int] = None
+            target_sku_id: Optional[int] = None
+
+            # Convert strawberry.ID (string) from input.target_id to int for DB lookup
+            try:
+                input_target_id_int = int(str(input.target_id))
+            except ValueError:
+                raise strawberry.GraphQLError(f"Invalid target_id format: {input.target_id}. Must be an integer.")
+
+
+            if input.price_type == PriceTypeGQL.PRODUCT:
+                product = db_session.query(ProductOrm).filter(
+                    ProductOrm.id == input_target_id_int,
+                    ProductOrm.business_details_id == business_id_for_db
+                ).first()
+                if not product:
+                    raise strawberry.GraphQLError(f"Product with ID {input_target_id_int} not found for business {business_id_from_token_str}.")
+                target_product_id = product.id
+            elif input.price_type == PriceTypeGQL.SKU:
+                sku = db_session.query(ProductItemOrm).filter(
+                    ProductItemOrm.id == input_target_id_int,
+                    ProductItemOrm.business_details_id == business_id_for_db
+                ).first()
+                if not sku:
+                    raise strawberry.GraphQLError(f"SKU with ID {input_target_id_int} not found for business {business_id_from_token_str}.")
+                target_sku_id = sku.id
+            else:
+                raise strawberry.GraphQLError("Invalid price_type specified.")
+
+            existing_price_query = db_session.query(PriceOrm).filter(PriceOrm.business_details_id == business_id_for_db)
+            if target_product_id:
+                existing_price_query = existing_price_query.filter(PriceOrm.product_id == target_product_id)
+            elif target_sku_id:
+                existing_price_query = existing_price_query.filter(PriceOrm.sku_id == target_sku_id)
+
+            existing_price = existing_price_query.first()
+
+            price_orm_instance: PriceOrm
+            if existing_price:
+                existing_price.price = input.price
+                existing_price.discount_price = input.discount_price
+                existing_price.cost_price = input.cost_price
+                existing_price.currency = input.currency
+                existing_price.updated_at = datetime.datetime.utcnow()
+                price_orm_instance = existing_price
+                logger.info(f"Updating existing price for {'product' if target_product_id else 'SKU'} ID {input_target_id_int} for business {business_id_from_token_str}")
+            else:
+                new_price_data = {
+                    "business_details_id": business_id_for_db,
+                    "product_id": target_product_id,
+                    "sku_id": target_sku_id,
+                    "price": input.price,
+                    "discount_price": input.discount_price,
+                    "cost_price": input.cost_price,
+                    "currency": input.currency,
+                }
+                price_orm_instance = PriceOrm(**new_price_data)
+                db_session.add(price_orm_instance)
+                logger.info(f"Creating new price for {'product' if target_product_id else 'SKU'} ID {input_target_id_int} for business {business_id_from_token_str}")
+
+            db_session.commit()
+            db_session.refresh(price_orm_instance)
+
+            response_data = {
+                "id": strawberry.ID(str(price_orm_instance.id)),
+                "business_id": str(price_orm_instance.business_details_id),
+                "product_id": strawberry.ID(str(price_orm_instance.product_id)) if price_orm_instance.product_id else None,
+                "sku_id": strawberry.ID(str(price_orm_instance.sku_id)) if price_orm_instance.sku_id else None,
+                "price": price_orm_instance.price,
+                "discount_price": price_orm_instance.discount_price,
+                "cost_price": price_orm_instance.cost_price,
+                "currency": price_orm_instance.currency,
+                "created_at": price_orm_instance.created_at,
+                "updated_at": price_orm_instance.updated_at,
+            }
+            return PriceResponseType(**response_data)
+
+        except strawberry.GraphQLError:
+            if db_session: db_session.rollback() # Rollback on known GQL validation errors too if they occur after session start
+            raise
+        except ValueError as ve: # Catch specific value errors e.g. from ID conversion
+            if db_session: db_session.rollback()
+            logger.error(f"Value error in upsert_price: {ve}", exc_info=True)
+            raise strawberry.GraphQLError(f"Invalid input value: {str(ve)}")
+        except Exception as e:
+            logger.error(f"Error in upsert_price for target {input.target_id if input else 'N/A'}: {e}", exc_info=True)
+            if db_session:
+                db_session.rollback()
+            raise strawberry.GraphQLError(f"An server error occurred: {str(e)}. Please try again later.")
+        finally:
+            if db_session:
+                db_session.close()
+
+        return None # Should ideally not be reached
+
+```
+
