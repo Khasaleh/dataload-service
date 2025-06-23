@@ -1,25 +1,28 @@
 from jose import JWTError, jwt
-from fastapi import Depends, HTTPException, status # Added status
+from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-import os
-import logging # Added logging
-from typing import Optional, List, Dict, Any # For type hints
+import logging
+from typing import Optional, List, Dict, Any
+from app.core.config import settings # Import centralized settings
 
-logger = logging.getLogger(__name__) # Initialize logger
+logger = logging.getLogger(__name__)
 
 # The tokenUrl points to the endpoint where a client can obtain a token.
-# If using GraphQL exclusively for token generation, this might point to /graphql.
-# However, its primary use here is for OpenAPI documentation if you use FastAPI's built-in docs
-# to authorize API calls. For programmatic calls or GraphiQL, the client just needs to send the token.
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/token") # Or potentially "/graphql" if token mutation is there
+# For this GraphQL-centric app, it should ideally point to the GraphQL endpoint
+# if token generation happens there, or be aligned with how Postman/clients are set up.
+# Using settings.API_PREFIX which defaults to /graphql.
+# If a dedicated token REST endpoint existed, it would be like "/api/token".
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl=settings.API_PREFIX) # Assuming token generation is via GraphQL at API_PREFIX
 
-# Standardized JWT Secret environment variable
-SECRET_KEY = os.getenv("JWT_SECRET", "your-default-secret-key-if-not-set")
-# JWT Algorithm to be used for encoding/decoding tokens. HS512 is a stronger default.
-ALGORITHM = os.getenv("JWT_ALGORITHM", "HS512")
+# JWT Configuration from centralized settings
+SECRET_KEY = settings.JWT_SECRET
+ALGORITHM = settings.JWT_ALGORITHM
 
-if SECRET_KEY == "your-default-secret-key-if-not-set":
-    logger.warning("Using default JWT_SECRET. This should be set via an environment variable with a strong, random key for production.")
+if SECRET_KEY == "your-default-secret-key-if-not-set" and settings.ENVIRONMENT != "test": # Avoid warning in tests using default
+    logger.warning(
+        "Using default JWT_SECRET. This should be overridden via an environment variable "
+        "(JWT_SECRET or SECRET_KEY) with a strong, random key for production."
+    )
 
 def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
     """

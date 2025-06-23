@@ -1,73 +1,50 @@
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-import os
 import logging
+from app.core.config import settings # Import the centralized settings
 
 logger = logging.getLogger(__name__)
 
-# --- Database Configuration from Environment Variables ---
-# These variables define the connection to the primary/default database (specified by DB_NAME).
-# This database acts as the entry point and may contain multiple schemas for different tenants
-# if using a schema-per-tenant strategy.
-#
-# - DB_DRIVER: SQLAlchemy driver string (e.g., "postgresql+psycopg2", "mysql+mysqlconnector").
-# - DB_USER: Username for database connection.
-# - DB_PASSWORD: Password for database connection.
-# - DB_HOST: Hostname or IP address of the database server.
-# - DB_PORT: Port number for the database server (e.g., "5432" for PostgreSQL).
-# - DB_NAME: The name of the specific database to connect to on the server. This database
-#            will contain the various schemas (public, tenant-specific, shared service schemas).
+# --- Database Configuration from Centralized Settings ---
+# All database configuration is now sourced from the `settings` object.
 
-DB_DRIVER = os.getenv("DB_DRIVER", "postgresql+psycopg2")
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT", "5432")
-DB_NAME = os.getenv("DB_NAME") # The main database name
+# The DATABASE_URL is either provided directly or constructed in the Settings class.
+DATABASE_URL = settings.DATABASE_URL
 
-# Schema configurations (can be used for table definitions or search_path modifications)
-CATALOG_SCHEMA = os.getenv("CATALOG_SERVICE_SCHEMA", "catalog") # Example default schema name
-BUSINESS_SCHEMA = os.getenv("BUSINESS_SERVICE_SCHEMA", "business") # Example default schema name
-
-# Construct the primary DATABASE_URL from component environment variables
-DATABASE_URL = None
-if all([DB_DRIVER, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME]):
-    DATABASE_URL = f"{DB_DRIVER}://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-else:
+if not DATABASE_URL:
     logger.error(
-        "One or more core database connection environment variables are missing "
-        "(DB_DRIVER, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME). "
-        "Database functionality will be impaired."
+        "DATABASE_URL is not configured in settings. "
+        "Ensure database environment variables (DB_USER, DB_PASSWORD, etc.) "
+        "or a full DATABASE_URL are provided. Database functionality will be impaired."
     )
     # Depending on application strictness, could raise an exception here.
-    # For now, DATABASE_URL will be None, and get_engine will fail if it's used.
+    # For now, get_engine will fail if DATABASE_URL is None.
 
-# --- Multi-Tenancy Connection Management ---
+# Schema configurations are also sourced from settings
+CATALOG_SCHEMA = settings.CATALOG_SERVICE_SCHEMA
+BUSINESS_SCHEMA = settings.BUSINESS_SERVICE_SCHEMA
 
-# DATABASES dictionary can still be used for a database-per-tenant strategy,
-# but the "default" should now rely on the constructed DATABASE_URL.
-DATABASES = {
-    # Example for specific tenant DB if it's different from the default construction:
-    # "biz_1001": "postgresql://user_biz1:pass_biz1@custom_host:5432/db_for_biz_1001",
-    "default": DATABASE_URL # Uses the URL constructed from individual env vars
-    # The DATABASES dictionary is largely simplified as we move to a single DB with shared schemas.
-    # It's kept here if a very specific tenant needs a completely separate DB instance,
-    # but get_engine will now primarily use the "default" constructed DATABASE_URL.
-}
 
-def get_engine(): # Parameters business_id and strategy removed
+# --- Engine Creation ---
+# The engine is created once and can be reused.
+_engine = None
+
+def get_engine():
     """
-    Returns a SQLAlchemy engine using the default database configuration.
-    The application now assumes a single primary database containing shared schemas.
+    Returns a SQLAlchemy engine using the database configuration from settings.
+    The application assumes a single primary database.
     """
-    db_url = DATABASES.get("default")
-    if not db_url:
-        # This case should ideally be prevented by the check after DATABASE_URL construction.
-        logger.error("Default database URL not configured or missing.")
-        raise Exception("Default database URL is not configured.")
+    global _engine
+    if _engine is None:
+        if not DATABASE_URL:
+            logger.critical("DATABASE_URL is not configured. Cannot create database engine.")
+            raise Exception("DATABASE_URL is not configured. Cannot create database engine.")
 
-    logger.info(f"Creating engine using default database URL (ending): ...{db_url[-20:]}")
-    return create_engine(db_url, pool_pre_ping=True)
+        # Convert Pydantic DSN type to string for create_engine
+        db_url_str = str(DATABASE_URL)
+        logger.info(f"Creating engine using database URL (ending): ...{db_url_str[-20:]}")
+        _engine = create_engine(db_url_str, pool_pre_ping=True)
+    return _engine
 
 
 def get_session(business_id: int): # Type hint for business_id changed to int

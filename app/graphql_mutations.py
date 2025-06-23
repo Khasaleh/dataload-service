@@ -2,12 +2,14 @@ import strawberry
 from typing import Optional, Any, Dict
 import datetime
 import uuid # For session_id generation
-import os # For WASABI_BUCKET_NAME
+# import os # For WASABI_BUCKET_NAME - Will be replaced by settings
+from app.core.config import settings # Import centralized settings
 
 from app.graphql_types import UploadSessionType, TokenResponseType, UserType
 from strawberry.file_uploads import Upload
 from jose import jwt # Added
-from app.dependencies.auth import SECRET_KEY, ALGORITHM # Added
+# SECRET_KEY and ALGORITHM will be sourced from settings where needed, or directly via app.dependencies.auth
+# from app.dependencies.auth import SECRET_KEY, ALGORITHM # Potentially remove if directly using settings
 from datetime import timedelta # Added
 
 
@@ -28,7 +30,8 @@ _MOCK_USERS_DB = {
         "user_id": "admin_456", "business_id": "biz_789", "roles": ["ROLE_ADMIN", "ROLE_USER"], "disabled": False
     }
 }
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30))
+# ACCESS_TOKEN_EXPIRE_MINUTES is now sourced from settings.ACCESS_TOKEN_EXPIRE_MINUTES
+# SECRET_KEY and ALGORITHM are also sourced from settings (via app.dependencies.auth or directly)
 
 def authenticate_user_placeholder(username: str, password: str) -> Optional[Dict[str, Any]]:
     """
@@ -118,7 +121,7 @@ class Mutation:
             # return None
 
         # Create the JWT access token payload
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token_payload = {
             "sub": user_details["username"],
             "userId": user_details["user_id"],
@@ -127,6 +130,8 @@ class Mutation:
             "iat": datetime.datetime.utcnow(),
             "exp": datetime.datetime.utcnow() + access_token_expires
         }
+        # Use SECRET_KEY and ALGORITHM from centralized settings (imported via app.dependencies.auth)
+        from app.dependencies.auth import SECRET_KEY, ALGORITHM
         encoded_jwt = jwt.encode(access_token_payload, SECRET_KEY, algorithm=ALGORITHM)
 
         # Generate a refresh token (e.g., a simple UUID for this example)
@@ -172,7 +177,7 @@ class Mutation:
         # --- End of Placeholder Validation ---
 
         # Generate new access token
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token_payload = {
             "sub": user_details_for_refresh["username"],
             "userId": user_details_for_refresh["user_id"],
@@ -181,6 +186,8 @@ class Mutation:
             "iat": datetime.datetime.utcnow(),
             "exp": datetime.datetime.utcnow() + access_token_expires
         }
+        # Use SECRET_KEY and ALGORITHM from centralized settings (imported via app.dependencies.auth)
+        from app.dependencies.auth import SECRET_KEY, ALGORITHM
         new_access_token = jwt.encode(access_token_payload, SECRET_KEY, algorithm=ALGORITHM)
 
         # Generate new refresh token (implementing rotation)
@@ -261,11 +268,13 @@ class Mutation:
         # Construct Wasabi path
         wasabi_path = f"uploads/{business_id}/{session_id}/{input.load_type}/{original_filename}"
 
-        # Get Wasabi bucket name from environment
-        WASABI_BUCKET_NAME = os.getenv("WASABI_BUCKET_NAME")
+        # Get Wasabi bucket name from centralized settings
+        WASABI_BUCKET_NAME = settings.WASABI_BUCKET_NAME
         if not WASABI_BUCKET_NAME:
-            # This should ideally be checked at app startup.
-            raise strawberry.GraphQLError("Wasabi bucket name is not configured on the server.")
+            # This check is important. Settings loader should ensure critical vars are present,
+            # or the app should fail at startup if they're missing and essential.
+            logger.error("WASABI_BUCKET_NAME is not configured in settings.")
+            raise strawberry.GraphQLError("Server configuration error: Wasabi bucket name is not set.")
 
         # --- Conceptual: Upload Sequence Checks (Not Implemented Here) ---
         # e.g., check_upload_sequence(db_session, business_id, input.load_type)

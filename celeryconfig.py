@@ -1,21 +1,71 @@
-import os
+from app.core.config import settings # Import centralized settings
+import logging
 
-# --- Redis Configuration for Celery ---
-# Fetches Redis connection details from environment variables.
-# These should align with how the main application connects to Redis (e.g., in app/tasks/load_jobs.py).
+logger = logging.getLogger(__name__)
 
-REDIS_HOST = os.getenv("REDIS_HOST", "redis")
-REDIS_PORT = os.getenv("REDIS_PORT", "6379")
+# --- Celery Configuration from Centralized Settings ---
+# Celery connection URLs are now sourced from the `settings` object,
+# which constructs them from base Redis settings or uses fully provided URLs.
 
-# Specific DB numbers for Celery broker and result backend
-# It's good practice to use different DB numbers if they share the same Redis instance
-# to avoid key collisions, though 0 is a common default for both if not specified.
-CELERY_BROKER_DB_NUMBER = os.getenv("CELERY_BROKER_DB_NUMBER", "0")
-CELERY_RESULT_BACKEND_DB_NUMBER = os.getenv("CELERY_RESULT_BACKEND_DB_NUMBER", "0") # Often same as broker
+broker_url = str(settings.CELERY_BROKER_URL) if settings.CELERY_BROKER_URL else None
+result_backend = str(settings.CELERY_RESULT_BACKEND_URL) if settings.CELERY_RESULT_BACKEND_URL else None
 
-broker_url = f'redis://{REDIS_HOST}:{REDIS_PORT}/{CELERY_BROKER_DB_NUMBER}'
-result_backend = f'redis://{REDIS_HOST}:{REDIS_PORT}/{CELERY_RESULT_BACKEND_DB_NUMBER}'
+if not broker_url:
+    logger.error(
+        "Celery broker URL is not configured in settings. "
+        "Ensure Redis host, port, and Celery DB number are set, or a full CELERY_BROKER_URL is provided. "
+        "Celery worker will likely fail to start."
+    )
+    # Celery will fail to start if broker_url is None, so this log is a precursor.
+
+if not result_backend:
+    logger.warning(
+        "Celery result backend URL is not configured in settings. Task results may not be stored."
+    )
 
 task_serializer = 'json'
 result_serializer = 'json'
 accept_content = ['json']
+
+# Optional: Configure Celery logging to use the application's log level
+# from celery.signals import setup_logging
+# @setup_logging.connect
+# def config_loggers(*args, **kwargs):
+#     from logging.config import dictConfig
+#     from app.core.config import settings as app_settings # Re-import to avoid cycle if this file is top-level imported
+#     LOGGING = {
+#         'version': 1,
+#         'disable_existing_loggers': False,
+#         'formatters': {
+#             'standard': {
+#                 'format': '[%(asctime)s] [%(levelname)s] [%(name)s::%(module)s::%(funcName)s::%(lineno)d] %(message)s',
+#                 'datefmt': '%Y-%m-%d %H:%M:%S'
+#             },
+#         },
+#         'handlers': {
+#             'console': {
+#                 'level': app_settings.LOG_LEVEL.upper(),
+#                 'class': 'logging.StreamHandler',
+#                 'formatter': 'standard',
+#             },
+#         },
+#         'loggers': {
+#             'celery': {
+#                 'handlers': ['console'],
+#                 'level': app_settings.LOG_LEVEL.upper(),
+#                 'propagate': False,
+#             },
+#             'app': { # Configure your app's logger if needed
+#                 'handlers': ['console'],
+#                 'level': app_settings.LOG_LEVEL.upper(),
+#                 'propagate': False,
+#             },
+#              '': { # Root logger
+#                 'handlers': ['console'],
+#                 'level': app_settings.LOG_LEVEL.upper(),
+#                 'propagate': False,
+#             }
+#         }
+#     }
+#     dictConfig(LOGGING)
+# logger.info(f"Celery logging configured with level: {app_settings.LOG_LEVEL.upper()}")

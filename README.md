@@ -4,9 +4,22 @@ FastAPI + Celery-based upload and processing service.
 
 ## Configuration
 
-The application is configured using environment variables. A comprehensive list of all required and optional environment variables can be found in the `.env.example` file in the root of this repository. See the "Local Development Setup" section for details on using `.env` files.
+The application is configured using environment variables, managed by the Pydantic `Settings` class located in `app/core/config.py`.
 
-For deployed environments such as production or staging, environment variables should be set directly in the execution environment. This is typically managed through:
+A comprehensive list of all required and optional environment variables can be found in the `.env.example` file in the root of this repository. This file serves as a template and shows default values where applicable.
+
+**Key Configuration Areas:**
+
+*   **General Application:** `ENVIRONMENT`, `LOG_LEVEL`, `API_PREFIX`, `PROJECT_NAME`.
+*   **Database:** Connection parameters (`DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`, `DB_NAME`, or a full `DATABASE_URL`).
+*   **Wasabi S3 Storage:** Credentials and bucket information (`WASABI_ENDPOINT_URL`, `WASABI_ACCESS_KEY`, `WASABI_SECRET_KEY`, `WASABI_BUCKET_NAME`, `WASABI_REGION`).
+*   **JWT Authentication:** Secrets and algorithm (`JWT_SECRET`, `JWT_ALGORITHM`, `ACCESS_TOKEN_EXPIRE_MINUTES`).
+*   **Redis:** Connection details and database numbers for Celery and application usage (`REDIS_HOST`, `REDIS_PORT`, `REDIS_DB_ID_MAPPING`, `CELERY_BROKER_DB_NUMBER`, `CELERY_RESULT_BACKEND_DB_NUMBER`).
+*   **Celery:** Broker and result backend URLs (can be constructed from Redis settings or provided fully).
+
+For local development, copy `.env.example` to `.env` and fill in your specific values. The application will load these variables from the `.env` file.
+
+For deployed environments (e.g., production, staging), these environment variables should be set directly in the execution environment. This is typically managed through:
 
 *   Kubernetes ConfigMaps and Secrets
 *   CI/CD pipeline variables
