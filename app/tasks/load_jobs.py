@@ -269,52 +269,58 @@ def process_csv_task(business_id, session_id, wasabi_file_path, original_filenam
             # fk_resolution_errors was removed from the return dict as well, as it's not defined in this scope if db_error_count > 0
             return {"status": "db_error", "message": f"DB processing failed for {db_error_count} records.", "processed_db_count": 0, "session_id": session_id}
         else:
-            if db_engine_session: db_engine_session.commit()
-            if string_id_redis_pipeline : string_id_redis_pipeline.execute() # Execute original string ID map pipeline
-            if db_pk_redis_pipeline: db_pk_redis_pipeline.execute() # Execute DB PK map pipeline
+        # This is the 'else' block of the main try...except
+        # It runs only if no exceptions occurred in the 'try' block up to db_error_count check.
+        if string_id_redis_pipeline : string_id_redis_pipeline.execute()
+        if db_pk_redis_pipeline: db_pk_redis_pipeline.execute()
 
-            # Set TTL for the session ID maps using the new utility
-            # The map_type for string IDs is just map_type
-            set_id_map_ttl(session_id, map_type)
-            # The map_type for DB PKs includes the suffix
-            set_id_map_ttl(session_id, f"{map_type}{DB_PK_MAP_SUFFIX}")
+        # Set TTL for the session ID maps
+        # Pass the global redis_client from this module, which is patched by the fixture in tests
+        set_id_map_ttl(session_id, map_type, redis_client)  # redis_client is app.tasks.load_jobs.redis_client
+        set_id_map_ttl(session_id, f"{map_type}{DB_PK_MAP_SUFFIX}", redis_client) # Same here
 
+        # Attempt to commit DB changes
+        if db_engine_session:
+            db_engine_session.commit()
+            logger.info(f"DB session committed for session {session_id} after processing {map_type}.")
 
-        # Cleanup and final status update
-        if db_engine_session: # Ensure it's closed if it was opened
-            pass # Will be closed in finally block
-
-        # 5. Wasabi Cleanup (moved after successful DB commit and Redis operations)
-        # Wasabi Cleanup should happen only if everything else (DB, Redis for this map_type) is successful
+        # If commit is successful, proceed with Wasabi cleanup and final status update
         try:
             logger.info(f"Attempting to delete {wasabi_file_path} from Wasabi bucket {WASABI_BUCKET_NAME}.")
             wasabi_client.delete_object(Bucket=WASABI_BUCKET_NAME, Key=wasabi_file_path)
             logger.info(f"Successfully deleted {wasabi_file_path} from Wasabi.")
+            summary["status"] = "completed" # Set status to completed after successful cleanup
         except Exception as cleanup_error:
             logger.error(f"Failed to delete {wasabi_file_path} from Wasabi: {cleanup_error}", exc_info=True)
-            # Non-critical, but good to note. Maybe update session details with this warning.
-            _update_session_status(session_id, business_id, status="completed_with_cleanup_warning",
-                                   details=f"File processed and data saved ({processed_db_count} records). Wasabi cleanup failed: {str(cleanup_error)}",
+            summary["status"] = "completed_with_cleanup_warning"
+            summary["message"] = f"File processed and data saved ({processed_db_count} records). Wasabi cleanup failed: {str(cleanup_error)}"
+
+        _update_session_status(session_id, business_id, status=summary["status"],
+                               details=summary.get("message"), # Use message from summary if set by cleanup error
                                    record_count=processed_csv_records_count,
                                    error_count=db_error_count + len(validation_errors)
                                   )
-            return {"status": "success_with_cleanup_warning", "processed_db_count": processed_db_count, "session_id": session_id, "message": f"Wasabi cleanup failed: {str(cleanup_error)}"}
+        # Adjust return structure to match existing expectations if necessary
+        return_payload = {"status": summary["status"], "processed_db_count": processed_db_count, "session_id": session_id}
+        if "message" in summary:
+            return_payload["message"] = summary["message"]
+        return return_payload
 
-        _update_session_status(session_id, business_id, status="completed",
-                               record_count=processed_csv_records_count,
-                               error_count=db_error_count + len(validation_errors)
-                              )
-        logger.info(f"Successfully processed and saved {processed_db_count} records for {map_type} in session {session_id}.")
-        return {"status": "success", "processed_db_count": processed_db_count, "session_id": session_id}
-
-    except Exception as e:
+except Exception as e: # Catches errors from the main 'try' block
         logger.error(f"Major error processing {map_type} for session {session_id}, file {original_filename}: {e}", exc_info=True)
-        if db_engine_session: db_engine_session.rollback()
-        _update_session_status(session_id, business_id, status="failed", details=f"Major processing error: {str(e)}")
-        return {"status": "error", "message": str(e), "session_id": session_id}
+    if db_engine_session:
+        db_engine_session.rollback()
+        logger.info(f"DB session rolled back for session {session_id} due to major error.")
+    summary["status"] = "error"
+    summary["message"] = f"Major processing error: {str(e)}"
+    _update_session_status(session_id, business_id, status="failed", details=summary["message"])
+    return {"status": "error", "message": str(e), "session_id": session_id} # Ensure this is the only return in except
     finally:
         if db_engine_session:
+        # The commit or rollback should have already happened.
+        # This finally block is now only for closing the session.
             db_engine_session.close()
+        logger.info(f"DB session closed for session {session_id}.")
 
 # Specific loaders (ensure they pass all necessary params if process_csv_task signature changes)
 # These should ideally pass the 'record_key' specific to their map_type for CSV key -> DB PK mapping.
