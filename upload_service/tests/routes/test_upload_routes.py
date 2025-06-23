@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock # For mocking Celery task
 
 # Need to make sure the app instance used by AsyncClient is the one with routes
 from app.main import app as main_app # Import your FastAPI app instance
-from app.models.schemas import BrandValidationResult
+# from app.models.schemas import BrandValidationResult # This model no longer exists
 
 @pytest.fixture
 def app() -> FastAPI:

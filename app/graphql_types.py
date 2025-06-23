@@ -80,6 +80,7 @@ class StandardMessageType:
 #     username: str
 #     password: str # Or other credentials like client_id/client_secret for machine auth
 
+
 @strawberry.enum
 class PriceTypeGQL(str): # Using str as the base for Enum values
     PRODUCT = "PRODUCT"
@@ -125,3 +126,4 @@ class PriceInput:
     cost_price: Optional[float] = None
     currency: Optional[str] = "USD"
 ```
+

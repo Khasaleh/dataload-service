@@ -1,6 +1,7 @@
 fastapi
 uvicorn[standard]
 pydantic
+httpx
 python-multipart
 celery
 redis
@@ -10,3 +11,4 @@ boto3
 passlib
 python-dotenv
 strawberry-graphql[fastapi]
+pytest-mock

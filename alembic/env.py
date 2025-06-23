@@ -34,16 +34,17 @@ from app.db.models import (
     ReturnPolicyOrm,
     ProductOrm,
     ProductItemOrm,
-    # ProductPriceOrm, # This is the old price table, replaced by PriceOrm
+
+    ProductPriceOrm,
     MetaTagOrm,
-    # New models related to recent DDL and Price feature
-    BusinessDetailsOrm,
     CategoryOrm,
     CategoryAttributeOrm,
+    BusinessDetailsOrm,
     ProductImageOrm,
     ProductSpecificationOrm,
-    ShoppingCategoryOrm, # Make sure this is correctly imported if defined elsewhere
-    PriceOrm # The new Price table
+    # Make sure ShoppingCategoryOrm is also imported if it's defined in models.py and part of Base
+    from app.models.shopping_category import ShoppingCategoryOrm # Ensure this path is correct
+
 )
 
 # target_metadata should point to your Base.metadata

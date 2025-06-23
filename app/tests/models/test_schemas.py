@@ -3,54 +3,66 @@ from pydantic import ValidationError
 from datetime import datetime
 
 from app.models.schemas import (
-    BrandCsvModel,      # Renamed
-    AttributeCsvModel,  # Renamed
-    ReturnPolicyCsvModel, # Renamed
-    ProductModel,       # Assuming ProductModel is still the name or will be updated later
-    ProductItemModel,   # Assuming ProductItemModel is still the name
+    BrandCsvModel,
+    AttributeCsvModel,
+    ReturnPolicyCsvModel,
+    ProductModel,
+    ProductItemModel,
     ProductPriceModel,
     MetaTagModel,
     UploadSessionModel
 )
 
 # General utility for checking non-empty string validation
-def check_non_empty_validator(model_class, field_name, valid_value="test", invalid_value=" "):
+def check_non_empty_validator(model_class, field_name, valid_value="test", invalid_value=" ", **kwargs):
     # Test valid value
-    model_instance = model_class(**{field_name: valid_value})
+    all_valid_args = {field_name: valid_value, **kwargs}
+    model_instance = model_class(**all_valid_args)
     assert getattr(model_instance, field_name) == valid_value
 
     # Test invalid value (empty or whitespace)
+    all_invalid_args = {field_name: invalid_value, **kwargs}
     with pytest.raises(ValidationError) as excinfo:
-        model_class(**{field_name: invalid_value})
+        model_class(**all_invalid_args)
     assert field_name in str(excinfo.value).lower()
-    assert "empty" in str(excinfo.value).lower()
+    # Pydantic v2 constr(min_length=1) error is "String should have at least 1 character"
+    assert "string should have at least 1 character" in str(excinfo.value).lower() or "empty" in str(excinfo.value).lower()
 
 # General utility for checking positive number validation
-def check_positive_number_validator(model_class, field_name, valid_value=10, invalid_value=0):
+def check_positive_number_validator(model_class, field_name, valid_value=10, invalid_value=0, **kwargs):
     # Test valid value
-    model_instance = model_class(**{field_name: valid_value})
+    all_valid_args = {field_name: valid_value, **kwargs}
+    model_instance = model_class(**all_valid_args)
     assert getattr(model_instance, field_name) == valid_value
 
     # Test invalid value (zero or negative)
+    all_invalid_args = {field_name: invalid_value, **kwargs}
     with pytest.raises(ValidationError) as excinfo:
-        model_class(**{field_name: invalid_value})
+        model_class(**all_invalid_args)
     assert field_name in str(excinfo.value).lower()
     if invalid_value <=0: # specific message for positive
-         assert "positive" in str(excinfo.value).lower()
+         # Pydantic v2: "Input should be strictly greater than 0"
+         assert "greater than 0" in str(excinfo.value).lower() or "positive" in str(excinfo.value).lower()
 
 # General utility for checking non-negative number validation
-def check_non_negative_validator(model_class, field_name, valid_value=0, invalid_value=-1):
-    model_instance = model_class(**{field_name: valid_value})
+def check_non_negative_validator(model_class, field_name, valid_value=0, invalid_value=-1, **kwargs):
+    all_valid_args = {field_name: valid_value, **kwargs}
+    model_instance = model_class(**all_valid_args)
     assert getattr(model_instance, field_name) == valid_value
+
+    all_invalid_args = {field_name: invalid_value, **kwargs}
     with pytest.raises(ValidationError) as excinfo:
-        model_class(**{field_name: invalid_value})
+        model_class(**all_invalid_args)
     assert field_name in str(excinfo.value).lower()
-    assert "non-negative" in str(excinfo.value).lower()
+    # Pydantic v2: "Input should be greater than or equal to 0"
+    assert "greater than or equal to 0" in str(excinfo.value).lower() or "non-negative" in str(excinfo.value).lower()
 
 
 class TestBrandModel:
     def test_brand_name_validation(self):
-        check_non_empty_validator(BrandModel, "brand_name")
+        # BrandCsvModel requires 'name' and 'logo'.
+        # The helper check_non_empty_validator will be updated to pass kwargs.
+        check_non_empty_validator(BrandCsvModel, "name", valid_value="Valid Brand Name", logo="logo.png")
 
 class TestAttributeModel:
     def test_attribute_name_validation(self):

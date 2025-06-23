@@ -10,7 +10,7 @@ from app.services.validator import validate_csv
 from typing import Optional, Dict, Any, List # For type hints
 import csv
 import io
-import redis
+# import redis # Moved to redis_utils
 import os
 import logging
 from typing import Optional
@@ -20,40 +20,16 @@ logging.basicConfig(level=logging.INFO)
 # Name of the Wasabi bucket used for storing uploaded CSV files.
 WASABI_BUCKET_NAME = os.getenv("WASABI_BUCKET_NAME", "your-default-bucket-name")
 
-# Redis connection parameters for ID mapping and potentially other task-related data.
-REDIS_HOST = os.getenv("REDIS_HOST", "redis")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-# Redis database number used for storing ID mappings by this service.
-REDIS_DB_ID_MAPPING = int(os.getenv("REDIS_DB_ID_MAPPING", 1))
-
-# TTL Configuration for Redis session keys (e.g., id_map:session:{session_id}:{map_type})
-DEFAULT_REDIS_SESSION_TTL_SECONDS = 24 * 60 * 60  # Default: 24 hours
-REDIS_SESSION_TTL_SECONDS = int(os.getenv("REDIS_SESSION_TTL_SECONDS", DEFAULT_REDIS_SESSION_TTL_SECONDS))
-
-try:
-    redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB_ID_MAPPING, decode_responses=True)
-    redis_client.ping()
-    logger.info(f"Connected to Redis: {REDIS_HOST}:{REDIS_PORT}, DB: {REDIS_DB_ID_MAPPING}")
-except redis.exceptions.ConnectionError as e:
-    logger.error(f"Redis connection failed: {e}")
-    redis_client = None
-
-# Utilities
-
-def get_id_map_key(session_id: str):
-    return f"id_map:session:{session_id}"
-
-def add_to_id_map(session_id: str, map_type: str, key: str, value: any, pipeline=None):
-    if not redis_client:
-        return
-    r = pipeline if pipeline else redis_client
-    r.hset(f"{get_id_map_key(session_id)}:{map_type}", key, str(value))
-
-def get_from_id_map(session_id: str, map_type: str, key: str, pipeline=None):
-    if not redis_client:
-        return None
-    r = pipeline if pipeline else redis_client
-    return r.hget(f"{get_id_map_key(session_id)}:{map_type}", key)
+# Import Redis utilities from the new location
+from app.utils.redis_utils import (
+    redis_client_instance as redis_client, # Use the instance from redis_utils
+    add_to_id_map,
+    get_from_id_map,
+    DB_PK_MAP_SUFFIX, # If it was used directly, though it seems not
+    REDIS_SESSION_TTL_SECONDS,
+    set_id_map_ttl,
+    get_redis_pipeline
+)
 
 # Generic task processor
 
@@ -161,8 +137,8 @@ def process_csv_task(business_id, session_id, wasabi_file_path, original_filenam
 
         db_engine_session = get_session(business_id)
 
-        string_id_redis_pipeline = redis_client.pipeline() if redis_client else None
-        db_pk_redis_pipeline = redis_client.pipeline() if redis_client else None
+        string_id_redis_pipeline = get_redis_pipeline()
+        db_pk_redis_pipeline = get_redis_pipeline()
 
         processed_csv_records_count = 0 # Counts records from validated_records loop
         processed_db_count = 0 # Counts records successfully upserted to DB by a loader
@@ -288,72 +264,63 @@ def process_csv_task(business_id, session_id, wasabi_file_path, original_filenam
             logger.warning(f"Session {session_id}: Encountered {db_error_count} errors during DB processing for {map_type}. Rolling back DB changes.")
             if db_engine_session: db_engine_session.rollback()
             _update_session_status(session_id, business_id, status="db_processing_failed",
-                                   details=f"DB processing failed for {db_error_count} records. Errors: {str(fk_resolution_errors)}",
+                                   details=f"DB processing failed for {db_error_count} records.", # Removed fk_resolution_errors
                                    error_count=db_error_count + len(validation_errors))
-            return {"status": "db_error", "message": f"DB processing failed for {db_error_count} records.", "errors": fk_resolution_errors, "processed_db_count": 0, "session_id": session_id}
+            # fk_resolution_errors was removed from the return dict as well, as it's not defined in this scope if db_error_count > 0
+            return {"status": "db_error", "message": f"DB processing failed for {db_error_count} records.", "processed_db_count": 0, "session_id": session_id}
         else:
-            if db_engine_session: db_engine_session.commit()
-            if string_id_redis_pipeline : string_id_redis_pipeline.execute() # Execute original string ID map pipeline
-            if db_pk_redis_pipeline: db_pk_redis_pipeline.execute() # Execute DB PK map pipeline
+        # This is the 'else' block of the main try...except
+        # It runs only if no exceptions occurred in the 'try' block up to db_error_count check.
+        if string_id_redis_pipeline : string_id_redis_pipeline.execute()
+        if db_pk_redis_pipeline: db_pk_redis_pipeline.execute()
 
-            # Set TTL for the original string ID map key (if pipeline was used)
-            if string_id_redis_pipeline and redis_client:
-                key_to_expire = f"{get_id_map_key(session_id)}:{map_type}"
-                logger.info(f"Setting TTL for Redis key: {key_to_expire} to {REDIS_SESSION_TTL_SECONDS} seconds.")
-                try:
-                    ttl_pipeline_string_ids = redis_client.pipeline()
-                    ttl_pipeline_string_ids.expire(key_to_expire, time=REDIS_SESSION_TTL_SECONDS)
-                    ttl_pipeline_string_ids.execute()
-                except Exception as ttl_error:
-                    logger.error(f"Failed to set TTL for string ID key {key_to_expire}: {ttl_error}", exc_info=True)
+        # Set TTL for the session ID maps
+        # Pass the global redis_client from this module, which is patched by the fixture in tests
+        set_id_map_ttl(session_id, map_type, redis_client)  # redis_client is app.tasks.load_jobs.redis_client
+        set_id_map_ttl(session_id, f"{map_type}{DB_PK_MAP_SUFFIX}", redis_client) # Same here
 
-            # Set TTL for the DB PK map key (if pipeline was used)
-            if db_pk_redis_pipeline and redis_client:
-                key_to_expire_db_pk = f"{get_id_map_key(session_id)}:{map_type}{db_pk_map_suffix}"
-                logger.info(f"Setting TTL for Redis DB PK key: {key_to_expire_db_pk} to {REDIS_SESSION_TTL_SECONDS} seconds.")
-                try:
-                    ttl_pipeline_db_pk = redis_client.pipeline()
-                    ttl_pipeline_db_pk.expire(key_to_expire_db_pk, time=REDIS_SESSION_TTL_SECONDS)
-                    ttl_pipeline_db_pk.execute()
-                except Exception as ttl_error:
-                    logger.error(f"Failed to set TTL for DB PK key {key_to_expire_db_pk}: {ttl_error}", exc_info=True)
+        # Attempt to commit DB changes
+        if db_engine_session:
+            db_engine_session.commit()
+            logger.info(f"DB session committed for session {session_id} after processing {map_type}.")
 
-
-        # Cleanup and final status update
-        if db_engine_session: # Ensure it's closed if it was opened
-            pass # Will be closed in finally block
-
-        # 5. Wasabi Cleanup (moved after successful DB commit and Redis operations)
-        # Wasabi Cleanup should happen only if everything else (DB, Redis for this map_type) is successful
+        # If commit is successful, proceed with Wasabi cleanup and final status update
         try:
             logger.info(f"Attempting to delete {wasabi_file_path} from Wasabi bucket {WASABI_BUCKET_NAME}.")
             wasabi_client.delete_object(Bucket=WASABI_BUCKET_NAME, Key=wasabi_file_path)
             logger.info(f"Successfully deleted {wasabi_file_path} from Wasabi.")
+            summary["status"] = "completed" # Set status to completed after successful cleanup
         except Exception as cleanup_error:
             logger.error(f"Failed to delete {wasabi_file_path} from Wasabi: {cleanup_error}", exc_info=True)
-            # Non-critical, but good to note. Maybe update session details with this warning.
-            _update_session_status(session_id, business_id, status="completed_with_cleanup_warning",
-                                   details=f"File processed and data saved. Wasabi cleanup failed: {str(cleanup_error)}",
-                                   record_count=processed_count,
-                                   error_count=db_error_count + len(validation_errors) # Total errors
+            summary["status"] = "completed_with_cleanup_warning"
+            summary["message"] = f"File processed and data saved ({processed_db_count} records). Wasabi cleanup failed: {str(cleanup_error)}"
+
+        _update_session_status(session_id, business_id, status=summary["status"],
+                               details=summary.get("message"), # Use message from summary if set by cleanup error
+                                   record_count=processed_csv_records_count,
+                                   error_count=db_error_count + len(validation_errors)
                                   )
-            return {"status": "success_with_cleanup_warning", "processed_db_count": processed_count, "session_id": session_id, "message": f"Wasabi cleanup failed: {str(cleanup_error)}"}
+        # Adjust return structure to match existing expectations if necessary
+        return_payload = {"status": summary["status"], "processed_db_count": processed_db_count, "session_id": session_id}
+        if "message" in summary:
+            return_payload["message"] = summary["message"]
+        return return_payload
 
-        _update_session_status(session_id, business_id, status="completed",
-                               record_count=processed_count,
-                               error_count=db_error_count + len(validation_errors) # Total errors
-                              )
-        logger.info(f"Successfully processed and saved {processed_count} records for {map_type} in session {session_id}.")
-        return {"status": "success", "processed_db_count": processed_count, "session_id": session_id}
-
-    except Exception as e:
+except Exception as e: # Catches errors from the main 'try' block
         logger.error(f"Major error processing {map_type} for session {session_id}, file {original_filename}: {e}", exc_info=True)
-        if db_engine_session: db_engine_session.rollback()
-        _update_session_status(session_id, business_id, status="failed", details=f"Major processing error: {str(e)}")
-        return {"status": "error", "message": str(e), "session_id": session_id}
+    if db_engine_session:
+        db_engine_session.rollback()
+        logger.info(f"DB session rolled back for session {session_id} due to major error.")
+    summary["status"] = "error"
+    summary["message"] = f"Major processing error: {str(e)}"
+    _update_session_status(session_id, business_id, status="failed", details=summary["message"])
+    return {"status": "error", "message": str(e), "session_id": session_id} # Ensure this is the only return in except
     finally:
         if db_engine_session:
+        # The commit or rollback should have already happened.
+        # This finally block is now only for closing the session.
             db_engine_session.close()
+        logger.info(f"DB session closed for session {session_id}.")
 
 # Specific loaders (ensure they pass all necessary params if process_csv_task signature changes)
 # These should ideally pass the 'record_key' specific to their map_type for CSV key -> DB PK mapping.
@@ -409,7 +376,110 @@ def process_product_prices_file(business_id: str, session_id: str, wasabi_file_p
 
 @shared_task(name="process_meta_tags_file")
 def process_meta_tags_file(business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
+    # This is the old generic handler. We will replace its use in CELERY_TASK_MAP.
+    # For now, let's keep it to avoid breaking other parts if they call it directly by name,
+    # but the new task process_meta_tags_file_specific should be used for the "meta_tags" load_type.
+    logger.warning(f"Legacy process_meta_tags_file called for session {session_id}. Consider using process_meta_tags_file_specific.")
     return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, "product_name", "meta", "meta_tags")
+
+# New specific Celery task for meta_tags
+from app.dataload.meta_tags_loader import load_meta_tags_from_csv, DataloadSummary, DataloadErrorDetail # Import new loader and models
+from app.db.models import UploadSessionOrm # Ensure this is imported
+import tempfile # For temporary file handling
+import json # For serializing error details
+import os # Already imported, used for os.path.exists, os.remove
+
+@shared_task(name="process_meta_tags_file_specific") # New distinct name
+def process_meta_tags_file_specific(business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
+    logger.info(f"Meta Tags specific processing task started for session: {session_id}, file: {original_filename}, business_id: {business_id}")
+
+    _update_session_status(session_id, business_id, status="processing")
+
+    db_session = None
+    temp_local_path = None # Ensure it's defined for finally block
+
+    try:
+        response = wasabi_client.get_object(Bucket=WASABI_BUCKET_NAME, Key=wasabi_file_path)
+
+        with tempfile.NamedTemporaryFile(delete=False, mode='wb', suffix=".csv") as tmp_file_obj:
+            tmp_file_obj.write(response['Body'].read())
+            temp_local_path = tmp_file_obj.name
+
+        logger.info(f"File {original_filename} downloaded from Wasabi to {temp_local_path} for session {session_id}.")
+
+        db_session = get_session(business_id=business_id)
+
+        summary: DataloadSummary = load_meta_tags_from_csv(db=db_session, csv_file_path=temp_local_path)
+
+        total_records = summary.total_rows_processed
+        total_errors = summary.validation_errors + summary.target_not_found_errors + summary.database_errors
+
+        error_details_list = [err.model_dump() for err in summary.error_details] if summary.error_details else []
+        # Cap the error details JSON string length to avoid overly large DB entries
+        max_json_len = 4000 # Example, adjust as needed
+        error_details_json = json.dumps(error_details_list)
+        if len(error_details_json) > max_json_len:
+            # Basic truncation, could be smarter (e.g. sample errors)
+            error_details_json = json.dumps(error_details_list[:max(1, int(max_json_len / (len(json.dumps(error_details_list[0]))+5 if error_details_list else 100) ))]) # Approx
+            error_details_json = error_details_json[:max_json_len-50] + '... TRUNCATED]"}' if error_details_list else '{"message": "Error details truncated"}'
+
+        # Determine final status
+        if any(err.row_number == 0 for err in summary.error_details): # File-level error (e.g. access, global parse)
+            final_status = "failed"
+        elif total_errors > 0:
+            if summary.successful_updates == 0 and total_records > 0 and total_errors >= total_records:
+                final_status = "failed" # All rows processed resulted in an error
+            else:
+                final_status = "completed_with_errors" # Some errors, but maybe some successes
+        elif summary.successful_updates > 0:
+            final_status = "completed"
+        elif total_records > 0 and summary.successful_updates == 0: # Processed rows, no updates, no errors
+            final_status = "completed_no_changes"
+        elif total_records == 0: # No rows processed, no errors (e.g. empty file after header)
+            final_status = "completed_empty_file"
+        else: # Fallback, should ideally not be reached if logic above is comprehensive
+            final_status = "unknown_state"
+            logger.warning(f"Meta tags task for session {session_id} ended in an undetermined state. Summary: {summary}")
+
+        if final_status == "completed_empty_file": # Ensure record_count is 0 for this status
+            total_records = 0
+
+        _update_session_status(
+            session_id=session_id,
+            business_id=business_id,
+            status=final_status,
+            details=error_details_json,
+            record_count=total_records,
+            error_count=total_errors
+        )
+
+        logger.info(f"Meta Tags processing finished for session {session_id}. Status: {final_status}, Processed: {total_records}, Successful: {summary.successful_updates}, Errors: {total_errors}.")
+
+        if final_status not in ["failed"]: # Delete from Wasabi unless it's a hard failure of the task itself before summary
+            try:
+                wasabi_client.delete_object(Bucket=WASABI_BUCKET_NAME, Key=wasabi_file_path)
+                logger.info(f"Successfully deleted {wasabi_file_path} from Wasabi for session {session_id}.")
+            except Exception as cleanup_error:
+                logger.error(f"Failed to delete {wasabi_file_path} from Wasabi for session {session_id}: {cleanup_error}", exc_info=True)
+
+        return {"status": final_status, "processed_count": summary.successful_updates, "total_records": total_records, "errors": total_errors, "session_id": session_id}
+
+    except Exception as e:
+        logger.error(f"Critical error in process_meta_tags_file_specific for session {session_id}: {str(e)}", exc_info=True)
+        if db_session:
+            db_session.rollback()
+        _update_session_status(session_id, business_id, status="failed", details=f"Critical task error: {str(e)}")
+        return {"status": "failed", "message": str(e), "session_id": session_id}
+    finally:
+        if db_session:
+            db_session.close()
+        if temp_local_path and os.path.exists(temp_local_path):
+            try:
+                os.remove(temp_local_path)
+                logger.info(f"Temporary file {temp_local_path} deleted for session {session_id}.")
+            except Exception as e_remove:
+                logger.error(f"Error deleting temporary file {temp_local_path} for session {session_id}: {e_remove}", exc_info=True)
+
 
 @shared_task(name="process_categories_file")
 def process_categories_file(business_id: int, session_id: str, wasabi_file_path: str, original_filename: str): # business_id type hint updated
@@ -437,6 +507,6 @@ CELERY_TASK_MAP = {
     "products": process_products_file,
     "product_items": process_product_items_file,
     "product_prices": process_product_prices_file,
-    "meta_tags": process_meta_tags_file,
-    "categories": process_categories_file,  # New entry
+    "meta_tags": process_meta_tags_file_specific, # Updated to specific task
+    "categories": process_categories_file,
 }

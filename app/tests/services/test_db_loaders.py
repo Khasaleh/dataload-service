@@ -447,4 +447,3 @@ class TestLoadReturnPolicyToDb:
         assert returned_pk is None
         mock_db_session_for_loaders.add.assert_called_once() # Add was attempted
         add_to_id_map.assert_not_called()
-```

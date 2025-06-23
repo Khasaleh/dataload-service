@@ -49,8 +49,10 @@ def authenticate_user_placeholder(username: str, password: str) -> Optional[Dict
 
 # --- Actual Service/Task Imports ---
 from app.services.storage import upload_file as upload_to_wasabi
+from strawberry.exceptions import GraphQLError # Correct import for GraphQLError
 # Updated import to fetch individual task functions
 from app.tasks.load_jobs import (
+    CELERY_TASK_MAP, # Import CELERY_TASK_MAP
     process_brands_file,
     process_attributes_file,
     process_return_policies_file,
@@ -363,6 +365,7 @@ class Mutation:
         # Return the UploadSessionType based on the (conceptually) created DB record
         return UploadSessionType(**created_session_dict)
 
+
     @strawberry.mutation
     async def upsert_price(
         self,
@@ -498,3 +501,4 @@ class Mutation:
         return None # Should ideally not be reached
 
 ```
+
