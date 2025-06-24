@@ -288,6 +288,34 @@ class UploadSessionModel(BaseModel):
     # The misplaced 'offer_price' validator that belonged to ProductPriceModel was here.
     # It has been removed from UploadSessionModel.
 
+# --- Standardized Error Detail Structure ---
+from app.models.enums import UploadJobStatus # For potential use or consistency, though not directly in ErrorDetailModel
+
+class ErrorType(str, Enum): # Defining ErrorType Enum here as it's closely tied to ErrorDetailModel
+    VALIDATION = "VALIDATION"           # Data failed Pydantic model validation or custom business rules.
+    DATABASE = "DATABASE"               # Error during database operation (insert, update, constraint).
+    LOOKUP = "LOOKUP"                   # Failed to find a related entity (e.g., brand_name not found).
+    FILE_FORMAT = "FILE_FORMAT"         # CSV file parsing error, incorrect headers, etc.
+    UNEXPECTED_ROW_ERROR = "UNEXPECTED_ROW_ERROR" # Error processing a row not fitting other categories.
+    TASK_EXCEPTION = "TASK_EXCEPTION"       # General exception within the Celery task.
+    CONFIGURATION = "CONFIGURATION"     # Problem with application config affecting the job.
+    UNKNOWN = "UNKNOWN"                 # Uncategorized error.
+
+
+class ErrorDetailModel(BaseModel):
+    """
+    Standardized structure for reporting individual errors during CSV processing.
+    """
+    row_number: Optional[int] = None    # CSV row number where the error occurred (if applicable)
+    field_name: Optional[str] = None    # Specific field that caused the error (if applicable)
+    error_message: str                  # Description of the error
+    error_type: ErrorType = ErrorType.UNKNOWN # Category of the error
+    offending_value: Optional[str] = None # Optional: The value that caused the error (truncate if long)
+
+    class Config:
+        use_enum_values = True # Ensures enum values are used when serializing
+
+
 class MetaTagModel(BaseModel):
     product_name: str
     meta_title: Optional[str] = None

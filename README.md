@@ -345,10 +345,34 @@ query GetMyBusinessUploads {
     updatedAt
     recordCount
     errorCount
-    details
+    details # Can be a JSON string of error details if processing failed or had errors.
   }
 }
 ```
+
+**Interpreting Upload Session Status and Details:**
+
+The `status` field of an `UploadSessionType` will reflect the current stage of the CSV processing. It can take values such as:
+*   `pending`: Initial state after upload.
+*   `downloading_file`: Celery worker is fetching the file.
+*   `validating_schema`: Initial row-by-row validation.
+*   `db_processing_started`: Saving data to the database has begun.
+*   `cleaning_up`: Post-processing cleanup.
+*   `completed`: Successful processing.
+*   `completed_with_errors`: Processed, but some rows had issues.
+*   `failed_validation`: CSV data validation failed.
+*   `failed_db_processing`: Errors during database operations.
+*   `failed_unhandled_exception`: Unexpected error in the task.
+(See `app.models.enums.UploadJobStatus` for a full list of possible statuses).
+
+If the `status` indicates errors (e.g., `completed_with_errors`, `failed_validation`), the `details` field will typically contain a JSON string. This JSON string is an array of error objects, each with the following structure (defined by `ErrorDetailModel` in `app/models/schemas.py`):
+*   `row_number` (Optional[int]): The CSV row number where the error occurred (2-indexed, assuming a header row).
+*   `field_name` (Optional[str]): The specific field related to the error.
+*   `error_message` (str): A description of the error.
+*   `error_type` (str): The category of the error (e.g., "VALIDATION", "DATABASE", "LOOKUP"). See `ErrorType` enum in `app/models/schemas.py`.
+*   `offending_value` (Optional[str]): The value that caused the error (may be truncated).
+
+Frontend applications should parse this JSON string from the `details` field to display user-friendly error information.
 
 ### Mutations
 
