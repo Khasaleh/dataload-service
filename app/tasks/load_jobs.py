@@ -184,9 +184,9 @@ def process_csv_task(business_id, session_id, wasabi_file_path, original_filenam
         for i, record_data in enumerate(validated_records):
             csv_row_number = i + 2 # Assuming row 1 is header
             db_pk = None
-            current_record_key_value = record_data.get(record_key, 'N/A')
+            current_record_key_value = record_data.get(record_key, 'N/A') # Default key value
 
-            try: # Wrap individual record processing for more granular error capture
+            try:
                 if map_type == "categories":
                     db_pk = load_category_to_db(db_engine_session, business_id, record_data, session_id, db_pk_redis_pipeline)
                 elif map_type == "brands":
@@ -198,45 +198,66 @@ def process_csv_task(business_id, session_id, wasabi_file_path, original_filenam
                 elif map_type == "products":
                     record_data_for_model = record_data.copy()
                     record_data_for_model['business_details_id'] = business_id
+                    # Pydantic validation for ProductCsvModel happens here if not done by validate_csv for products
+                    # If validate_csv already returned ProductCsvModel instances, this re-validation is redundant
+                    # Assuming validated_records from validate_csv are dicts for now.
                     product_csv_instance = ProductCsvModel(**record_data_for_model)
-                    current_record_key_value = product_csv_instance.self_gen_product_id # More specific key for products
+                    current_record_key_value = product_csv_instance.self_gen_product_id
                     db_pk = load_product_record_to_db(db_engine_session, business_id, product_csv_instance, session_id)
                     if db_pk is not None and db_pk_redis_pipeline:
                         add_to_id_map(session_id, f"products{DB_PK_MAP_SUFFIX}", product_csv_instance.self_gen_product_id, db_pk, pipeline=db_pk_redis_pipeline)
+                elif map_type == "product_prices": # Added case for product_prices
+                    # Assuming record_data is already validated by PriceCsv model via validate_csv
+                    # And business_details_id is implicitly the one from the task context.
+                    db_pk = load_price_to_db(db_engine_session, business_id, record_data, session_id, db_pk_redis_pipeline)
+                # TODO: Add case for "product_items" if a specific loader is created.
                 else:
                     logger.info(f"Row {csv_row_number}: No specific DB loader for map_type: '{map_type}'. Record: {current_record_key_value}")
                     if string_id_redis_pipeline and record_key and id_prefix and current_record_key_value != 'N/A':
                         generated_id = f"{id_prefix}:{str(current_record_key_value).lower().replace(' ', '_')}"
                         add_to_id_map(session_id, map_type, current_record_key_value, generated_id, pipeline=string_id_redis_pipeline)
 
-                if db_pk is None and map_type in ["categories", "brands", "attributes", "return_policies", "products"]:
-                    # This implies the loader itself logged an error and returned None.
-                    # We create a generic error detail here if the loader didn't provide one.
-                    # Ideally, loaders should raise specific exceptions or return error details.
-                    logger.warning(f"Row {csv_row_number}: DB loader for '{map_type}' returned None for record: {current_record_key_value}. This indicates a processing error for this row.")
-                    db_error_details_list.append(ErrorDetailModel(
-                        row_number=csv_row_number,
-                        error_message=f"Failed to process record for '{map_type}' with key '{current_record_key_value}'. Check worker logs for specifics.",
-                        error_type=ErrorType.DATABASE # Or more specific if known
-                    ))
-                elif db_pk is not None:
+                if db_pk is not None: # Successfully processed by a loader
                     processed_db_count +=1
+                # If db_pk is None, it means the loader function itself handled logging the error
+                # and we expect it to have raised DataLoaderError which is caught below.
 
-            except Exception as e_row_processing: # Catch errors from Pydantic validation within loop or loader issues
-                logger.error(f"Row {csv_row_number}: Error processing record {current_record_key_value} for {map_type}: {e_row_processing}", exc_info=True)
+            except DataLoaderError as dle: # Catch custom errors from loaders
+                logger.warning(f"Row {csv_row_number}: DataLoaderError for {map_type} record key '{current_record_key_value}': {dle.message}")
                 db_error_details_list.append(ErrorDetailModel(
                     row_number=csv_row_number,
-                    field_name=getattr(e_row_processing, 'field', None), # Attempt to get field if Pydantic error
-                    error_message=str(e_row_processing),
-                    error_type=ErrorType.UNEXPECTED_ROW_ERROR # Or VALIDATION if it's a Pydantic error
+                    field_name=dle.field_name,
+                    error_message=dle.message,
+                    error_type=dle.error_type,
+                    offending_value=dle.offending_value
+                ))
+            except ValidationError as ve: # Catch Pydantic errors if models are instantiated late (e.g. ProductCsvModel)
+                logger.error(f"Row {csv_row_number}: Pydantic ValidationError for {map_type} record key '{current_record_key_value}': {ve.errors()}", exc_info=False)
+                for err in ve.errors():
+                    db_error_details_list.append(ErrorDetailModel(
+                        row_number=csv_row_number,
+                        field_name=".".join(str(f) for f in err['loc']) if err['loc'] else None,
+                        error_message=err['msg'],
+                        error_type=ErrorType.VALIDATION,
+                        offending_value=str(err.get('input', 'N/A'))[:255]
+                    ))
+            except Exception as e_row_processing: # Catch any other unexpected error during row processing
+                logger.error(f"Row {csv_row_number}: Unexpected error processing record {current_record_key_value} for {map_type}: {e_row_processing}", exc_info=True)
+                db_error_details_list.append(ErrorDetailModel(
+                    row_number=csv_row_number,
+                    error_message=f"Unexpected error: {str(e_row_processing)}",
+                    error_type=ErrorType.UNEXPECTED_ROW_ERROR,
+                    offending_value=str(record_data.get(record_key, record_data))[:255] # Log part of the row data
                 ))
 
             processed_csv_records_count += 1
         # --- End Dispatch to Specific DB Loader Loop ---
 
-        all_errors = error_detail_list # Combine initial validation errors (already handled) with DB errors
+        # No longer need all_errors, as error_detail_list from validate_csv is handled before this loop,
+        # and db_error_details_list collects errors from this DB processing loop.
+        # The final error_count will be len(db_error_details_list) + len(error_detail_list_from_validate_csv)
 
-        if db_error_details_list: # Check if any errors occurred during DB processing loop
+        if db_error_details_list:
             logger.warning(f"Session {session_id}: Encountered {len(db_error_details_list)} errors during DB processing for {map_type}. Rolling back DB changes.")
             if db_engine_session: db_engine_session.rollback()
             _update_session_status(

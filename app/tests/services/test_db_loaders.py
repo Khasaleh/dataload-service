@@ -10,9 +10,13 @@ from app.services.db_loaders import (
 )
 import app.services.db_loaders as db_loaders_module
 from app.db.models import CategoryOrm, BrandOrm, ReturnPolicyOrm
+from app.exceptions import DataLoaderError # Import custom exception
+from app.models.schemas import ErrorType # Import ErrorType Enum
 from datetime import datetime
 
-MODULE_PATH_FOR_REDIS_UTILS = "app.services.db_loaders"
+MODULE_PATH_FOR_REDIS_UTILS = "app.services.db_loaders" # Path for mocking redis utils if they are in db_loaders
+# If redis utils are in app.utils.redis_utils and imported by db_loaders, then this path might need adjustment
+# For now, assuming db_loaders_module.add_to_id_map and .get_from_id_map correctly refers to them.
 
 @pytest.fixture
 def mock_db_session_for_loaders():
@@ -263,6 +267,57 @@ def test_load_brand_db_flush_error_returns_none(mock_db_session_for_loaders, moc
     returned_db_pk = load_brand_to_db(mock_db_session_for_loaders, 200, record_data, "sess", mock_redis_pipeline_for_loaders)
     assert returned_db_pk is None
     db_loaders_module.add_to_id_map.assert_not_called()
+
+def test_load_brand_missing_name_raises_dataloadererror(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders):
+    record_data = {"logo": "some_logo.png"} # Missing "name"
+    with pytest.raises(DataLoaderError) as excinfo:
+        load_brand_to_db(mock_db_session_for_loaders, 200, record_data, "sess_brand_missing_name", mock_redis_pipeline_for_loaders)
+
+    assert excinfo.value.error_type == ErrorType.VALIDATION
+    assert "Missing 'name'" in excinfo.value.message
+    assert excinfo.value.field_name == "name"
+    db_loaders_module.add_to_id_map.assert_not_called()
+
+def test_load_brand_db_flush_error_raises_dataloadererror(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders):
+    record_data = {"name": "FlushFail Brand", "logo": "logo.png"}
+    mock_db_session_for_loaders.query(BrandOrm).filter_by().first.return_value = None # Simulate new brand
+
+    # Mock flush to raise an error AND ensure new_brand_orm.id remains None
+    new_brand_mock = BrandOrm(name=record_data["name"]) # Create a mock ORM instance
+    new_brand_mock.id = None # Simulate ID not being set after add
+
+    def add_side_effect(instance):
+        # Simulate SQLAlchemy adding instance to session but not yet assigning ID
+        pass
+
+    mock_db_session_for_loaders.add.side_effect = add_side_effect
+    mock_db_session_for_loaders.flush.side_effect = Exception("Simulated DB Flush Error during ID generation")
+
+    with pytest.raises(DataLoaderError) as excinfo:
+        load_brand_to_db(mock_db_session_for_loaders, 200, record_data, "sess_brand_flush_fail", mock_redis_pipeline_for_loaders)
+
+    assert excinfo.value.error_type == ErrorType.DATABASE # Should be DATABASE if flush for ID fails
+    assert "DB flush failed to return an ID" in excinfo.value.message
+    assert excinfo.value.field_name == "name"
+    assert excinfo.value.offending_value == "FlushFail Brand"
+    db_loaders_module.add_to_id_map.assert_not_called()
+
+def test_load_brand_generic_exception_raises_dataloadererror(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders):
+    record_data = {"name": "GenericFail Brand", "logo": "logo.png"}
+    # Make query itself raise an unexpected error
+    mock_db_session_for_loaders.query(BrandOrm).filter_by().side_effect = Exception("Unexpected generic error")
+
+    with pytest.raises(DataLoaderError) as excinfo:
+        load_brand_to_db(mock_db_session_for_loaders, 200, record_data, "sess_brand_generic_fail", mock_redis_pipeline_for_loaders)
+
+    assert excinfo.value.error_type == ErrorType.UNEXPECTED_ROW_ERROR
+    assert "Unexpected error for brand" in excinfo.value.message
+    assert "Unexpected generic error" in excinfo.value.message # Check original error is part of message
+    assert excinfo.value.field_name == "name"
+    assert excinfo.value.offending_value == "GenericFail Brand"
+    assert isinstance(excinfo.value.original_exception, Exception)
+    db_loaders_module.add_to_id_map.assert_not_called()
+
 
 # --- Tests for load_return_policy_to_db ---
 class TestLoadReturnPolicyToDb:
