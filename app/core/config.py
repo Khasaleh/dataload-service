@@ -327,24 +327,3 @@ if settings.ENVIRONMENT == "development":
              print(f"{key}: {value}")
 
     print("---------------------------------")
-
-```
-
-**Key changes and considerations in this `Settings` class:**
-
-1.  **`pydantic-settings`:** Uses `BaseSettings` and `SettingsConfigDict` from the newer `pydantic-settings` library (successor to Pydantic V1's `BaseSettings`).
-2.  **`.env` Loading:** `SettingsConfigDict(env_file=".env", ...)` handles loading from a `.env` file.
-3.  **Type Hinting & Validation:** Uses Pydantic types like `PostgresDsn`, `RedisDsn`, `HttpUrl` for validation. Optional fields are marked with `Optional`.
-4.  **Required Fields:** Fields without defaults (like `DB_USER`, `DB_PASSWORD`, etc., when not providing a full `DATABASE_URL`) will cause an error if not found in the environment or `.env` file, making missing configurations explicit. I've made them Optional for now to allow DATABASE_URL to be the single source of truth if provided.
-5.  **Derived URLs (`model_validator`):**
-    *   A `model_validator` named `construct_derived_urls` is used to automatically build `DATABASE_URL`, `CELERY_BROKER_URL`, and `CELERY_RESULT_BACKEND_URL` if they are not provided directly but their constituent parts are. This is a common pattern.
-6.  **Aliases (`validation_alias`, `AliasChoices`):**
-    *   `ENVIRONMENT`: Allows being set by `ENV` or `ENVIRONMENT`.
-    *   `JWT_SECRET`: Allows being set by `JWT_SECRET` or `SECRET_KEY` (with `JWT_SECRET` taking precedence if both are defined). This matches the flexibility of `os.getenv("X", os.getenv("Y"))`.
-7.  **Wasabi Configuration:** `WASABI_ENDPOINT_URL`, `WASABI_ACCESS_KEY`, `WASABI_SECRET_KEY`, `WASABI_BUCKET_NAME`, `WASABI_REGION` are included. These now align with the `.env.example` naming for endpoint and bucket.
-8.  **Redis URL Property:** Added `REDIS_URL_ID_MAPPING` as a property for convenience where a full URL for that specific Redis DB is needed.
-9.  **Defaults:** Sensible defaults are provided for things like `LOG_LEVEL`, `REDIS_HOST`, `REDIS_PORT`, etc.
-10. **Development Mode Printing:** Added a conditional print of settings (masking common secret key names) if `ENVIRONMENT` is "development", which can be helpful for debugging.
-11. **Optional DB Components:** `DB_USER`, `DB_PASSWORD`, etc., are `Optional` to allow `DATABASE_URL` to be the sole source of truth if provided. The `model_validator` then constructs `DATABASE_URL` if these components *are* provided and `DATABASE_URL` itself is not.
-
-This `Settings` class provides a centralized, type-safe, and auto-validating way to manage application configurations. The next step will be to refactor the application to use this `settings` instance.
