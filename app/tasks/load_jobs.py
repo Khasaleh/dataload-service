@@ -146,7 +146,8 @@ def process_csv_task(business_id_str: str, session_id: str, wasabi_file_path: st
         processed_db_count = 0
         db_error_details_list: List[ErrorDetailModel] = []
 
-        if map_type == "brands" or map_type == "return_policies": # Handle bulk loaders
+        # Check for bulk loaders first
+        if map_type in ["brands", "return_policies", "product_prices"]: # Added "product_prices"
             try:
                 loader_summary = {}
                 if map_type == "brands":
@@ -157,15 +158,23 @@ def process_csv_task(business_id_str: str, session_id: str, wasabi_file_path: st
                 elif map_type == "return_policies":
                     loader_summary = load_return_policy_to_db(
                         db_engine_session, business_id, validated_records,
-                        session_id, db_pk_redis_pipeline # Though not used for mapping by this loader
+                        session_id, db_pk_redis_pipeline
+                    )
+                elif map_type == "product_prices":
+                    loader_summary = load_price_to_db(
+                        db_engine_session, business_id, validated_records,
+                        session_id, db_pk_redis_pipeline # Though not used by price loader for mapping
                     )
 
                 processed_db_count = loader_summary.get("inserted", 0) + loader_summary.get("updated", 0)
                 num_loader_errors = loader_summary.get("errors", 0)
                 if num_loader_errors > 0:
+                     # These errors are from within the loader (e.g. target ID not found for prices, or ID not populated for brands)
+                     # The loader itself should ideally return List[ErrorDetailModel] for these.
+                     # For now, adding a generic message if loader_summary["errors"] is just a count.
                      db_error_details_list.append(ErrorDetailModel(
-                         error_message=f"{num_loader_errors} {map_type} record(s) had issues post-bulk operation (e.g., ID not retrieved for Redis mapping or skipped). Check logs.",
-                         error_type=ErrorType.DATABASE # Or a more generic BATCH_PROCESSING_ERROR
+                         error_message=f"{num_loader_errors} record(s) in '{map_type}' batch had issues (e.g., target ID validation, post-insert ID retrieval). Check logs for specifics.",
+                         error_type=ErrorType.DATABASE # Or more specific if loader provides
                      ))
                 processed_csv_records_count = len(validated_records)
 
@@ -193,15 +202,13 @@ def process_csv_task(business_id_str: str, session_id: str, wasabi_file_path: st
                         db_pk = load_category_to_db(db_engine_session, business_id, record_data, session_id, db_pk_redis_pipeline)
                     elif map_type == "attributes":
                         db_pk = load_attribute_to_db(db_engine_session, business_id, record_data, session_id, db_pk_redis_pipeline)
-                    # Return policy is now bulk, handled above
                     elif map_type == "products":
                         record_data_for_model = record_data.copy()
                         record_data_for_model['business_details_id'] = business_id
                         product_csv_instance = ProductCsvModel(**record_data_for_model)
                         current_record_key_value = product_csv_instance.self_gen_product_id
                         db_pk = load_product_record_to_db(db_engine_session, business_id, product_csv_instance, session_id)
-                    elif map_type == "product_prices":
-                        db_pk = load_price_to_db(db_engine_session, business_id, record_data, session_id, db_pk_redis_pipeline)
+                    # product_prices is now bulk, handled above
                     else:
                         logger.info(f"Row {csv_row_number}: No specific DB loader for map_type: '{map_type}'. Record: {current_record_key_value}")
                         if string_id_redis_pipeline and record_key and id_prefix and current_record_key_value != 'N/A':
@@ -232,26 +239,18 @@ def process_csv_task(business_id_str: str, session_id: str, wasabi_file_path: st
         final_error_count = len(initial_validation_errors) + len(db_error_details_list)
         all_accumulated_errors = initial_validation_errors + db_error_details_list
 
-        if db_error_details_list and map_type != "brands" and map_type !="return_policies": # If row-by-row had DB errors
-             logger.warning(f"Session {session_id}: Encountered {len(db_error_details_list)} errors during DB processing for {map_type}. Rolling back DB changes.")
-             if db_engine_session: db_engine_session.rollback() # Rollback for row-by-row if any DB error
-             _update_session_status(
-                session_id, str(business_id), status=UploadJobStatus.FAILED_DB_PROCESSING,
-                details=all_accumulated_errors, record_count=processed_csv_records_count,
-                error_count=final_error_count
-            )
-             return {"status": UploadJobStatus.FAILED_DB_PROCESSING.value, "errors": [err.model_dump() for err in all_accumulated_errors], "processed_db_count": processed_db_count, "session_id": session_id}
-        elif db_error_details_list and (map_type == "brands" or map_type == "return_policies"): # Bulk loader itself raised an error or reported errors
-            logger.warning(f"Session {session_id}: Bulk loader for {map_type} reported errors or failed. Details: {db_error_details_list}")
-            if db_engine_session: db_engine_session.rollback() # Assume bulk failure means rollback
+        # Check if any DB errors occurred (either from bulk or row-by-row)
+        if db_error_details_list:
+            logger.warning(f"Session {session_id}: Encountered {len(db_error_details_list)} errors during DB processing stage for {map_type}. Rolling back DB changes.")
+            if db_engine_session: db_engine_session.rollback()
             _update_session_status(
-                session_id, str(business_id), status=UploadJobStatus.FAILED_DB_PROCESSING, # Or more specific batch error
+                session_id, str(business_id), status=UploadJobStatus.FAILED_DB_PROCESSING,
                 details=all_accumulated_errors, record_count=processed_csv_records_count,
                 error_count=final_error_count
             )
             return {"status": UploadJobStatus.FAILED_DB_PROCESSING.value, "errors": [err.model_dump() for err in all_accumulated_errors], "processed_db_count": processed_db_count, "session_id": session_id}
 
-
+        # If no DB errors from processing loop or bulk loaders
         if string_id_redis_pipeline : string_id_redis_pipeline.execute()
         if db_pk_redis_pipeline: db_pk_redis_pipeline.execute()
 
@@ -268,10 +267,10 @@ def process_csv_task(business_id_str: str, session_id: str, wasabi_file_path: st
         final_user_message = f"Successfully processed {processed_db_count} records."
         final_details_for_user = None
 
-        if final_error_count > 0 :
+        if final_error_count > 0 : # This implies initial_validation_errors occurred but weren't fatal for the whole batch
              final_status_enum = UploadJobStatus.COMPLETED_WITH_ERRORS
-             final_user_message = f"Processed {processed_csv_records_count} records with {final_error_count} errors."
-             final_details_for_user = all_accumulated_errors
+             final_user_message = f"Processed {processed_csv_records_count} records with {final_error_count} errors (initial validation)."
+             final_details_for_user = all_accumulated_errors # These would be only initial_validation_errors
         elif processed_db_count == 0 and processed_csv_records_count > 0:
              final_status_enum = UploadJobStatus.COMPLETED_NO_CHANGES
              final_user_message = "File processed, but no records resulted in database changes."
@@ -285,7 +284,7 @@ def process_csv_task(business_id_str: str, session_id: str, wasabi_file_path: st
             final_user_message += f" Warning: Wasabi cleanup failed: {str(cleanup_error)}"
             if final_details_for_user is None: final_details_for_user = []
             final_details_for_user.append(ErrorDetailModel(error_message=f"Wasabi cleanup failed: {str(cleanup_error)}",error_type=ErrorType.TASK_EXCEPTION))
-            if final_status_enum == UploadJobStatus.COMPLETED:
+            if final_status_enum == UploadJobStatus.COMPLETED: # If it was completed but cleanup failed
                  final_status_enum = UploadJobStatus.COMPLETED_WITH_ERRORS
 
         _update_session_status(
@@ -358,7 +357,7 @@ def process_product_items_file(business_id: str, session_id: str, wasabi_file_pa
 
 @shared_task(name="process_product_prices_file")
 def process_product_prices_file(business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, "product_id", "price", "product_prices")
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, "product_id", "price", "product_prices") # Using product_id as a nominal key for now
 
 
 @shared_task(name="process_meta_tags_file")

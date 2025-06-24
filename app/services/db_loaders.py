@@ -12,9 +12,8 @@ in `app.tasks.load_jobs.py` after CSV data validation and basic processing.
 import logging
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError # Added for bulk operations
+from sqlalchemy.exc import IntegrityError
 
-# Import ORM models as they are needed by specific loader functions.
 from app.db.models import (
     CategoryOrm,
     BrandOrm,
@@ -44,7 +43,6 @@ def load_category_to_db(
 ) -> Optional[int]:
     category_path_str = record_data.get("category_path")
     if not category_path_str:
-        # This should be caught by Pydantic if mandatory. Raising here defensively.
         msg = "Missing 'category_path' in record_data."
         logger.error(f"{msg} Business: {business_details_id}, Session: {session_id}, Record: {record_data}")
         raise DataLoaderError(message=msg, error_type=ErrorType.VALIDATION, field_name="category_path")
@@ -212,7 +210,7 @@ def load_brand_to_db(
             summary["inserted"] = len(new_brands_mappings)
             if summary["inserted"] > 0:
                 db_session.flush()
-                for brand_mapping_dict in new_brands_mappings: # Attempt to get IDs
+                for brand_mapping_dict in new_brands_mappings:
                     if 'id' in brand_mapping_dict and brand_mapping_dict['id'] is not None:
                          processed_brand_names_for_redis[brand_mapping_dict['name']] = brand_mapping_dict['id']
                     else:
@@ -223,8 +221,6 @@ def load_brand_to_db(
             for brand_name, brand_id in processed_brand_names_for_redis.items():
                 add_to_id_map(session_id, f"brands{DB_PK_MAP_SUFFIX}", brand_name, brand_id, pipeline=redis_pipe_to_use)
             if redis_pipe_to_use and not db_pk_redis_pipeline : redis_pipe_to_use.execute()
-
-
         return summary
     except IntegrityError as e:
         logger.error(f"Bulk database integrity error processing brands for business {business_details_id}: {e.orig}", exc_info=False)
@@ -283,8 +279,6 @@ def load_attribute_to_db(
             redis_pipe_to_use = db_pk_redis_pipeline if db_pk_redis_pipeline else db_session.get_bind().pool._redis_client.pipeline() if hasattr(db_session.get_bind().pool, '_redis_client') else None # Simplified
             add_to_id_map(session_id, f"attributes{DB_PK_MAP_SUFFIX}", parent_attribute_name, attribute_db_id, pipeline=redis_pipe_to_use)
             if redis_pipe_to_use and not db_pk_redis_pipeline : redis_pipe_to_use.execute()
-
-
         values_name_str = record_data.get("values_name")
         if values_name_str and attribute_db_id is not None and parent_attr_orm_instance is not None:
             value_display_names = [name.strip() for name in values_name_str.split('|') if name.strip()]
@@ -300,11 +294,9 @@ def load_attribute_to_db(
                 image_url_part = value_image_urls[i] if i < len(value_image_urls) else None
                 active_status_part = value_active_statuses[i] if i < len(value_active_statuses) and value_active_statuses[i] in ["ACTIVE", "INACTIVE"] else "INACTIVE"
                 value_for_db = actual_value_part if parent_attr_orm_instance.is_color and actual_value_part else val_display_name
-
                 if not value_for_db:
                     logger.warning(f"Skipping attribute value for '{parent_attribute_name}' due to missing value/name part at index {i}.")
                     continue
-
                 attr_value_orm = db_session.query(AttributeValueOrm).filter_by(attribute_id=attribute_db_id, name=val_display_name).first()
                 if attr_value_orm:
                     logger.debug(f"Updating existing attribute value '{val_display_name}' for attribute ID {attribute_db_id}")
@@ -319,7 +311,6 @@ def load_attribute_to_db(
                     }
                     attr_value_orm = AttributeValueOrm(**new_val_orm_data)
                     db_session.add(attr_value_orm)
-
         return attribute_db_id
     except DataLoaderError:
         raise
@@ -351,7 +342,7 @@ def load_return_policy_to_db(
         if record.get("return_policy_type") == "SALES_ARE_FINAL":
             processed_record["policy_name"] = None
             processed_record["time_period_return"] = None
-        if "time_period_return" in processed_record: # Map to ORM field name
+        if "time_period_return" in processed_record:
             processed_record["return_days"] = processed_record.pop("time_period_return")
         if "created_date" in processed_record:
             processed_record["created_date_ts"] = processed_record.pop("created_date")
@@ -381,9 +372,8 @@ def load_return_policy_to_db(
                     updates_list_of_dicts.append(update_data)
                 else:
                     logger.warning(f"Return policy ID '{csv_id}' provided in CSV not found for business {business_details_id}. Will attempt to process as new if name matches or insert.")
-                    # Add to records_without_id_in_csv to be processed by name or as new insert
                     records_without_id_in_csv.append(record)
-                    summary["errors"] +=1 # Consider this an error or a specific handling case
+                    summary["errors"] +=1
 
         if records_without_id_in_csv:
             policy_names_to_check = {r['policy_name'] for r in records_without_id_in_csv if r.get('policy_name')}
@@ -404,7 +394,6 @@ def load_return_policy_to_db(
                 if existing_policy_by_name and not is_already_targeted_for_update_by_id:
                     update_data = record.copy()
                     update_data['id'] = existing_policy_by_name.id
-                    # Avoid adding duplicate updates if already matched by ID
                     if not any(u['id'] == update_data['id'] for u in updates_list_of_dicts):
                         updates_list_of_dicts.append(update_data)
                 elif not is_already_targeted_for_update_by_id :
@@ -422,7 +411,6 @@ def load_return_policy_to_db(
             logger.info(f"Bulk inserting {len(inserts_list_of_dicts)} new return policies for business {business_details_id}.")
             db_session.bulk_insert_mappings(ReturnPolicyOrm, inserts_list_of_dicts)
             summary["inserted"] = len(inserts_list_of_dicts)
-            # No need to fetch IDs back as these are not typically mapped by name in Redis for FKs
 
         return summary
 
@@ -436,87 +424,134 @@ def load_return_policy_to_db(
 def load_price_to_db(
     db_session: Session,
     business_details_id: int,
-    record_data: Dict[str, Any],
+    records_data: List[Dict[str, Any]],
     session_id: str,
     db_pk_redis_pipeline: Any
-) -> Optional[int]:
+) -> Dict[str, int]:
+    if not records_data:
+        return {"inserted": 0, "updated": 0, "errors": 0}
+
+    summary = {"inserted": 0, "updated": 0, "errors": 0}
+
+    product_price_records_data = []
+    sku_price_records_data = []
+
+    for i, record in enumerate(records_data):
+        try:
+            price_type = PriceCsvTypeEnum(record["price_type"]) # Validate enum value
+            if price_type == PriceCsvTypeEnum.PRODUCT:
+                if not record.get("product_id"):
+                    raise ValueError("product_id is required for PRODUCT price type.")
+                product_price_records_data.append(record)
+            elif price_type == PriceCsvTypeEnum.SKU:
+                if not record.get("sku_id"):
+                    raise ValueError("sku_id is required for SKU price type.")
+                sku_price_records_data.append(record)
+        except ValueError as ve: # Catches invalid PriceTypeEnum or missing id
+            logger.warning(f"Skipping price record due to validation error: {ve}. Record: {record}")
+            summary["errors"] += 1
+            continue # Skip this record
+
+    all_inserts = []
+    all_updates = []
+
     try:
-        price_type_csv_enum = PriceCsvTypeEnum(record_data["price_type"])
-        target_product_id: Optional[int] = None
-        target_sku_id: Optional[int] = None
-        target_id_field_name = "product_id"
+        # Process Product Prices
+        if product_price_records_data:
+            product_ids_from_csv = {int(r['product_id']) for r in product_price_records_data if r.get('product_id')}
 
-        if price_type_csv_enum == PriceCsvTypeEnum.PRODUCT:
-            csv_product_id_str = record_data.get("product_id")
-            if not csv_product_id_str:
-                raise DataLoaderError(message="product_id missing for PRODUCT type price.", error_type=ErrorType.VALIDATION, field_name="product_id", offending_value=None)
-            try:
-                target_product_id = int(csv_product_id_str)
-            except ValueError as ve:
-                raise DataLoaderError(message=f"Invalid product_id format '{csv_product_id_str}'. Must be integer.", error_type=ErrorType.VALIDATION, field_name="product_id", offending_value=csv_product_id_str, original_exception=ve)
-
-            product_check = db_session.query(ProductOrm.id).filter(ProductOrm.id == target_product_id, ProductOrm.business_details_id == business_details_id).first()
-            if not product_check:
-                raise DataLoaderError(message=f"Product ID {target_product_id} not found or not associated with business {business_details_id}.", error_type=ErrorType.LOOKUP, field_name="product_id", offending_value=target_product_id)
-
-        elif price_type_csv_enum == PriceCsvTypeEnum.SKU:
-            target_id_field_name = "sku_id"
-            csv_sku_id_str = record_data.get("sku_id")
-            if not csv_sku_id_str:
-                raise DataLoaderError(message="sku_id missing for SKU type price.", error_type=ErrorType.VALIDATION, field_name="sku_id", offending_value=None)
-            try:
-                target_sku_id = int(csv_sku_id_str)
-            except ValueError as ve:
-                raise DataLoaderError(message=f"Invalid sku_id format '{csv_sku_id_str}'. Must be integer.", error_type=ErrorType.VALIDATION, field_name="sku_id", offending_value=csv_sku_id_str, original_exception=ve)
-
-            sku_check = db_session.query(ProductItemOrm.id).filter(ProductItemOrm.id == target_sku_id, ProductItemOrm.business_details_id == business_details_id).first()
-            if not sku_check:
-                raise DataLoaderError(message=f"SKU ID {target_sku_id} not found or not associated with business {business_details_id}.", error_type=ErrorType.LOOKUP, field_name="sku_id", offending_value=target_sku_id)
-        else:
-            raise DataLoaderError(message=f"Unknown price_type '{record_data['price_type']}'.", error_type=ErrorType.VALIDATION, field_name="price_type", offending_value=record_data['price_type'])
-
-        existing_price_query = db_session.query(PriceOrm).filter(PriceOrm.business_details_id == business_details_id)
-        if target_product_id: existing_price_query = existing_price_query.filter(PriceOrm.product_id == target_product_id)
-        elif target_sku_id: existing_price_query = existing_price_query.filter(PriceOrm.sku_id == target_sku_id)
-
-        existing_price: Optional[PriceOrm] = existing_price_query.first()
-        price_orm_instance: PriceOrm
-
-        if existing_price:
-            logger.info(f"Updating price for {'product ' + str(target_product_id) if target_product_id else 'SKU ' + str(target_sku_id)}")
-            existing_price.price = record_data["price"]
-            existing_price.discount_price = record_data.get("discount_price")
-            existing_price.cost_price = record_data.get("cost_price")
-            existing_price.currency = record_data.get("currency", "USD")
-            price_orm_instance = existing_price
-        else:
-            logger.info(f"Creating new price for {'product ' + str(target_product_id) if target_product_id else 'SKU ' + str(target_sku_id)}")
-            new_price_data = {
-                "business_details_id": business_details_id, "product_id": target_product_id, "sku_id": target_sku_id,
-                "price": record_data["price"], "discount_price": record_data.get("discount_price"),
-                "cost_price": record_data.get("cost_price"), "currency": record_data.get("currency", "USD"),
+            valid_db_product_ids = {
+                pid[0] for pid in db_session.query(ProductOrm.id).filter(
+                    ProductOrm.business_details_id == business_details_id,
+                    ProductOrm.id.in_(product_ids_from_csv)
+                ).all()
             }
-            price_orm_instance = PriceOrm(**new_price_data)
-            db_session.add(price_orm_instance)
 
-        db_session.flush()
-        if price_orm_instance.id is None:
-            msg = f"DB flush failed to return an ID for price record. Target: {'P:' + str(target_product_id) if target_product_id else 'S:' + str(target_sku_id)}"
-            logger.error(msg)
-            raise DataLoaderError(message=msg, error_type=ErrorType.DATABASE, field_name=target_id_field_name, offending_value=target_product_id or target_sku_id)
+            existing_prices_for_products_map = {
+                p.product_id: p for p in db_session.query(PriceOrm).filter(
+                    PriceOrm.business_details_id == business_details_id,
+                    PriceOrm.product_id.in_(valid_db_product_ids)
+                ).all()
+            }
 
-        return price_orm_instance.id
+            for record in product_price_records_data:
+                try:
+                    product_id = int(record['product_id'])
+                    if product_id not in valid_db_product_ids:
+                        logger.warning(f"Product ID {product_id} not valid for business {business_details_id}. Skipping price record: {record}")
+                        summary["errors"] += 1
+                        continue
 
-    except DataLoaderError:
-        raise
-    except ValueError as ve:
-        logger.error(f"Value error processing price record for business {business_details_id}: {record_data} - {ve}", exc_info=True)
-        raise DataLoaderError(message=f"Invalid value in price record: {str(ve)}", error_type=ErrorType.VALIDATION, offending_value=str(record_data), original_exception=ve)
+                    orm_data = {
+                        "business_details_id": business_details_id, "product_id": product_id, "sku_id": None,
+                        "price": record["price"], "discount_price": record.get("discount_price"),
+                        "cost_price": record.get("cost_price"), "currency": record.get("currency", "USD"),
+                    }
+                    existing_price = existing_prices_for_products_map.get(product_id)
+                    if existing_price:
+                        orm_data['id'] = existing_price.id
+                        all_updates.append(orm_data)
+                    else:
+                        all_inserts.append(orm_data)
+                except ValueError: # int conversion error for product_id already logged by Pydantic if PriceCsv used
+                    logger.warning(f"Invalid product_id format in record: {record}. Skipping.")
+                    summary["errors"] +=1
+
+
+        # Process SKU Prices
+        if sku_price_records_data:
+            sku_ids_from_csv = {int(r['sku_id']) for r in sku_price_records_data if r.get('sku_id')}
+            valid_db_sku_ids = {
+                sid[0] for sid in db_session.query(ProductItemOrm.id).filter(
+                    ProductItemOrm.business_details_id == business_details_id,
+                    ProductItemOrm.id.in_(sku_ids_from_csv)
+                ).all()
+            }
+            existing_prices_for_skus_map = {
+                p.sku_id: p for p in db_session.query(PriceOrm).filter(
+                    PriceOrm.business_details_id == business_details_id,
+                    PriceOrm.sku_id.in_(valid_db_sku_ids)
+                ).all()
+            }
+            for record in sku_price_records_data:
+                try:
+                    sku_id = int(record['sku_id'])
+                    if sku_id not in valid_db_sku_ids:
+                        logger.warning(f"SKU ID {sku_id} not valid for business {business_details_id}. Skipping price record: {record}")
+                        summary["errors"] += 1
+                        continue
+
+                    orm_data = {
+                        "business_details_id": business_details_id, "product_id": None, "sku_id": sku_id,
+                        "price": record["price"], "discount_price": record.get("discount_price"),
+                        "cost_price": record.get("cost_price"), "currency": record.get("currency", "USD"),
+                    }
+                    existing_price = existing_prices_for_skus_map.get(sku_id)
+                    if existing_price:
+                        orm_data['id'] = existing_price.id
+                        all_updates.append(orm_data)
+                    else:
+                        all_inserts.append(orm_data)
+                except ValueError:
+                    logger.warning(f"Invalid sku_id format in record: {record}. Skipping.")
+                    summary["errors"] +=1
+
+        if all_updates:
+            logger.info(f"Bulk updating {len(all_updates)} prices for business {business_details_id}.")
+            db_session.bulk_update_mappings(PriceOrm, all_updates)
+            summary["updated"] = len(all_updates)
+
+        if all_inserts:
+            logger.info(f"Bulk inserting {len(all_inserts)} new prices for business {business_details_id}.")
+            db_session.bulk_insert_mappings(PriceOrm, all_inserts)
+            summary["inserted"] = len(all_inserts)
+            # IDs for new prices are not typically mapped to Redis by a CSV key.
+
+        return summary
+
+    except IntegrityError as e:
+        logger.error(f"Bulk database integrity error processing prices for business {business_details_id}: {e.orig}", exc_info=False)
+        raise DataLoaderError(message=f"Bulk database integrity error for prices: {str(e.orig)}",error_type=ErrorType.DATABASE,original_exception=e)
     except Exception as e:
-        logger.error(f"Unexpected error processing price record for business {business_details_id}: {record_data} - {e}", exc_info=True)
-        raise DataLoaderError(
-            message=f"Unexpected error for price record (target: {'P:' + str(record_data.get('product_id')) if record_data.get('price_type') == 'PRODUCT' else 'S:' + str(record_data.get('sku_id'))}): {str(e)}",
-            error_type=ErrorType.UNEXPECTED_ROW_ERROR,
-            offending_value=str(record_data),
-            original_exception=e
-        )
+        logger.error(f"Unexpected error during bulk processing of prices for business {business_details_id}: {e}", exc_info=True)
+        raise DataLoaderError(message=f"Unexpected error during bulk price processing: {str(e)}", error_type=ErrorType.UNEXPECTED_ROW_ERROR, original_exception=e)
