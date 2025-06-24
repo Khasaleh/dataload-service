@@ -12,7 +12,7 @@ in `app.tasks.load_jobs.py` after CSV data validation and basic processing.
 import logging
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, DataError # Added DataError
 
 from app.db.models import (
     CategoryOrm,
@@ -147,6 +147,24 @@ def load_category_to_db(
 
     except DataLoaderError:
         raise
+    except IntegrityError as e:
+        logger.error(f"DB integrity error processing category path '{category_path_str}': {e.orig}", exc_info=False)
+        raise DataLoaderError(
+            message=f"Database integrity error for category path '{category_path_str}': {str(e.orig)}",
+            error_type=ErrorType.DATABASE,
+            field_name="category_path",
+            offending_value=category_path_str,
+            original_exception=e
+        )
+    except DataError as e:
+        logger.error(f"DB data error processing category path '{category_path_str}': {e.orig}", exc_info=False)
+        raise DataLoaderError(
+            message=f"Database data error for category path '{category_path_str}': {str(e.orig)}", # e.g. value too long for column
+            error_type=ErrorType.DATABASE, # Could also be VALIDATION if data is simply wrong type/length
+            field_name="category_path", # Or more specific if determinable
+            offending_value=category_path_str, # Or specific field's value if known
+            original_exception=e
+        )
     except Exception as e:
         logger.error(f"Unexpected error processing category record (path: '{category_path_str}'): {e}", exc_info=True)
         raise DataLoaderError(
@@ -314,6 +332,24 @@ def load_attribute_to_db(
         return attribute_db_id
     except DataLoaderError:
         raise
+    except IntegrityError as e:
+        logger.error(f"DB integrity error processing attribute '{parent_attribute_name}': {e.orig}", exc_info=False)
+        raise DataLoaderError(
+            message=f"Database integrity error for attribute '{parent_attribute_name}' or its values: {str(e.orig)}",
+            error_type=ErrorType.DATABASE,
+            field_name="attribute_name", # Or specific value if parsable from e.orig
+            offending_value=parent_attribute_name,
+            original_exception=e
+        )
+    except DataError as e:
+        logger.error(f"DB data error processing attribute '{parent_attribute_name}': {e.orig}", exc_info=False)
+        raise DataLoaderError(
+            message=f"Database data error for attribute '{parent_attribute_name}' or its values: {str(e.orig)}",
+            error_type=ErrorType.DATABASE,
+            field_name="attribute_name", # Or specific value field
+            offending_value=parent_attribute_name, # Or specific problematic value
+            original_exception=e
+        )
     except Exception as e:
         logger.error(f"Unexpected error processing attribute record '{parent_attribute_name}': {e}", exc_info=True)
         raise DataLoaderError(
@@ -427,18 +463,25 @@ def load_price_to_db(
     records_data: List[Dict[str, Any]],
     session_id: str,
     db_pk_redis_pipeline: Any
-) -> Dict[str, int]:
+) -> Dict[str, Any]: # Returns a summary like {"inserted": count, "updated": count, "error_details": List[ErrorDetailModel]}
     if not records_data:
-        return {"inserted": 0, "updated": 0, "errors": 0}
+        return {"inserted": 0, "updated": 0, "errors_list": []} # Changed "errors" to "errors_list"
 
-    summary = {"inserted": 0, "updated": 0, "errors": 0}
+    summary = {"inserted": 0, "updated": 0} # errors will be the list of ErrorDetailModel
+    error_details_list: List[ErrorDetailModel] = []
 
     product_price_records_data = []
     sku_price_records_data = []
 
+    # Initial pass to categorize and validate price_type, and ensure target_id presence
     for i, record in enumerate(records_data):
+        row_num_for_error = i + 2 # Assuming CSV row 2 is the first data row
         try:
-            price_type = PriceCsvTypeEnum(record["price_type"]) # Validate enum value
+            price_type_str = record.get("price_type")
+            if not price_type_str:
+                raise ValueError("price_type is missing.")
+            price_type = PriceCsvTypeEnum(price_type_str) # Validate enum value
+
             if price_type == PriceCsvTypeEnum.PRODUCT:
                 if not record.get("product_id"):
                     raise ValueError("product_id is required for PRODUCT price type.")
@@ -447,10 +490,16 @@ def load_price_to_db(
                 if not record.get("sku_id"):
                     raise ValueError("sku_id is required for SKU price type.")
                 sku_price_records_data.append(record)
-        except ValueError as ve: # Catches invalid PriceTypeEnum or missing id
-            logger.warning(f"Skipping price record due to validation error: {ve}. Record: {record}")
-            summary["errors"] += 1
-            continue # Skip this record
+        except ValueError as ve:
+            logger.warning(f"Skipping price record (row approx {row_num_for_error}) due to validation error: {ve}. Record: {record}")
+            error_details_list.append(ErrorDetailModel(
+                row_number=row_num_for_error,
+                field_name="price_type" if "price_type" in str(ve).lower() else ("product_id" if "product_id" in str(ve).lower() else "sku_id"),
+                error_message=str(ve),
+                error_type=ErrorType.VALIDATION,
+                offending_value=str(record.get("price_type") or record.get("product_id") or record.get("sku_id"))
+            ))
+            continue
 
     all_inserts = []
     all_updates = []
@@ -458,7 +507,7 @@ def load_price_to_db(
     try:
         # Process Product Prices
         if product_price_records_data:
-            product_ids_from_csv = {int(r['product_id']) for r in product_price_records_data if r.get('product_id')}
+            product_ids_from_csv = {int(r['product_id']) for r in product_price_records_data if r.get('product_id') and r['product_id'].isdigit()}
 
             valid_db_product_ids = {
                 pid[0] for pid in db_session.query(ProductOrm.id).filter(
@@ -474,12 +523,15 @@ def load_price_to_db(
                 ).all()
             }
 
-            for record in product_price_records_data:
+            for i, record in enumerate(product_price_records_data): # Use original index for row number if needed
+                row_num_for_error = records_data.index(record) + 2 if record in records_data else None # Approx row num
                 try:
-                    product_id = int(record['product_id'])
+                    product_id_str = record['product_id']
+                    product_id = int(product_id_str)
                     if product_id not in valid_db_product_ids:
-                        logger.warning(f"Product ID {product_id} not valid for business {business_details_id}. Skipping price record: {record}")
-                        summary["errors"] += 1
+                        msg = f"Product ID {product_id} not found or not associated with business {business_details_id}."
+                        logger.warning(f"{msg} Skipping price record: {record}")
+                        error_details_list.append(ErrorDetailModel(row_number=row_num_for_error, field_name="product_id", error_message=msg, error_type=ErrorType.LOOKUP, offending_value=product_id_str))
                         continue
 
                     orm_data = {
@@ -493,14 +545,15 @@ def load_price_to_db(
                         all_updates.append(orm_data)
                     else:
                         all_inserts.append(orm_data)
-                except ValueError: # int conversion error for product_id already logged by Pydantic if PriceCsv used
-                    logger.warning(f"Invalid product_id format in record: {record}. Skipping.")
-                    summary["errors"] +=1
+                except ValueError:
+                    msg = f"Invalid product_id format '{record.get('product_id')}' in record."
+                    logger.warning(f"{msg} Skipping: {record}")
+                    error_details_list.append(ErrorDetailModel(row_number=row_num_for_error, field_name="product_id", error_message=msg, error_type=ErrorType.VALIDATION, offending_value=record.get('product_id')))
 
 
         # Process SKU Prices
         if sku_price_records_data:
-            sku_ids_from_csv = {int(r['sku_id']) for r in sku_price_records_data if r.get('sku_id')}
+            sku_ids_from_csv = {int(r['sku_id']) for r in sku_price_records_data if r.get('sku_id') and r['sku_id'].isdigit()}
             valid_db_sku_ids = {
                 sid[0] for sid in db_session.query(ProductItemOrm.id).filter(
                     ProductItemOrm.business_details_id == business_details_id,
@@ -513,12 +566,15 @@ def load_price_to_db(
                     PriceOrm.sku_id.in_(valid_db_sku_ids)
                 ).all()
             }
-            for record in sku_price_records_data:
+            for i, record in enumerate(sku_price_records_data):
+                row_num_for_error = records_data.index(record) + 2 if record in records_data else None
                 try:
-                    sku_id = int(record['sku_id'])
+                    sku_id_str = record['sku_id']
+                    sku_id = int(sku_id_str)
                     if sku_id not in valid_db_sku_ids:
-                        logger.warning(f"SKU ID {sku_id} not valid for business {business_details_id}. Skipping price record: {record}")
-                        summary["errors"] += 1
+                        msg = f"SKU ID {sku_id} not found or not associated with business {business_details_id}."
+                        logger.warning(f"{msg} Skipping price record: {record}")
+                        error_details_list.append(ErrorDetailModel(row_number=row_num_for_error, field_name="sku_id", error_message=msg, error_type=ErrorType.LOOKUP, offending_value=sku_id_str))
                         continue
 
                     orm_data = {
@@ -533,8 +589,9 @@ def load_price_to_db(
                     else:
                         all_inserts.append(orm_data)
                 except ValueError:
-                    logger.warning(f"Invalid sku_id format in record: {record}. Skipping.")
-                    summary["errors"] +=1
+                    msg = f"Invalid sku_id format '{record.get('sku_id')}' in record."
+                    logger.warning(f"{msg} Skipping: {record}")
+                    error_details_list.append(ErrorDetailModel(row_number=row_num_for_error, field_name="sku_id", error_message=msg, error_type=ErrorType.VALIDATION, offending_value=record.get('sku_id')))
 
         if all_updates:
             logger.info(f"Bulk updating {len(all_updates)} prices for business {business_details_id}.")
@@ -545,13 +602,15 @@ def load_price_to_db(
             logger.info(f"Bulk inserting {len(all_inserts)} new prices for business {business_details_id}.")
             db_session.bulk_insert_mappings(PriceOrm, all_inserts)
             summary["inserted"] = len(all_inserts)
-            # IDs for new prices are not typically mapped to Redis by a CSV key.
 
+        summary["errors_list"] = error_details_list # Attach collected pre-check errors
         return summary
 
     except IntegrityError as e:
         logger.error(f"Bulk database integrity error processing prices for business {business_details_id}: {e.orig}", exc_info=False)
-        raise DataLoaderError(message=f"Bulk database integrity error for prices: {str(e.orig)}",error_type=ErrorType.DATABASE,original_exception=e)
+        # This error applies to the batch; specific row is hard to determine from bulk error.
+        # Add the collected pre-check errors to the exception if any.
+        raise DataLoaderError(message=f"Bulk database integrity error for prices: {str(e.orig)}", error_type=ErrorType.DATABASE, original_exception=e) # errors_list can be passed to process_csv_task to merge
     except Exception as e:
         logger.error(f"Unexpected error during bulk processing of prices for business {business_details_id}: {e}", exc_info=True)
         raise DataLoaderError(message=f"Unexpected error during bulk price processing: {str(e)}", error_type=ErrorType.UNEXPECTED_ROW_ERROR, original_exception=e)

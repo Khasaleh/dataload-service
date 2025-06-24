@@ -1,7 +1,7 @@
-import csv # Not strictly needed here anymore but kept for parse_images/specs context if they were more complex
-from typing import List, Dict, Optional, Any # Added Any
+import csv
+from typing import List, Dict, Optional, Any
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError, NoResultFound
+from sqlalchemy.exc import IntegrityError, NoResultFound, DataError # Added DataError
 import logging
 from datetime import datetime
 
@@ -225,6 +225,17 @@ def load_product_record_to_db(
         raise DataLoaderError(
             message=f"Database integrity error for product '{product_data.self_gen_product_id}': {str(e.orig)}",
             error_type=ErrorType.DATABASE,
+            field_name="product_record_integrity_constraint", # Refined field_name
+            offending_value=product_data.self_gen_product_id,
+            original_exception=e
+        )
+    except DataError as e:
+        # db.rollback() # Handled by caller
+        logger.error(f"{log_prefix} DB data error: {e.orig}", exc_info=False)
+        raise DataLoaderError(
+            message=f"Database data error for product '{product_data.self_gen_product_id}': {str(e.orig)}",
+            error_type=ErrorType.DATABASE,
+            field_name="product_data_format_error", # Refined field_name
             offending_value=product_data.self_gen_product_id,
             original_exception=e
         )
