@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import MagicMock, patch, call, ANY
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import SQLAlchemyError # For flush error test
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError # For flush and bulk errors
 
 # Import functions to test
 from app.services.db_loaders import (
@@ -213,110 +213,133 @@ def test_load_category_db_flush_error(mock_add_to_id_map_specific, mock_db_sessi
     mock_add_to_id_map_specific.assert_not_called()
 
 
-# --- Tests for load_brand_to_db ---
+# --- Tests for load_brand_to_db (Bulk Operations) ---
 
-def test_load_brand_new_record_success(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders):
-    business_details_id = 200; session_id = "sess_brand_new"
-    record_data = {"name": "Awesome Brand", "logo": "logo.png", "supplier_id": 55, "active": "TRUE", "created_by": 10, "created_date": 1678886400}
-    mock_db_session_for_loaders.query(BrandOrm).filter_by().first.return_value = None
-    new_brand_instance = None
-    def capture_add_brand(instance): nonlocal new_brand_instance; instance.id = 789; new_brand_instance = instance
-    mock_db_session_for_loaders.add.side_effect = capture_add_brand
-    returned_db_pk = load_brand_to_db(mock_db_session_for_loaders, business_details_id, record_data, session_id, mock_redis_pipeline_for_loaders)
-    assert returned_db_pk == 789
-    db_loaders_module.add_to_id_map.assert_called_once_with(session_id, f"brands{DB_PK_MAP_SUFFIX}", "Awesome Brand", 789, pipeline=mock_redis_pipeline_for_loaders)
+@pytest.fixture
+def sample_brand_records_for_bulk():
+    return [
+        {"name": "Brand New", "logo": "new.png", "active": "TRUE", "supplier_id": 1},
+        {"name": "Brand Update", "logo": "update.png", "active": "FALSE"},
+        {"name": "Brand Another New", "logo": "another.png", "active": "TRUE"},
+    ]
 
-def test_load_brand_update_existing_record_success(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders):
-    business_details_id = 200; session_id = "sess_brand_update"
-    record_data = {"name": "Awesome Brand", "logo": "new_logo.png", "active": "FALSE"}
-    mock_existing_brand = BrandOrm(id=789, name="Awesome Brand", logo="old_logo.png", active="TRUE")
-    mock_db_session_for_loaders.query(BrandOrm).filter_by().first.return_value = mock_existing_brand
-    returned_db_pk = load_brand_to_db(mock_db_session_for_loaders, business_details_id, record_data, session_id, mock_redis_pipeline_for_loaders)
-    assert returned_db_pk == 789
-    assert mock_existing_brand.logo == "new_logo.png"
-    db_loaders_module.add_to_id_map.assert_called_once_with(session_id, f"brands{DB_PK_MAP_SUFFIX}", "Awesome Brand", 789, pipeline=mock_redis_pipeline_for_loaders)
+def test_load_brand_bulk_all_new(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders, sample_brand_records_for_bulk):
+    business_details_id = 300
+    session_id = "sess_brand_bulk_new"
+    # Take 2 records that will be new
+    new_records = [record for record in sample_brand_records_for_bulk if record["name"] != "Brand Update"]
 
-def test_load_brand_optional_fields_not_provided_on_create(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders):
-    record_data = {"name": "Minimal Brand", "logo": "minimal_logo.png"}
-    mock_db_session_for_loaders.query(BrandOrm).filter_by().first.return_value = None
-    new_brand_instance = None
-    def capture_add_minimal_brand(instance): nonlocal new_brand_instance; instance.id = 790; new_brand_instance = instance
-    mock_db_session_for_loaders.add.side_effect = capture_add_minimal_brand
-    returned_db_pk = load_brand_to_db(mock_db_session_for_loaders, 200, record_data, "sess", mock_redis_pipeline_for_loaders)
-    assert returned_db_pk == 790
-    assert new_brand_instance.supplier_id is None
 
-def test_load_brand_update_preserves_unprovided_fields(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders):
-    record_data = {"name": "Preserved Brand", "logo": "very_new_logo.png"}
-    mock_existing_brand = BrandOrm(id=791, name="Preserved Brand", logo="old_logo.png", active="ACTIVE")
-    mock_db_session_for_loaders.query(BrandOrm).filter_by().first.return_value = mock_existing_brand
-    returned_db_pk = load_brand_to_db(mock_db_session_for_loaders, 200, record_data, "sess", mock_redis_pipeline_for_loaders)
-    assert returned_db_pk == 791
-    assert mock_existing_brand.active == "ACTIVE"
+    mock_db_session_for_loaders.query(BrandOrm).filter().all.return_value = [] # No existing brands
 
-def test_load_brand_missing_name_returns_none(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders):
-    record_data = {"logo": "some_logo.png"}
-    returned_db_pk = load_brand_to_db(mock_db_session_for_loaders, 200, record_data, "sess", mock_redis_pipeline_for_loaders)
-    assert returned_db_pk is None
-    db_loaders_module.add_to_id_map.assert_not_called()
+    def mock_bulk_insert_mappings_with_ids(orm_class, mappings):
+        for i, mapping_dict in enumerate(mappings):
+            mapping_dict['id'] = 1000 + i
+    mock_db_session_for_loaders.bulk_insert_mappings.side_effect = mock_bulk_insert_mappings_with_ids
 
-def test_load_brand_db_flush_error_returns_none(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders):
-    record_data = {"name": "FlushFail Brand", "logo": "logo.png"}
-    mock_db_session_for_loaders.query(BrandOrm).filter_by().first.return_value = None
-    mock_db_session_for_loaders.flush.side_effect = SQLAlchemyError("DB Flush Error Simulated")
-    returned_db_pk = load_brand_to_db(mock_db_session_for_loaders, 200, record_data, "sess", mock_redis_pipeline_for_loaders)
-    assert returned_db_pk is None
-    db_loaders_module.add_to_id_map.assert_not_called()
+    summary = load_brand_to_db(mock_db_session_for_loaders, business_details_id, new_records, session_id, mock_redis_pipeline_for_loaders)
 
-def test_load_brand_missing_name_raises_dataloadererror(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders):
-    record_data = {"logo": "some_logo.png"} # Missing "name"
+    assert summary == {"inserted": 2, "updated": 0, "errors": 0}
+    mock_db_session_for_loaders.bulk_insert_mappings.assert_called_once_with(BrandOrm, ANY)
+    assert len(mock_db_session_for_loaders.bulk_insert_mappings.call_args[0][1]) == 2
+    mock_db_session_for_loaders.bulk_update_mappings.assert_not_called()
+
+    expected_redis_calls = [
+        call(session_id, f"brands{DB_PK_MAP_SUFFIX}", "Brand New", 1000, pipeline=mock_redis_pipeline_for_loaders),
+        call(session_id, f"brands{DB_PK_MAP_SUFFIX}", "Brand Another New", 1001, pipeline=mock_redis_pipeline_for_loaders),
+    ]
+    db_loaders_module.add_to_id_map.assert_has_calls(expected_redis_calls, any_order=True)
+    assert db_loaders_module.add_to_id_map.call_count == 2
+
+
+def test_load_brand_bulk_all_updates(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders, sample_brand_records_for_bulk):
+    business_details_id = 300
+    session_id = "sess_brand_bulk_update"
+
+    existing_brand1 = BrandOrm(id=101, name="Brand New", business_details_id=business_details_id, logo="old_new.png")
+    existing_brand2 = BrandOrm(id=102, name="Brand Update", business_details_id=business_details_id, logo="old_update.png")
+    existing_brand3 = BrandOrm(id=103, name="Brand Another New", business_details_id=business_details_id, logo="old_another.png")
+    mock_db_session_for_loaders.query(BrandOrm).filter().all.return_value = [existing_brand1, existing_brand2, existing_brand3]
+
+    # Use all records from sample_brand_records_for_bulk as they all exist
+    summary = load_brand_to_db(mock_db_session_for_loaders, business_details_id, sample_brand_records_for_bulk, session_id, mock_redis_pipeline_for_loaders)
+
+    assert summary == {"inserted": 0, "updated": 3, "errors": 0}
+    mock_db_session_for_loaders.bulk_update_mappings.assert_called_once_with(BrandOrm, ANY)
+
+    passed_update_mappings = mock_db_session_for_loaders.bulk_update_mappings.call_args[0][1]
+    assert len(passed_update_mappings) == 3
+    assert any(m['id'] == 101 and m['name'] == 'Brand New' for m in passed_update_mappings)
+    assert any(m['id'] == 102 and m['name'] == 'Brand Update' for m in passed_update_mappings)
+    assert any(m['id'] == 103 and m['name'] == 'Brand Another New' for m in passed_update_mappings)
+
+    mock_db_session_for_loaders.bulk_insert_mappings.assert_not_called()
+    assert db_loaders_module.add_to_id_map.call_count == 3
+
+def test_load_brand_bulk_mixed_insert_update(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders, sample_brand_records_for_bulk):
+    business_details_id = 300; session_id = "sess_brand_bulk_mixed"
+
+    existing_brand_update = BrandOrm(id=202, name="Brand Update", business_details_id=business_details_id, logo="old_update.png")
+    mock_db_session_for_loaders.query(BrandOrm).filter().all.return_value = [existing_brand_update]
+
+    def mock_bulk_insert_mappings_mixed(orm_class, mappings):
+        for i, mapping_dict in enumerate(mappings):
+            mapping_dict['id'] = 3000 + i
+    mock_db_session_for_loaders.bulk_insert_mappings.side_effect = mock_bulk_insert_mappings_mixed
+
+    summary = load_brand_to_db(mock_db_session_for_loaders, business_details_id, sample_brand_records_for_bulk, session_id, mock_redis_pipeline_for_loaders)
+
+    assert summary == {"inserted": 2, "updated": 1, "errors": 0}
+    mock_db_session_for_loaders.bulk_insert_mappings.assert_called_once()
+    mock_db_session_for_loaders.bulk_update_mappings.assert_called_once()
+    assert db_loaders_module.add_to_id_map.call_count == 3
+
+
+def test_load_brand_bulk_empty_list(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders):
+    summary = load_brand_to_db(mock_db_session_for_loaders, 300, [], "sess_empty", mock_redis_pipeline_for_loaders)
+    assert summary == {"inserted": 0, "updated": 0, "errors": 0}
+
+def test_load_brand_bulk_no_names_raises_error(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders):
+    records = [{"logo": "logo1.png"}, {"logo": "logo2.png"}]
     with pytest.raises(DataLoaderError) as excinfo:
-        load_brand_to_db(mock_db_session_for_loaders, 200, record_data, "sess_brand_missing_name", mock_redis_pipeline_for_loaders)
-
+        load_brand_to_db(mock_db_session_for_loaders, 300, records, "sess_no_names", mock_redis_pipeline_for_loaders)
     assert excinfo.value.error_type == ErrorType.VALIDATION
-    assert "Missing 'name'" in excinfo.value.message
-    assert excinfo.value.field_name == "name"
-    db_loaders_module.add_to_id_map.assert_not_called()
 
-def test_load_brand_db_flush_error_raises_dataloadererror(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders):
-    record_data = {"name": "FlushFail Brand", "logo": "logo.png"}
-    mock_db_session_for_loaders.query(BrandOrm).filter_by().first.return_value = None # Simulate new brand
-
-    # Mock flush to raise an error AND ensure new_brand_orm.id remains None
-    new_brand_mock = BrandOrm(name=record_data["name"]) # Create a mock ORM instance
-    new_brand_mock.id = None # Simulate ID not being set after add
-
-    def add_side_effect(instance):
-        # Simulate SQLAlchemy adding instance to session but not yet assigning ID
-        pass
-
-    mock_db_session_for_loaders.add.side_effect = add_side_effect
-    mock_db_session_for_loaders.flush.side_effect = Exception("Simulated DB Flush Error during ID generation")
+def test_load_brand_bulk_insert_integrity_error(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders, sample_brand_records_for_bulk):
+    mock_db_session_for_loaders.query(BrandOrm).filter().all.return_value = []
+    mock_db_session_for_loaders.bulk_insert_mappings.side_effect = IntegrityError("mock_bulk_insert", params={}, orig=Exception("Unique constraint failed"))
 
     with pytest.raises(DataLoaderError) as excinfo:
-        load_brand_to_db(mock_db_session_for_loaders, 200, record_data, "sess_brand_flush_fail", mock_redis_pipeline_for_loaders)
+        load_brand_to_db(mock_db_session_for_loaders, 300, sample_brand_records_for_bulk, "sess_integrity", mock_redis_pipeline_for_loaders)
+    assert excinfo.value.error_type == ErrorType.DATABASE
 
-    assert excinfo.value.error_type == ErrorType.DATABASE # Should be DATABASE if flush for ID fails
-    assert "DB flush failed to return an ID" in excinfo.value.message
-    assert excinfo.value.field_name == "name"
-    assert excinfo.value.offending_value == "FlushFail Brand"
-    db_loaders_module.add_to_id_map.assert_not_called()
-
-def test_load_brand_generic_exception_raises_dataloadererror(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders):
-    record_data = {"name": "GenericFail Brand", "logo": "logo.png"}
-    # Make query itself raise an unexpected error
-    mock_db_session_for_loaders.query(BrandOrm).filter_by().side_effect = Exception("Unexpected generic error")
-
+def test_load_brand_bulk_update_general_error(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders, sample_brand_records_for_bulk):
+    existing_brand = BrandOrm(id=101, name="Brand Update", business_details_id=300)
+    mock_db_session_for_loaders.query(BrandOrm).filter().all.return_value = [existing_brand]
+    mock_db_session_for_loaders.bulk_update_mappings.side_effect = Exception("Something broke in bulk update")
+    records_to_update = [r for r in sample_brand_records_for_bulk if r["name"] == "Brand Update"]
     with pytest.raises(DataLoaderError) as excinfo:
-        load_brand_to_db(mock_db_session_for_loaders, 200, record_data, "sess_brand_generic_fail", mock_redis_pipeline_for_loaders)
-
+        load_brand_to_db(mock_db_session_for_loaders, 300, records_to_update, "sess_update_fail", mock_redis_pipeline_for_loaders)
     assert excinfo.value.error_type == ErrorType.UNEXPECTED_ROW_ERROR
-    assert "Unexpected error for brand" in excinfo.value.message
-    assert "Unexpected generic error" in excinfo.value.message # Check original error is part of message
-    assert excinfo.value.field_name == "name"
-    assert excinfo.value.offending_value == "GenericFail Brand"
-    assert isinstance(excinfo.value.original_exception, Exception)
-    db_loaders_module.add_to_id_map.assert_not_called()
+
+def test_load_brand_bulk_id_not_populated_error_in_summary(mock_db_session_for_loaders, mock_redis_pipeline_for_loaders):
+    new_records = [{"name": "Brand X", "logo": "x.png"}]
+    mock_db_session_for_loaders.query(BrandOrm).filter().all.return_value = []
+    def mock_bulk_insert_no_id_populate(orm_class, mappings): pass
+    mock_db_session_for_loaders.bulk_insert_mappings.side_effect = mock_bulk_insert_no_id_populate
+
+    summary = load_brand_to_db(mock_db_session_for_loaders, 300, new_records, "sess_id_not_pop", mock_redis_pipeline_for_loaders)
+    assert summary["inserted"] == 1
+    assert summary["errors"] == 1
+    # Verify add_to_id_map was not called for 'Brand X' because its ID was missing
+    # This check needs careful implementation if other brands *were* successfully mapped in the same call
+    # For this specific test case where only Brand X is processed, it's simpler:
+    if db_loaders_module.add_to_id_map.call_args_list: # Check if it was called at all
+        for call_obj in db_loaders_module.add_to_id_map.call_args_list:
+            args, _ = call_obj
+            assert args[2] != "Brand X" # args[2] is the brand_name
+    else:
+        db_loaders_module.add_to_id_map.assert_not_called() # If no brands got IDs
 
 
 # --- Tests for load_return_policy_to_db ---

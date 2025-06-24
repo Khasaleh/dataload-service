@@ -207,86 +207,138 @@ from app.models.schemas import ErrorType # Import ErrorType Enum
 def load_brand_to_db(
     db_session: Session,
     business_details_id: int,
-    record_data: Dict[str, Any], # Dict from BrandCsvModel
+    records_data: List[Dict[str, Any]], # List of dicts from BrandCsvModel
     session_id: str,
-    db_pk_redis_pipeline: Any # Redis pipeline object
-) -> Optional[int]:
+    db_pk_redis_pipeline: Any
+) -> Dict[str, int]: # Returns a summary like {"inserted": count, "updated": count}
     """
-    Loads or updates a single brand record in the database.
-    Manages mapping of brand name to DB PK in Redis for the current session.
+    Loads or updates a list of brand records in the database using bulk operations.
+    Manages mapping of brand names to DB PKs in Redis for the current session.
 
     Args:
         db_session: SQLAlchemy session.
         business_details_id: The integer ID for the business.
-        record_data: A dictionary representing a row from the brand CSV,
-                     validated by BrandCsvModel. Expected to have 'name', 'logo',
-                     and other brand-specific fields.
+        records_data: A list of dictionaries, each representing a row from the brand CSV,
+                      validated by BrandCsvModel. Expected to have 'name', 'logo', etc.
         session_id: The current upload session ID.
         db_pk_redis_pipeline: The Redis pipeline for storing _db_pk mappings.
 
     Returns:
-        The database primary key (integer / bigint) of the processed brand,
-        or None if processing failed for this record.
+        A dictionary summarizing the count of inserted and updated records.
+        Raises DataLoaderError if the bulk operation fails.
     """
-    brand_name_from_csv = record_data.get("name")
-    if not brand_name_from_csv:
-        # This case should ideally be caught by Pydantic validation if 'name' is mandatory.
-        # However, if it can reach here, raise a DataLoaderError.
-        msg = "Missing 'name' (brand name) in record_data."
-        logger.error(f"{msg} Business: {business_details_id}, Session: {session_id}, Record: {record_data}")
-        raise DataLoaderError(message=msg, error_type=ErrorType.VALIDATION, field_name="name", offending_value=None)
+    if not records_data:
+        return {"inserted": 0, "updated": 0, "errors": 0}
 
-    brand_db_id: Optional[int] = None
+    brand_names_from_csv = {record['name'] for record in records_data if record.get('name')}
+    if not brand_names_from_csv:
+        raise DataLoaderError(message="No brand names found in records_data list.", error_type=ErrorType.VALIDATION)
+
+    summary = {"inserted": 0, "updated": 0, "errors": 0}
 
     try:
-        db_brand = db_session.query(BrandOrm).filter_by(business_details_id=business_details_id, name=brand_name_from_csv).first()
+        # Fetch existing brands for this business in one query
+        existing_brands_query = db_session.query(BrandOrm).filter(
+            BrandOrm.business_details_id == business_details_id,
+            BrandOrm.name.in_(brand_names_from_csv)
+        )
+        existing_brands_map = {brand.name: brand for brand in existing_brands_query.all()}
 
-        if db_brand:
-            logger.info(f"Updating existing brand '{brand_name_from_csv}' (ID: {db_brand.id}) for business {business_details_id}")
-            db_brand.logo = record_data.get("logo", db_brand.logo)
-            db_brand.supplier_id = record_data.get("supplier_id", db_brand.supplier_id)
-            db_brand.active = record_data.get("active", db_brand.active)
-            if record_data.get("created_by") is not None: db_brand.created_by = record_data.get("created_by")
-            if record_data.get("created_date") is not None: db_brand.created_date = record_data.get("created_date")
-            if record_data.get("updated_by") is not None: db_brand.updated_by = record_data.get("updated_by")
-            if record_data.get("updated_date") is not None: db_brand.updated_date = record_data.get("updated_date")
-            brand_db_id = db_brand.id
-        else:
-            logger.info(f"Creating new brand '{brand_name_from_csv}' for business {business_details_id}")
-            orm_data = {
-                "business_details_id": business_details_id, "name": brand_name_from_csv,
-                "logo": record_data.get("logo"), # Assumes BrandCsvModel validated presence if mandatory
-                "supplier_id": record_data.get("supplier_id"), "active": record_data.get("active"),
-                "created_by": record_data.get("created_by"), "created_date": record_data.get("created_date"),
-                "updated_by": record_data.get("updated_by"), "updated_date": record_data.get("updated_date"),
-            }
-            new_brand_orm = BrandOrm(**orm_data)
-            db_session.add(new_brand_orm)
-            db_session.flush()
-            if new_brand_orm.id is None:
-                msg = f"DB flush failed to return an ID for new brand '{brand_name_from_csv}'."
-                logger.error(msg)
-                raise DataLoaderError(message=msg, error_type=ErrorType.DATABASE, field_name="name", offending_value=brand_name_from_csv)
-            brand_db_id = new_brand_orm.id
-            logger.info(f"Created new brand '{brand_name_from_csv}' with DB ID {brand_db_id}")
+        new_brands_mappings = []
+        updated_brands_mappings = []
 
-        if brand_db_id is not None:
-            if db_pk_redis_pipeline is not None:
-                add_to_id_map(session_id, f"brands{DB_PK_MAP_SUFFIX}", brand_name_from_csv, brand_db_id, pipeline=db_pk_redis_pipeline)
-            else:
-                add_to_id_map(session_id, f"brands{DB_PK_MAP_SUFFIX}", brand_name_from_csv, brand_db_id)
+        processed_brand_names_for_redis = {} # To store name -> id for redis mapping
 
-        return brand_db_id
+        for record in records_data:
+            brand_name = record.get("name")
+            if not brand_name: # Should have been caught by Pydantic, but as a safeguard
+                logger.warning(f"Skipping record due to missing brand name: {record}")
+                summary["errors"] += 1
+                continue
 
-    except DataLoaderError: # Re-raise if it's already our custom type
-        raise
-    except Exception as e: # Catch other SQLAlchemy errors or unexpected issues
-        logger.error(f"Error processing brand record '{brand_name_from_csv}' for business {business_details_id}: {e}", exc_info=True)
+            db_brand = existing_brands_map.get(brand_name)
+
+            if db_brand: # Existing brand -> update
+                update_mapping = record.copy() # Start with all data from CSV record
+                update_mapping['id'] = db_brand.id # Crucial for bulk_update_mappings
+                # Ensure only fields present in BrandOrm are passed for update, and handle defaults for missing optional fields
+                # For simplicity, assuming BrandCsvModel fields directly map or are handled by ORM if not present.
+                # More robustly, you'd filter `update_mapping` to only include valid ORM columns.
+                # Example: db_brand.logo = record.get("logo", db_brand.logo) - this is row-by-row, defeats bulk.
+                # For bulk_update_mappings, the dict should contain only fields to update.
+                # If a field from CSV is not in record, it won't be in update_mapping, so existing value preserved.
+                # If a field is None in CSV and you want to set it to NULL, ensure record has it as None.
+                updated_brands_mappings.append(update_mapping)
+                processed_brand_names_for_redis[brand_name] = db_brand.id
+                summary["updated"] += 1
+            else: # New brand -> insert
+                insert_mapping = record.copy()
+                insert_mapping['business_details_id'] = business_details_id
+                # Audit fields (created_by, created_date etc.) will be taken from record if present,
+                # or DB defaults / ORM defaults will apply.
+                new_brands_mappings.append(insert_mapping)
+                # ID for new brands will be available after bulk_insert for Redis mapping
+                # We'll handle Redis mapping after DB operations.
+
+        if updated_brands_mappings:
+            logger.info(f"Bulk updating {len(updated_brands_mappings)} brands for business {business_details_id}.")
+            db_session.bulk_update_mappings(BrandOrm, updated_brands_mappings)
+
+        if new_brands_mappings:
+            logger.info(f"Bulk inserting {len(new_brands_mappings)} new brands for business {business_details_id}.")
+            # bulk_insert_mappings does not return generated IDs directly in a simple way across all DBs.
+            # We need to fetch them if we need them for Redis mapping immediately.
+            # However, SQLAlchemy with PostgreSQL (using psycopg2) often populates PKs on the original dicts
+            # if the table has an autoincrementing PK and the dialect supports returning values.
+            # Let's assume for now that IDs might not be populated back into new_brands_mappings dicts directly by this call.
+            db_session.bulk_insert_mappings(BrandOrm, new_brands_mappings)
+            summary["inserted"] = len(new_brands_mappings)
+
+            # To get IDs for Redis mapping for newly inserted brands:
+            # Re-fetch them. This adds a query but ensures we have IDs.
+            # This is a common pattern when bulk_insert_mappings doesn't reliably return/populate IDs.
+            if summary["inserted"] > 0:
+                db_session.flush() # Ensure inserts are processed to make them queryable if re-fetch is needed
+                newly_inserted_names = [b['name'] for b in new_brands_mappings]
+
+                # Option 1: If `new_brands_mappings` dicts get their 'id' populated after flush by SQLAlchemy (depends on dialect/config)
+                # This is often the case for PostgreSQL if `implicit_returning=True` on table or engine.
+                # We'll assume this optimistic path for now.
+                for brand_mapping_dict in new_brands_mappings:
+                    if 'id' in brand_mapping_dict and brand_mapping_dict['id'] is not None:
+                         processed_brand_names_for_redis[brand_mapping_dict['name']] = brand_mapping_dict['id']
+                    else:
+                        # Fallback: If ID not populated, log warning or re-fetch. For now, log.
+                        logger.warning(f"ID not populated after bulk insert for brand: {brand_mapping_dict['name']}. Redis map might be incomplete for this new brand.")
+                        summary["errors"] += 1 # Count as an error if ID isn't available for mapping
+
+        # Redis Mapping for all successfully processed (inserted or updated)
+        if processed_brand_names_for_redis and db_pk_redis_pipeline is not None:
+            for brand_name, brand_id in processed_brand_names_for_redis.items():
+                add_to_id_map(session_id, f"brands{DB_PK_MAP_SUFFIX}", brand_name, brand_id, pipeline=db_pk_redis_pipeline)
+        elif processed_brand_names_for_redis: # Fallback if pipeline is None
+             for brand_name, brand_id in processed_brand_names_for_redis.items():
+                add_to_id_map(session_id, f"brands{DB_PK_MAP_SUFFIX}", brand_name, brand_id)
+
+        # db_session.flush() # Ensure operations are sent to DB before commit by caller
+        # The main commit/rollback is handled by process_csv_task
+
+        return summary
+
+    except IntegrityError as e: # Usually for unique constraint violations during bulk op
+        # db_session.rollback() # Handled by caller
+        logger.error(f"Bulk database integrity error processing brands for business {business_details_id}: {e.orig}", exc_info=False)
         raise DataLoaderError(
-            message=f"Error processing brand '{brand_name_from_csv}': {str(e)}",
-            error_type=ErrorType.DATABASE if isinstance(e, IntegrityError) else ErrorType.UNEXPECTED_ROW_ERROR,
-            field_name="name",
-            offending_value=brand_name_from_csv,
+            message=f"Bulk database integrity error for brands: {str(e.orig)}",
+            error_type=ErrorType.DATABASE,
+            original_exception=e
+        )
+    except Exception as e: # Catch other SQLAlchemy errors or unexpected issues
+        # db_session.rollback() # Handled by caller
+        logger.error(f"Unexpected error during bulk processing of brands for business {business_details_id}: {e}", exc_info=True)
+        raise DataLoaderError(
+            message=f"Unexpected error during bulk brand processing: {str(e)}",
+            error_type=ErrorType.UNEXPECTED_ROW_ERROR, # Or DATABASE if more appropriate
             original_exception=e
         )
 
