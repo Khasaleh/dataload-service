@@ -1,505 +1,389 @@
 from celery import shared_task
+from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError, TimeoutError as SQLAlchemyTimeoutError
+from botocore.exceptions import EndpointConnectionError as BotoEndpointConnectionError, ReadTimeoutError as BotoReadTimeoutError
+from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError, BusyLoadingError as RedisBusyLoadingError
+
 from app.db.connection import get_session
-from app.db.models import ( # Import ORM Models
+from app.db.models import (
     BrandOrm, AttributeOrm, ReturnPolicyOrm, ProductOrm,
-    ProductItemOrm, ProductPriceOrm, MetaTagOrm
+    ProductItemOrm, ProductPriceOrm, MetaTagOrm, UploadSessionOrm,
+    CategoryOrm, AttributeValueOrm
 )
 from datetime import datetime
 from app.services.storage import client as wasabi_client
 from app.services.validator import validate_csv
-from typing import Optional, Dict, Any, List # For type hints
+from typing import Optional, Dict, Any, List
 import csv
 import io
-# import redis # Moved to redis_utils
 import os
 import logging
-from typing import Optional
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+from pydantic import ValidationError
 
-# Name of the Wasabi bucket used for storing uploaded CSV files.
-WASABI_BUCKET_NAME = os.getenv("WASABI_BUCKET_NAME", "your-default-bucket-name")
-
-# Import Redis utilities from the new location
 from app.utils.redis_utils import (
-    redis_client_instance as redis_client, # Use the instance from redis_utils
+    redis_client_instance as redis_client,
     add_to_id_map,
     get_from_id_map,
-    DB_PK_MAP_SUFFIX, # If it was used directly, though it seems not
-    REDIS_SESSION_TTL_SECONDS,
+    DB_PK_MAP_SUFFIX,
     set_id_map_ttl,
     get_redis_pipeline
 )
-
-# Generic task processor
-
-# from app.db.models import UploadSessionOrm # Already imported with other ORM models
-from app.db.models import CategoryOrm, AttributeOrm, AttributeValueOrm # Ensure Attribute ORM models are available if needed for context, though not directly used in process_csv_task
-# from app.db.connection import get_session as get_db_session_sync # Already imported as get_session
-from app.services.db_loaders import load_category_to_db, load_brand_to_db, load_attribute_to_db, load_return_policy_to_db
-
-# Import product specific loader and model
+from app.services.db_loaders import (
+    load_category_to_db, load_brand_to_db, load_attribute_to_db,
+    load_return_policy_to_db, load_price_to_db
+)
 from app.dataload.product_loader import load_product_record_to_db
 from app.dataload.models.product_csv import ProductCsvModel
+from app.models import UploadJobStatus, ErrorDetailModel, ErrorType
+from app.exceptions import DataLoaderError
+import json
+import tempfile
+from app.dataload.meta_tags_loader import load_meta_tags_from_csv, DataloadSummary
 
-# Function to update session status in DB
+
+logger = logging.getLogger(__name__)
+WASABI_BUCKET_NAME = os.getenv("WASABI_BUCKET_NAME", "your-default-bucket-name-set-in-env")
+
+RETRYABLE_EXCEPTIONS = (
+    SQLAlchemyOperationalError, SQLAlchemyTimeoutError,
+    BotoEndpointConnectionError, BotoReadTimeoutError, # General S3/Wasabi connection issues
+    RedisConnectionError, RedisTimeoutError, RedisBusyLoadingError
+    # Add other specific, transient exceptions as identified
+)
+
+COMMON_RETRY_KWARGS = {
+    "max_retries": 3,
+    "default_retry_delay": 60, # seconds; Celery's default is 180s.
+    # For exponential backoff, one might use:
+    # "countdown": 60, # Initial countdown for first retry
+    # "retry_backoff": True,
+    # "retry_backoff_max": 600, # Max countdown
+    # "retry_jitter": True
+}
+
 def _update_session_status(
-    session_id: str,
-    business_id: str, # Added business_id for context, though session_id should be unique
-    status: str,
-    details: Optional[str] = None,
-    record_count: Optional[int] = None,
-    error_count: Optional[int] = None
+    session_id: str, business_id_str: str, status: UploadJobStatus,
+    details: Optional[List[ErrorDetailModel]] = None,
+    record_count: Optional[int] = None, error_count: Optional[int] = None
 ):
-    logger.info(f"Attempting to update session {session_id} for business {business_id} to status '{status}'.")
+    status_value = status.value
+    logger.info(f"Attempting to update session {session_id} for business {business_id_str} to status '{status_value}'.")
     db = None
     try:
-        # IMPORTANT: Celery tasks run in separate processes. Each task needs its own DB session.
-        db = get_session(business_id=business_id) # Use existing get_session
-
+        # Ensure business_id type matches what get_session expects (likely int)
+        db = get_session(business_id=int(business_id_str))
         session_record = db.query(UploadSessionOrm).filter(UploadSessionOrm.session_id == session_id).first()
-
         if session_record:
-            session_record.status = status
-            session_record.updated_at = datetime.utcnow() # Ensure datetime is available
+            session_record.status = status_value
+            session_record.updated_at = datetime.utcnow()
             if details is not None:
-                max_details_len = 1024 # Example limit, adjust based on DB schema (Text is usually large but good to have a cap)
-                session_record.details = details[:max_details_len] if len(details) > max_details_len else details
-            if record_count is not None:
-                session_record.record_count = record_count
-            if error_count is not None:
-                session_record.error_count = error_count
+                error_details_json = json.dumps([err.model_dump(mode='json') for err in details])
+                max_details_len = 4000
+                if len(error_details_json) > max_details_len:
+                    error_details_json = error_details_json[:max_details_len - len('... TRUNCATED') ] + "... TRUNCATED"
+                session_record.details = error_details_json
+            elif status.is_failure() and not session_record.details:
+                 session_record.details = json.dumps([])
+            if record_count is not None: session_record.record_count = record_count
+            if error_count is not None: session_record.error_count = error_count
             db.commit()
-            logger.info(f"Successfully updated session {session_id} to status '{status}'.")
+            logger.info(f"Successfully updated session {session_id} to status '{status_value}'.")
         else:
-            logger.error(f"Upload session {session_id} not found in DB for status update for business {business_id}.")
+            logger.error(f"Upload session {session_id} not found in DB for status update for business {business_id_str}.")
     except Exception as e:
-        logger.error(f"DB Error: Failed to update session {session_id} status to {status}: {e}", exc_info=True)
-        if db:
-            db.rollback()
+        logger.error(f"DB Error: Failed to update session {session_id} status to {status_value}: {e}", exc_info=True)
+        if db: db.rollback()
     finally:
-        if db:
-            db.close()
+        if db: db.close()
 
+def process_csv_task(business_id_str: str, session_id: str, wasabi_file_path: str, original_filename: str, record_key: str, id_prefix: str, map_type: str):
+    try:
+        business_id = int(business_id_str)
+    except ValueError:
+        msg = f"Invalid business_id format: '{business_id_str}'. Must be an integer."
+        logger.error(msg)
+        # Not calling _update_session_status here as this is a fundamental arg issue before task logic.
+        # The calling task's final error handler will catch this if it propagates.
+        raise ValueError(msg) # Let Celery handle this as a task failure directly.
 
-def process_csv_task(business_id, session_id, wasabi_file_path, original_filename, record_key, id_prefix, map_type):
     logger.info(f"Processing {map_type} for business: {business_id} session: {session_id} file: {original_filename} ({wasabi_file_path})")
-
-    # 1. Update status to "processing"
-    _update_session_status(session_id, business_id, status="processing")
+    _update_session_status(session_id, str(business_id), status=UploadJobStatus.DOWNLOADING_FILE)
 
     db_engine_session = None
+    initial_validation_errors: List[ErrorDetailModel] = []
     try:
         response = wasabi_client.get_object(Bucket=WASABI_BUCKET_NAME, Key=wasabi_file_path)
         file_content = response['Body'].read().decode('utf-8')
-        # original_records are plain dicts from CSV
+        logger.info(f"File {original_filename} downloaded from Wasabi for session {session_id}.")
         original_records = list(csv.DictReader(io.StringIO(file_content)))
 
         if not original_records:
             logger.warning(f"No records found in file: {wasabi_file_path}")
-            return {"status": "no_data", "message": "No records found in the CSV file."}
+            _update_session_status(session_id, str(business_id), status=UploadJobStatus.COMPLETED_EMPTY_FILE, record_count=0, error_count=0)
+            return {"status": UploadJobStatus.COMPLETED_EMPTY_FILE.value, "message": "No records found in the CSV file.", "session_id": session_id}
 
-        # Determine referenced_entity_map based on map_type (which is load_type for validator)
-        # The map_type in process_csv_task corresponds to the entity type being loaded,
-        # e.g., "brand", "product", "product_item".
-        # These should match the keys used in get_from_id_map for lookups.
-        # map_type is "brands", "products", etc.
-        # For referential integrity checks during validation, we need to check against DB PKs
-        # that would have been populated by previous runs of this task for parent entities.
-        # The map type for these DB PKs will be like "brands_db_pk".
         db_pk_map_suffix = "_db_pk"
         referenced_entity_map_for_validation = {}
         if map_type == "products":
-            referenced_entity_map_for_validation = {
-                'brand_name': f"brands{db_pk_map_suffix}",
-                'return_policy_code': f"return_policies{db_pk_map_suffix}"
-            }
+            referenced_entity_map_for_validation = {'brand_name': f"brands{db_pk_map_suffix}", 'return_policy_code': f"return_policies{db_pk_map_suffix}"}
         elif map_type == "product_items":
             referenced_entity_map_for_validation = {'product_name': f"products{db_pk_map_suffix}"}
-        elif map_type == "product_prices":
-            referenced_entity_map_for_validation = {'product_name': f"products{db_pk_map_suffix}"}
-        elif map_type == "meta_tags":
-            referenced_entity_map_for_validation = {'product_name': f"products{db_pk_map_suffix}"}
 
-        # Validate CSV data (this step might perform referential integrity against _db_pk maps)
-        validation_errors, validated_records = validate_csv(
-            load_type=map_type,
-            records=original_records,
-            session_id=session_id,
-            record_key=record_key, # For file-level uniqueness of this key
-            referenced_entity_map=referenced_entity_map_for_validation
+        _update_session_status(session_id, str(business_id), status=UploadJobStatus.VALIDATING_SCHEMA)
+        initial_validation_errors, validated_records = validate_csv(
+            load_type=map_type, records=original_records, session_id=session_id,
+            record_key=record_key, referenced_entity_map=referenced_entity_map_for_validation
         )
 
-        if validation_errors:
-            logger.error(f"Initial validation errors for {map_type} in session {session_id}, file {original_filename}: {validation_errors}")
-            _update_session_status(session_id, business_id, status="validation_failed", details=str(validation_errors), error_count=len(validation_errors))
-            return {"status": "validation_failed", "errors": validation_errors, "processed_count": 0, "session_id": session_id}
+        if initial_validation_errors:
+            logger.error(f"Initial validation errors for {map_type} in session {session_id}: {initial_validation_errors}")
+            _update_session_status(session_id, str(business_id), status=UploadJobStatus.FAILED_VALIDATION,
+                                   details=initial_validation_errors, error_count=len(initial_validation_errors), record_count=len(original_records))
+            return {"status": UploadJobStatus.FAILED_VALIDATION.value, "errors": [err.model_dump() for err in initial_validation_errors], "processed_count": 0, "session_id": session_id}
 
-        db_engine_session = get_session(business_id)
-
+        _update_session_status(session_id, str(business_id), status=UploadJobStatus.DB_PROCESSING_STARTED, record_count=len(validated_records))
+        db_engine_session = get_session(business_id=business_id)
         string_id_redis_pipeline = get_redis_pipeline()
         db_pk_redis_pipeline = get_redis_pipeline()
+        processed_csv_records_count = 0; processed_db_count = 0
+        db_error_details_list: List[ErrorDetailModel] = []
 
-        processed_csv_records_count = 0 # Counts records from validated_records loop
-        processed_db_count = 0 # Counts records successfully upserted to DB by a loader
-        db_error_count = 0
-        # fk_resolution_errors list is not used here anymore, errors are logged by loaders
+        if map_type in ["brands", "return_policies", "product_prices"]:
+            loader_summary = {}
+            if map_type == "brands": loader_summary = load_brand_to_db(db_engine_session, business_id, validated_records, session_id, db_pk_redis_pipeline)
+            elif map_type == "return_policies": loader_summary = load_return_policy_to_db(db_engine_session, business_id, validated_records, session_id, db_pk_redis_pipeline)
+            elif map_type == "product_prices": loader_summary = load_price_to_db(db_engine_session, business_id, validated_records, session_id, db_pk_redis_pipeline)
 
-        # --- Dispatch to Specific DB Loader Loop ---
-        for i, record_data in enumerate(validated_records):
-            csv_row_number = i + 1
-            db_pk = None
-
-            if map_type == "categories":
-                try:
-                    # business_id is already an int from the Celery task signature
-                    db_pk = load_category_to_db(
-                        db_session=db_engine_session,
-                        business_details_id=business_id,
-                        record_data=record_data,
-                        session_id=session_id,
-                        db_pk_redis_pipeline=db_pk_redis_pipeline # Pass the pipeline here
-                    )
-                except Exception as e_loader:
-                    logger.error(f"Row {csv_row_number}: Error calling load_category_to_db for record {record_data.get(record_key, 'N/A')}: {e_loader}", exc_info=True)
-                    db_pk = None # Ensure db_pk is None on loader exception
-
-            elif map_type == "brands":
-                try:
-                    db_pk = load_brand_to_db(
-                        db_session=db_engine_session,
-                        business_details_id=business_id,
-                        record_data=record_data,
-                        session_id=session_id,
-                        db_pk_redis_pipeline=db_pk_redis_pipeline
-                    )
-                except Exception as e_loader:
-                    logger.error(f"Row {csv_row_number}: Error calling load_brand_to_db for record {record_data.get(record_key, 'N/A')}: {e_loader}", exc_info=True)
-                    db_pk = None
-
-            elif map_type == "attributes":
-                try:
-                    db_pk = load_attribute_to_db(
-                        db_session=db_engine_session,
-                        business_details_id=business_id,
-                        record_data=record_data,
-                        session_id=session_id,
-                        db_pk_redis_pipeline=db_pk_redis_pipeline
-                    )
-                except Exception as e_loader:
-                    logger.error(f"Row {csv_row_number}: Error calling load_attribute_to_db for record {record_data.get(record_key, 'N/A')}: {e_loader}", exc_info=True)
-                    db_pk = None
-
-            elif map_type == "return_policies": # New case for return_policies
-                try:
-                    db_pk = load_return_policy_to_db(
-                        db_session=db_engine_session,
-                        business_details_id=business_id, # This is the integer ID
-                        record_data=record_data,    # Current validated CSV row (as dict from ReturnPolicyCsvModel)
-                        session_id=session_id,      # Upload session UUID string
-                        db_pk_redis_pipeline=db_pk_redis_pipeline # Passed but not used by this loader for _db_pk map
-                    )
-                except Exception as e_loader:
-                    logger.error(f"Error calling load_return_policy_to_db for record {record_data}: {e_loader}", exc_info=True)
-                    db_pk = None
-
-            elif map_type == "products":
-                try:
-                    # Ensure business_id is in record_data for Pydantic model if it expects it
-                    # ProductCsvModel has 'business_details_id', which is 'business_id' here.
-                    record_data_for_model = record_data.copy() # Avoid modifying original validated_record dict
-                    record_data_for_model['business_details_id'] = business_id
-
-                    product_csv_instance = ProductCsvModel(**record_data_for_model)
-
-                    db_pk = load_product_record_to_db(
-                        db=db_engine_session, # Renamed from db_session to db_engine_session
-                        business_details_id=business_id,
-                        product_data=product_csv_instance,
-                        session_id=session_id
-                    )
-                    if db_pk is not None:
-                        # Map self_gen_product_id -> ProductOrm.id for potential SKU linking etc.
-                        if db_pk_redis_pipeline:
-                             add_to_id_map(
-                                session_id,
-                                f"products{DB_PK_MAP_SUFFIX}", # e.g., products_db_pk
-                                product_csv_instance.self_gen_product_id, # Key for this map
-                                db_pk,
-                                pipeline=db_pk_redis_pipeline
-                            )
-                        else: # Fallback, though pipeline is expected
-                             add_to_id_map(session_id, f"products{DB_PK_MAP_SUFFIX}", product_csv_instance.self_gen_product_id, db_pk)
-
-                except Exception as e_loader:
-                    logger.error(f"Row {csv_row_number}: Error during product processing for self_gen_id {record_data.get('self_gen_product_id', 'N/A')}: {e_loader}", exc_info=True)
-                    db_pk = None
-
-
-            else:
-                # For map_types without a specific loader yet, we skip specific DB interaction.
-                # The old generic DB logic has been removed.
-                # We preserve the original string ID mapping for these types if validate_csv or
-                # other parts of the system might still rely on it for non-DB-PK based relations.
-                logger.info(f"Row {csv_row_number}: No specific DB loader implemented for map_type: '{map_type}'. Skipping DB upsert via loader for record: {record_data.get(record_key, 'N/A')}")
-
-                if string_id_redis_pipeline and record_key and id_prefix:
-                    csv_unique_key_value = record_data.get(record_key)
-                    if csv_unique_key_value:
-                        generated_id_for_string_map = f"{id_prefix}:{str(csv_unique_key_value).lower().replace(' ', '_')}"
-                        add_to_id_map(session_id, map_type, csv_unique_key_value, generated_id_for_string_map, pipeline=string_id_redis_pipeline)
-
-            # Check if the loader specific to the map_type failed
-            if map_type in ["categories", "brands", "attributes", "return_policies"] and db_pk is None: # Add "return_policies"
-                logger.error(f"Row {csv_row_number}: DB loader for '{map_type}' failed for record: {record_data.get(record_key, 'N/A')}. Incrementing db_error_count.")
-                db_error_count += 1
-
-            if db_pk is not None: # If DB processing by a loader was successful
-                 processed_db_count +=1
-
-            processed_csv_records_count += 1
-        # --- End Dispatch to Specific DB Loader Loop ---
-
-        if db_error_count > 0:
-            logger.warning(f"Session {session_id}: Encountered {db_error_count} errors during DB processing for {map_type}. Rolling back DB changes.")
-            if db_engine_session: db_engine_session.rollback()
-            _update_session_status(session_id, business_id, status="db_processing_failed",
-                                   details=f"DB processing failed for {db_error_count} records.", # Removed fk_resolution_errors
-                                   error_count=db_error_count + len(validation_errors))
-            # fk_resolution_errors was removed from the return dict as well, as it's not defined in this scope if db_error_count > 0
-            return {"status": "db_error", "message": f"DB processing failed for {db_error_count} records.", "processed_db_count": 0, "session_id": session_id}
+            processed_db_count = loader_summary.get("inserted", 0) + loader_summary.get("updated", 0)
+            num_loader_errors = loader_summary.get("errors", 0)
+            if num_loader_errors > 0:
+                 db_error_details_list.append(ErrorDetailModel(error_message=f"{num_loader_errors} {map_type} record(s) had issues post-bulk operation. Check logs.", error_type=ErrorType.DATABASE))
+            processed_csv_records_count = len(validated_records)
         else:
-            # This 'else' block corresponds to 'if db_error_count > 0',
-            # meaning no DB errors occurred during the loop.
-            summary = {} # Initialize summary dict
-            if string_id_redis_pipeline : string_id_redis_pipeline.execute()
-            if db_pk_redis_pipeline: db_pk_redis_pipeline.execute()
+            for i, record_data in enumerate(validated_records):
+                csv_row_number = i + 2; db_pk = None
+                current_record_key_value = record_data.get(record_key, 'N/A')
+                try:
+                    if map_type == "categories": db_pk = load_category_to_db(db_engine_session, business_id, record_data, session_id, db_pk_redis_pipeline)
+                    elif map_type == "attributes": db_pk = load_attribute_to_db(db_engine_session, business_id, record_data, session_id, db_pk_redis_pipeline)
+                    elif map_type == "products":
+                        record_data_for_model = {**record_data, 'business_details_id': business_id}
+                        product_csv_instance = ProductCsvModel(**record_data_for_model)
+                        current_record_key_value = product_csv_instance.self_gen_product_id
+                        db_pk = load_product_record_to_db(db_engine_session, business_id, product_csv_instance, session_id)
+                    else:
+                        logger.info(f"Row {csv_row_number}: No specific DB loader for map_type: '{map_type}'. Record: {current_record_key_value}")
+                        if string_id_redis_pipeline and record_key and id_prefix and current_record_key_value != 'N/A':
+                            add_to_id_map(session_id, map_type, current_record_key_value, f"{id_prefix}:{str(current_record_key_value).lower().replace(' ', '_')}", pipeline=string_id_redis_pipeline)
+                    if db_pk is not None: processed_db_count +=1
+                except DataLoaderError as dle:
+                    db_error_details_list.append(ErrorDetailModel(row_number=csv_row_number, field_name=dle.field_name, error_message=dle.message,error_type=dle.error_type, offending_value=dle.offending_value))
+                except ValidationError as ve:
+                    for err_dict in ve.errors(): db_error_details_list.append(ErrorDetailModel(row_number=csv_row_number, field_name=".".join(str(f) for f in err_dict['loc']) if err_dict['loc'] else None, error_message=err_dict['msg'], error_type=ErrorType.VALIDATION, offending_value=str(err_dict.get('input', 'N/A'))[:255]))
+                except Exception as e_row:
+                    db_error_details_list.append(ErrorDetailModel(row_number=csv_row_number, error_message=f"Unexpected error: {str(e_row)}", error_type=ErrorType.UNEXPECTED_ROW_ERROR, offending_value=str(record_data.get(record_key, record_data))[:255]))
+                processed_csv_records_count += 1
 
-        # Set TTL for the session ID maps
-        # Pass the global redis_client from this module, which is patched by the fixture in tests
-        set_id_map_ttl(session_id, map_type, redis_client)  # redis_client is app.tasks.load_jobs.redis_client
-        set_id_map_ttl(session_id, f"{map_type}{DB_PK_MAP_SUFFIX}", redis_client) # Same here
+        final_error_count = len(initial_validation_errors) + len(db_error_details_list)
+        all_accumulated_errors = initial_validation_errors + db_error_details_list
 
-        # Attempt to commit DB changes
-        if db_engine_session:
-            db_engine_session.commit()
-            logger.info(f"DB session committed for session {session_id} after processing {map_type}.")
+        if db_error_details_list:
+            logger.warning(f"Session {session_id}: {len(db_error_details_list)} errors during DB processing for {map_type}. Rolling back.")
+            if db_engine_session: db_engine_session.rollback()
+            _update_session_status(session_id, str(business_id), UploadJobStatus.FAILED_DB_PROCESSING, all_accumulated_errors, processed_csv_records_count, final_error_count)
+            return {"status": UploadJobStatus.FAILED_DB_PROCESSING.value, "errors": [err.model_dump() for err in all_accumulated_errors], "processed_db_count": processed_db_count, "session_id": session_id}
 
-        # If commit is successful, proceed with Wasabi cleanup and final status update
+        if string_id_redis_pipeline : string_id_redis_pipeline.execute()
+        if db_pk_redis_pipeline: db_pk_redis_pipeline.execute()
+        set_id_map_ttl(session_id, map_type, redis_client)
+        set_id_map_ttl(session_id, f"{map_type}{DB_PK_MAP_SUFFIX}", redis_client)
+
+        if db_engine_session: db_engine_session.commit(); logger.info(f"DB session committed for {session_id}.")
+        _update_session_status(session_id, str(business_id), UploadJobStatus.CLEANING_UP, None, processed_csv_records_count, final_error_count)
+
+        final_status_enum = UploadJobStatus.COMPLETED
+        final_user_message = f"Successfully processed {processed_db_count} records."
+        final_details_for_user = None
+        if final_error_count > 0 :
+             final_status_enum = UploadJobStatus.COMPLETED_WITH_ERRORS
+             final_user_message = f"Processed {processed_csv_records_count} records with {final_error_count} errors (initial validation)."
+             final_details_for_user = all_accumulated_errors
+        elif processed_db_count == 0 and processed_csv_records_count > 0:
+             final_status_enum = UploadJobStatus.COMPLETED_NO_CHANGES
+             final_user_message = "File processed, but no records resulted in database changes."
+
         try:
-            logger.info(f"Attempting to delete {wasabi_file_path} from Wasabi bucket {WASABI_BUCKET_NAME}.")
             wasabi_client.delete_object(Bucket=WASABI_BUCKET_NAME, Key=wasabi_file_path)
             logger.info(f"Successfully deleted {wasabi_file_path} from Wasabi.")
-            summary["status"] = "completed" # Set status to completed after successful cleanup
         except Exception as cleanup_error:
             logger.error(f"Failed to delete {wasabi_file_path} from Wasabi: {cleanup_error}", exc_info=True)
-            summary["status"] = "completed_with_cleanup_warning"
-            summary["message"] = f"File processed and data saved ({processed_db_count} records). Wasabi cleanup failed: {str(cleanup_error)}"
+            final_user_message += f" Warning: Wasabi cleanup failed: {str(cleanup_error)}"
+            if final_details_for_user is None: final_details_for_user = []
+            final_details_for_user.append(ErrorDetailModel(error_message=f"Wasabi cleanup failed: {str(cleanup_error)}",error_type=ErrorType.TASK_EXCEPTION))
+            if final_status_enum == UploadJobStatus.COMPLETED: final_status_enum = UploadJobStatus.COMPLETED_WITH_ERRORS
 
-        _update_session_status(session_id, business_id, status=summary["status"],
-                               details=summary.get("message"), # Use message from summary if set by cleanup error
-                                   record_count=processed_csv_records_count,
-                                   error_count=db_error_count + len(validation_errors)
-                                  )
-        # Adjust return structure to match existing expectations if necessary
-        return_payload = {"status": summary["status"], "processed_db_count": processed_db_count, "session_id": session_id}
-        if "message" in summary:
-            return_payload["message"] = summary["message"]
-        return return_payload
+        _update_session_status(session_id, str(business_id), final_status_enum, final_details_for_user, processed_csv_records_count, final_error_count)
+        return {"status": final_status_enum.value, "message": final_user_message, "processed_db_count": processed_db_count, "total_records_in_file": len(original_records), "errors_count": final_error_count, "session_id": session_id}
 
-    except Exception as e: # Catches errors from the main 'try' block
-        logger.error(f"Major error processing {map_type} for session {session_id}, file {original_filename}: {e}", exc_info=True)
-        if db_engine_session:
-            db_engine_session.rollback()
-            logger.info(f"DB session rolled back for session {session_id} due to major error.")
-        # 'summary' might not be defined here if error occurred before its initialization
-        _update_session_status(session_id, business_id, status="failed", details=f"Major processing error: {str(e)}")
-        return {"status": "error", "message": str(e), "session_id": session_id}
-    finally:
-        if db_engine_session:
-            # The commit or rollback should have already happened.
-            # This finally block is now only for closing the session.
-            db_engine_session.close()
-            logger.info(f"DB session closed for session {session_id}.")
+    except tuple(RETRYABLE_EXCEPTIONS) as e: # Catch retryable exceptions explicitly to allow Celery to handle them
+        logger.warning(f"RETRYING task for session {session_id} due to {type(e).__name__}: {e}", exc_info=True)
+        # Note: _update_session_status is not called here with a "retrying" status because Celery's autoretry
+        # handles this. If we wanted a specific "RETRYING" status in DB, we'd need manual retry logic:
+        # self.retry(exc=e, countdown=...) and _update_session_status(..., status=UploadJobStatus.RETRYING, ...)
+        # For now, the status remains as it was before the retryable error.
+        raise # Re-raise for Celery's autoretry mechanism
+    except Exception as e: # Catches non-retryable errors from process_csv_task's main block
+        logger.error(f"Major error processing {map_type} for session {session_id}: {e}", exc_info=True)
+        if db_engine_session: db_engine_session.rollback()
+        critical_error_detail = [ErrorDetailModel(error_message=f"Major processing error: {str(e)}", error_type=ErrorType.TASK_EXCEPTION)]
+        _update_session_status(session_id, str(business_id), UploadJobStatus.FAILED_UNHANDLED_EXCEPTION, critical_error_detail)
+        # This exception will be caught by the task's own final try-except and re-raised.
+        raise # Important to re-raise so Celery marks task as FAILED if not handled by autoretry
 
-# Specific loaders (ensure they pass all necessary params if process_csv_task signature changes)
-# These should ideally pass the 'record_key' specific to their map_type for CSV key -> DB PK mapping.
-# For example, for 'brands', record_key is 'brand_name'. For 'products', it's 'product_name'.
-
-@shared_task(name="process_brands_file")
-def process_brands_file(business_id: int, session_id: str, wasabi_file_path: str, original_filename: str): # business_id type hint updated
-    return process_csv_task(
-        business_id=business_id,
-        session_id=session_id,
-        wasabi_file_path=wasabi_file_path,
-        original_filename=original_filename,
-        record_key="name",  # Changed from "brand_name" to "name"
-        id_prefix="brand",
-        map_type="brands"
-    )
-
-@shared_task(name="process_attributes_file")
-def process_attributes_file(business_id: int, session_id: str, wasabi_file_path: str, original_filename: str): # business_id type hint updated
-    return process_csv_task(
-        business_id=business_id,
-        session_id=session_id,
-        wasabi_file_path=wasabi_file_path,
-        original_filename=original_filename,
-        record_key="attribute_name", # This is the key in AttributeCsvModel
-        id_prefix="attr",
-        map_type="attributes"
-    )
-
-@shared_task(name="process_return_policies_file")
-def process_return_policies_file(business_id: int, session_id: str, wasabi_file_path: str, original_filename: str): # business_id type hint updated
-    return process_csv_task(
-        business_id=business_id,
-        session_id=session_id,
-        wasabi_file_path=wasabi_file_path,
-        original_filename=original_filename,
-        record_key="policy_name", # Changed from "return_policy_code"
-        id_prefix="rp",
-        map_type="return_policies"
-    )
-
-@shared_task(name="process_products_file")
-def process_products_file(business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, "product_name", "prod", "products")
-
-@shared_task(name="process_product_items_file")
-def process_product_items_file(business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, "variant_sku", "item", "product_items")
-
-@shared_task(name="process_product_prices_file")
-def process_product_prices_file(business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, "product_name", "price", "product_prices")
-
-@shared_task(name="process_meta_tags_file")
-def process_meta_tags_file(business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
-    # This is the old generic handler. We will replace its use in CELERY_TASK_MAP.
-    # For now, let's keep it to avoid breaking other parts if they call it directly by name,
-    # but the new task process_meta_tags_file_specific should be used for the "meta_tags" load_type.
-    logger.warning(f"Legacy process_meta_tags_file called for session {session_id}. Consider using process_meta_tags_file_specific.")
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, "product_name", "meta", "meta_tags")
-
-# New specific Celery task for meta_tags
-from app.dataload.meta_tags_loader import load_meta_tags_from_csv, DataloadSummary, DataloadErrorDetail # Import new loader and models
-from app.db.models import UploadSessionOrm # Ensure this is imported
-import tempfile # For temporary file handling
-import json # For serializing error details
-import os # Already imported, used for os.path.exists, os.remove
-
-@shared_task(name="process_meta_tags_file_specific") # New distinct name
-def process_meta_tags_file_specific(business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
-    logger.info(f"Meta Tags specific processing task started for session: {session_id}, file: {original_filename}, business_id: {business_id}")
-
-    _update_session_status(session_id, business_id, status="processing")
-
-    db_session = None
-    temp_local_path = None # Ensure it's defined for finally block
-
+# --- Wrapper Celery Tasks ---
+@shared_task(name="process_brands_file", bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+def process_brands_file(self, business_id: int, session_id: str, wasabi_file_path: str, original_filename: str):
     try:
-        response = wasabi_client.get_object(Bucket=WASABI_BUCKET_NAME, Key=wasabi_file_path)
+        return process_csv_task(str(business_id), session_id, wasabi_file_path, original_filename, "name", "brand", "brands")
+    except Exception as e:
+        logger.error(f"Task process_brands_file FAILED ultimately for session {session_id}: {e}", exc_info=True)
+        _update_session_status(session_id, str(business_id), UploadJobStatus.FAILED_UNHANDLED_EXCEPTION,
+                               [ErrorDetailModel(error_message=f"Task failed: {str(e)}", error_type=ErrorType.TASK_EXCEPTION)])
+        raise
 
+@shared_task(name="process_attributes_file", bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+def process_attributes_file(self, business_id: int, session_id: str, wasabi_file_path: str, original_filename: str):
+    try:
+        return process_csv_task(str(business_id), session_id, wasabi_file_path, original_filename, "attribute_name", "attr", "attributes")
+    except Exception as e:
+        logger.error(f"Task process_attributes_file FAILED ultimately for session {session_id}: {e}", exc_info=True)
+        _update_session_status(session_id, str(business_id), UploadJobStatus.FAILED_UNHANDLED_EXCEPTION,
+                               [ErrorDetailModel(error_message=f"Task failed: {str(e)}", error_type=ErrorType.TASK_EXCEPTION)])
+        raise
+
+@shared_task(name="process_return_policies_file", bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+def process_return_policies_file(self, business_id: int, session_id: str, wasabi_file_path: str, original_filename: str):
+    try:
+        return process_csv_task(str(business_id), session_id, wasabi_file_path, original_filename, "policy_name", "rp", "return_policies")
+    except Exception as e:
+        logger.error(f"Task process_return_policies_file FAILED ultimately for session {session_id}: {e}", exc_info=True)
+        _update_session_status(session_id, str(business_id), UploadJobStatus.FAILED_UNHANDLED_EXCEPTION,
+                               [ErrorDetailModel(error_message=f"Task failed: {str(e)}", error_type=ErrorType.TASK_EXCEPTION)])
+        raise
+
+@shared_task(name="process_products_file", bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+def process_products_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
+    try:
+        return process_csv_task(str(business_id), session_id, wasabi_file_path, original_filename, "self_gen_product_id", "prod", "products")
+    except Exception as e:
+        logger.error(f"Task process_products_file FAILED ultimately for session {session_id}: {e}", exc_info=True)
+        _update_session_status(session_id, str(business_id), UploadJobStatus.FAILED_UNHANDLED_EXCEPTION,
+                               [ErrorDetailModel(error_message=f"Task failed: {str(e)}", error_type=ErrorType.TASK_EXCEPTION)])
+        raise
+
+@shared_task(name="process_product_items_file", bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+def process_product_items_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
+    try:
+        return process_csv_task(str(business_id), session_id, wasabi_file_path, original_filename, "variant_sku", "item", "product_items")
+    except Exception as e:
+        logger.error(f"Task process_product_items_file FAILED ultimately for session {session_id}: {e}", exc_info=True)
+        _update_session_status(session_id, str(business_id), UploadJobStatus.FAILED_UNHANDLED_EXCEPTION,
+                               [ErrorDetailModel(error_message=f"Task failed: {str(e)}", error_type=ErrorType.TASK_EXCEPTION)])
+        raise
+
+@shared_task(name="process_product_prices_file", bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+def process_product_prices_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
+    try:
+        return process_csv_task(str(business_id), session_id, wasabi_file_path, original_filename, "product_id", "price", "product_prices")
+    except Exception as e:
+        logger.error(f"Task process_product_prices_file FAILED ultimately for session {session_id}: {e}", exc_info=True)
+        _update_session_status(session_id, str(business_id), UploadJobStatus.FAILED_UNHANDLED_EXCEPTION,
+                               [ErrorDetailModel(error_message=f"Task failed: {str(e)}", error_type=ErrorType.TASK_EXCEPTION)])
+        raise
+
+@shared_task(name="process_meta_tags_file_specific", bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+def process_meta_tags_file_specific(self, business_id_str: str, session_id: str, wasabi_file_path: str, original_filename: str):
+    try: # Outer try for the task signature itself, e.g. int conversion of business_id
+        business_id = int(business_id_str)
+    except ValueError:
+        msg = f"Invalid business_id format: '{business_id_str}' for meta_tags. Must be an integer."
+        logger.error(msg)
+        _update_session_status(session_id, business_id_str, UploadJobStatus.FAILED_UNHANDLED_EXCEPTION, [ErrorDetailModel(error_message=msg, error_type=ErrorType.CONFIGURATION)])
+        # This is a non-retryable config error from the task's perspective
+        return {"status": UploadJobStatus.FAILED_UNHANDLED_EXCEPTION.value, "message": msg, "session_id": session_id}
+
+    logger.info(f"Meta Tags specific processing task started for session: {session_id}, file: {original_filename}, business_id: {business_id}")
+    db_session = None
+    temp_local_path = None
+    try: # Main logic block that might encounter retryable errors
+        _update_session_status(session_id, str(business_id), status=UploadJobStatus.DOWNLOADING_FILE)
+        response = wasabi_client.get_object(Bucket=WASABI_BUCKET_NAME, Key=wasabi_file_path)
         with tempfile.NamedTemporaryFile(delete=False, mode='wb', suffix=".csv") as tmp_file_obj:
             tmp_file_obj.write(response['Body'].read())
             temp_local_path = tmp_file_obj.name
-
         logger.info(f"File {original_filename} downloaded from Wasabi to {temp_local_path} for session {session_id}.")
-
+        _update_session_status(session_id, str(business_id), status=UploadJobStatus.VALIDATING_DATA)
         db_session = get_session(business_id=business_id)
-
         summary: DataloadSummary = load_meta_tags_from_csv(db=db_session, csv_file_path=temp_local_path)
-
-        total_records = summary.total_rows_processed
-        total_errors = summary.validation_errors + summary.target_not_found_errors + summary.database_errors
-
-        error_details_list = [err.model_dump() for err in summary.error_details] if summary.error_details else []
-        # Cap the error details JSON string length to avoid overly large DB entries
-        max_json_len = 4000 # Example, adjust as needed
-        error_details_json = json.dumps(error_details_list)
-        if len(error_details_json) > max_json_len:
-            # Basic truncation, could be smarter (e.g. sample errors)
-            error_details_json = json.dumps(error_details_list[:max(1, int(max_json_len / (len(json.dumps(error_details_list[0]))+5 if error_details_list else 100) ))]) # Approx
-            error_details_json = error_details_json[:max_json_len-50] + '... TRUNCATED]"}' if error_details_list else '{"message": "Error details truncated"}'
-
-        # Determine final status
-        if any(err.row_number == 0 for err in summary.error_details): # File-level error (e.g. access, global parse)
-            final_status = "failed"
+        db_session.commit()
+        total_records_processed = summary.total_rows_processed
+        standardized_error_details: List[ErrorDetailModel] = []
+        if summary.error_details:
+            for err in summary.error_details:
+                error_type = ErrorType.VALIDATION
+                if "not found" in err.message.lower(): error_type = ErrorType.LOOKUP
+                elif "database" in err.message.lower(): error_type = ErrorType.DATABASE
+                standardized_error_details.append(ErrorDetailModel(
+                    row_number=err.row_number if err.row_number != 0 else None,
+                    field_name=err.field, error_message=err.message, error_type=error_type,
+                    offending_value=str(err.value) if err.value is not None else None ))
+        total_errors = len(standardized_error_details)
+        final_status_enum: UploadJobStatus
+        if any(err.row_number is None for err in standardized_error_details): final_status_enum = UploadJobStatus.FAILED_VALIDATION
         elif total_errors > 0:
-            if summary.successful_updates == 0 and total_records > 0 and total_errors >= total_records:
-                final_status = "failed" # All rows processed resulted in an error
-            else:
-                final_status = "completed_with_errors" # Some errors, but maybe some successes
-        elif summary.successful_updates > 0:
-            final_status = "completed"
-        elif total_records > 0 and summary.successful_updates == 0: # Processed rows, no updates, no errors
-            final_status = "completed_no_changes"
-        elif total_records == 0: # No rows processed, no errors (e.g. empty file after header)
-            final_status = "completed_empty_file"
-        else: # Fallback, should ideally not be reached if logic above is comprehensive
-            final_status = "unknown_state"
-            logger.warning(f"Meta tags task for session {session_id} ended in an undetermined state. Summary: {summary}")
-
-        if final_status == "completed_empty_file": # Ensure record_count is 0 for this status
-            total_records = 0
-
-        _update_session_status(
-            session_id=session_id,
-            business_id=business_id,
-            status=final_status,
-            details=error_details_json,
-            record_count=total_records,
-            error_count=total_errors
-        )
-
-        logger.info(f"Meta Tags processing finished for session {session_id}. Status: {final_status}, Processed: {total_records}, Successful: {summary.successful_updates}, Errors: {total_errors}.")
-
-        if final_status not in ["failed"]: # Delete from Wasabi unless it's a hard failure of the task itself before summary
+            if summary.successful_updates == 0 and total_records_processed > 0 and total_errors >= total_records_processed: final_status_enum = UploadJobStatus.FAILED_DB_PROCESSING
+            else: final_status_enum = UploadJobStatus.COMPLETED_WITH_ERRORS
+        elif summary.successful_updates > 0: final_status_enum = UploadJobStatus.COMPLETED
+        elif total_records_processed > 0 and summary.successful_updates == 0: final_status_enum = UploadJobStatus.COMPLETED_NO_CHANGES
+        elif total_records_processed == 0: final_status_enum = UploadJobStatus.COMPLETED_EMPTY_FILE
+        else: final_status_enum = UploadJobStatus.FAILED_UNHANDLED_EXCEPTION; logger.warning(f"Meta tags task {session_id} ended in undetermined state. Summary: {summary}")
+        if final_status_enum == UploadJobStatus.COMPLETED_EMPTY_FILE: total_records_processed = 0
+        _update_session_status(session_id, str(business_id), final_status_enum, standardized_error_details if standardized_error_details else None, total_records_processed, total_errors)
+        logger.info(f"Meta Tags processing finished for session {session_id}. Status: {final_status_enum.value}, Processed: {total_records_processed}, Successful: {summary.successful_updates}, Errors: {total_errors}.")
+        if not final_status_enum.is_failure():
+            _update_session_status(session_id, str(business_id), status=UploadJobStatus.CLEANING_UP)
             try:
                 wasabi_client.delete_object(Bucket=WASABI_BUCKET_NAME, Key=wasabi_file_path)
                 logger.info(f"Successfully deleted {wasabi_file_path} from Wasabi for session {session_id}.")
-            except Exception as cleanup_error:
-                logger.error(f"Failed to delete {wasabi_file_path} from Wasabi for session {session_id}: {cleanup_error}", exc_info=True)
-
-        return {"status": final_status, "processed_count": summary.successful_updates, "total_records": total_records, "errors": total_errors, "session_id": session_id}
-
+            except Exception as cleanup_error: logger.error(f"Failed to delete {wasabi_file_path} from Wasabi for session {session_id}: {cleanup_error}", exc_info=True)
+        return {"status": final_status_enum.value, "processed_count": summary.successful_updates, "total_records": total_records_processed, "errors_count": total_errors, "session_id": session_id}
     except Exception as e:
-        logger.error(f"Critical error in process_meta_tags_file_specific for session {session_id}: {str(e)}", exc_info=True)
-        if db_session:
-            db_session.rollback()
-        _update_session_status(session_id, business_id, status="failed", details=f"Critical task error: {str(e)}")
-        return {"status": "failed", "message": str(e), "session_id": session_id}
+        logger.error(f"Task process_meta_tags_file_specific FAILED ultimately for session {session_id}: {str(e)}", exc_info=True)
+        if db_session: db_session.rollback()
+        _update_session_status(session_id, str(business_id_str), UploadJobStatus.FAILED_UNHANDLED_EXCEPTION, [ErrorDetailModel(error_message=f"Task failed: {str(e)}", error_type=ErrorType.TASK_EXCEPTION)])
+        raise
     finally:
-        if db_session:
-            db_session.close()
+        if db_session: db_session.close()
         if temp_local_path and os.path.exists(temp_local_path):
-            try:
-                os.remove(temp_local_path)
-                logger.info(f"Temporary file {temp_local_path} deleted for session {session_id}.")
-            except Exception as e_remove:
-                logger.error(f"Error deleting temporary file {temp_local_path} for session {session_id}: {e_remove}", exc_info=True)
+            try: os.remove(temp_local_path); logger.info(f"Temp file {temp_local_path} deleted.")
+            except Exception as e_remove: logger.error(f"Error deleting temp file {temp_local_path}: {e_remove}", exc_info=True)
 
-
-@shared_task(name="process_categories_file")
-def process_categories_file(business_id: int, session_id: str, wasabi_file_path: str, original_filename: str): # business_id type hint updated
-    """
-    Celery task to process a CSV file containing category data.
-    It calls the generic process_csv_task with parameters specific to categories.
-    """
+@shared_task(name="process_categories_file", bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+def process_categories_file(self, business_id: int, session_id: str, wasabi_file_path: str, original_filename: str):
     logger.info(f"Category file processing task started for session: {session_id}, file: {original_filename}, business_id: {business_id}")
-    return process_csv_task(
-        business_id=business_id,
-        session_id=session_id,
-        wasabi_file_path=wasabi_file_path,
-        original_filename=original_filename,
-        record_key="category_path",  # The unique key field in the Category CSV (e.g., "L1/L2/L3")
-        id_prefix="cat",             # Prefix for any generated string IDs (if still used)
-        map_type="categories"        # The type of entity being processed, matches Pydantic model and ORM map
-    )
+    try:
+        return process_csv_task(str(business_id), session_id, wasabi_file_path, original_filename, "category_path", "cat", "categories")
+    except Exception as e:
+        logger.error(f"Task process_categories_file FAILED ultimately for session {session_id}: {e}", exc_info=True)
+        _update_session_status(session_id, str(business_id), UploadJobStatus.FAILED_UNHANDLED_EXCEPTION,
+                               [ErrorDetailModel(error_message=f"Task failed: {str(e)}", error_type=ErrorType.TASK_EXCEPTION)])
+        raise
 
+# This task was a simple wrapper, now process_meta_tags_file_specific is the one in CELERY_TASK_MAP
+# @shared_task(name="process_meta_tags_file")
+# def process_meta_tags_file(business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
+#     logger.warning(f"Legacy process_meta_tags_file called for session {session_id}. Using process_meta_tags_file_specific.")
+#     return process_meta_tags_file_specific.delay(business_id, session_id, wasabi_file_path, original_filename)
 
-# This map is imported by other modules (e.g., graphql_mutations) to dispatch tasks.
 CELERY_TASK_MAP = {
     "brands": process_brands_file,
     "attributes": process_attributes_file,
@@ -507,6 +391,6 @@ CELERY_TASK_MAP = {
     "products": process_products_file,
     "product_items": process_product_items_file,
     "product_prices": process_product_prices_file,
-    "meta_tags": process_meta_tags_file_specific, # Updated to specific task
+    "meta_tags": process_meta_tags_file_specific,
     "categories": process_categories_file,
 }

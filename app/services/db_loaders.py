@@ -12,105 +12,46 @@ in `app.tasks.load_jobs.py` after CSV data validation and basic processing.
 import logging
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError, DataError # Added DataError
 
-# Import ORM models as they are needed by specific loader functions.
-# Example:
 from app.db.models import (
     CategoryOrm,
     BrandOrm,
     AttributeOrm,
     AttributeValueOrm,
     ReturnPolicyOrm,
-    PriceOrm,          # Added PriceOrm
-    ProductOrm,        # Ensure ProductOrm is imported
-    ProductItemOrm,    # Ensure ProductItemOrm is imported
-    # MetaTagOrm
+    PriceOrm,
+    ProductOrm,
+    ProductItemOrm,
 )
 from datetime import datetime
-from app.dataload.models.price_csv import PriceCsv, PriceTypeEnum as PriceCsvTypeEnum # For type hint
-# from sqlalchemy.exc import SQLAlchemyError # For more specific DB error handling if needed
+from app.dataload.models.price_csv import PriceCsv, PriceTypeEnum as PriceCsvTypeEnum
 
-
-# Import Redis utilities. These are used to map CSV keys (e.g., category_path, brand_name)
-# to their database Primary Keys (PKs) during an upload session. This allows subsequent
-# CSV files in the same session to resolve foreign key relationships.
 from app.utils.redis_utils import add_to_id_map, get_from_id_map, DB_PK_MAP_SUFFIX
+from app.exceptions import DataLoaderError
+from app.models.schemas import ErrorType
 
 logger = logging.getLogger(__name__)
 
-# DB_PK_MAP_SUFFIX is now imported from redis_utils
-
-
-# --- Placeholder for Loader Functions ---
-# Specific loader functions will be implemented in subsequent subtasks.
-# Each function will typically take:
-# - db_session: SQLAlchemy Session
-# - business_details_id: The ID of the current business
-# - record_data: A dictionary of data for a single record (Pydantic model dict)
-# - session_id: The upload session ID (for Redis mapping)
-# - map_type: The entity type (e.g., "categories", "brands")
-# - record_key_in_csv: The field name in record_data that acts as the unique CSV key for Redis mapping
-# And will return the database PK of the created/updated record, or None if failed.
-
-# Example structure:
-# def load_category_to_db(
-#     db_session: Session,
-#     business_details_id: int,
-#     record_data: Dict[str, Any],
-#     session_id: str,
-#     # map_type: str = "categories", # Implicit from function name
-#     # record_key_in_csv: str = "category_path" # Implicit
-# ) -> Optional[int]: # Returns DB PK or None
-#     """
-#     Processes and saves a single category record to the database.
-#     Handles hierarchical data by resolving parent_id.
-#     Maps category_path to the new category's database ID in Redis.
-#     """
-#     # Implementation will involve:
-#     # 1. Importing CategoryOrm.
-#     # 2. Resolving parent_id if category_path indicates a sub-category.
-#     # 3. Querying for existing category (upsert logic).
-#     # 4. Creating or updating CategoryOrm instance.
-#     # 5. Adding to session, flushing to get ID (if new).
-#     # 6. Calling add_to_id_map to store "category_path" -> CategoryOrm.id mapping.
-#     # 7. Returning CategoryOrm.id.
-#     logger.debug(f"Placeholder: load_category_to_db called with data: {record_data}")
-#     pass # To be implemented
 
 def load_category_to_db(
     db_session: Session,
     business_details_id: int,
-    record_data: Dict[str, Any], # This is a dict from CategoryCsvModel
+    record_data: Dict[str, Any],
     session_id: str,
-    db_pk_redis_pipeline: Any # Redis pipeline for _db_pk maps
+    db_pk_redis_pipeline: Any
 ) -> Optional[int]:
-    """
-    Loads a single category record (potentially hierarchical) into the database.
-    Manages parent-child relationships based on category_path.
-    Stores (full_path_segment -> db_pk) mapping in Redis for the current session.
-
-    Args:
-        db_session: SQLAlchemy session.
-        business_details_id: The integer ID for the business.
-        record_data: A dictionary representing a row from the category CSV,
-                     validated by CategoryCsvModel. Expected to have 'category_path'
-                     and other metadata fields.
-        session_id: The current upload session ID.
-        db_pk_redis_pipeline: The Redis pipeline for storing _db_pk mappings.
-
-    Returns:
-        The database primary key (integer) of the processed category (the last
-        segment of the path), or None if processing failed for this record.
-    """
     category_path_str = record_data.get("category_path")
     if not category_path_str:
-        logger.error(f"Missing 'category_path' in record_data for business {business_details_id}, session {session_id}. Record: {record_data}")
-        return None
+        msg = "Missing 'category_path' in record_data."
+        logger.error(f"{msg} Business: {business_details_id}, Session: {session_id}, Record: {record_data}")
+        raise DataLoaderError(message=msg, error_type=ErrorType.VALIDATION, field_name="category_path")
 
     path_levels = [level.strip() for level in category_path_str.split('/') if level.strip()]
     if not path_levels:
-        logger.error(f"Empty or invalid 'category_path' after splitting: '{category_path_str}'. Record: {record_data}")
-        return None
+        msg = f"Empty or invalid 'category_path' after splitting: '{category_path_str}'."
+        logger.error(f"{msg} Record: {record_data}")
+        raise DataLoaderError(message=msg, error_type=ErrorType.VALIDATION, field_name="category_path", offending_value=category_path_str)
 
     current_parent_db_id: Optional[int] = None
     current_full_path_processed = ""
@@ -118,31 +59,18 @@ def load_category_to_db(
 
     try:
         for i, level_name_from_path in enumerate(path_levels):
-            if not current_full_path_processed:
-                current_level_full_path = level_name_from_path
-            else:
-                current_level_full_path = f"{current_full_path_processed}/{level_name_from_path}"
-
+            current_level_full_path = f"{current_full_path_processed}/{level_name_from_path}" if current_full_path_processed else level_name_from_path
             is_last_level = (i == len(path_levels) - 1)
-
             current_level_name = record_data.get("name") if is_last_level and record_data.get("name") else level_name_from_path
+            category_db_id: Optional[int] = None
 
-            category_db_id: Optional[int] = None # Initialize here
-
-            # 1. Check Redis for existing DB PK for this full_path segment
-            category_db_id_from_redis_str = get_from_id_map(
-                session_id, f"categories{DB_PK_MAP_SUFFIX}", current_level_full_path
-            )
+            category_db_id_from_redis_str = get_from_id_map(session_id, f"categories{DB_PK_MAP_SUFFIX}", current_level_full_path)
 
             if category_db_id_from_redis_str is not None:
                 category_db_id = int(category_db_id_from_redis_str)
-                logger.debug(f"Redis cache hit for category path '{current_level_full_path}' -> DB ID {category_db_id} (business: {business_details_id})")
-
-                if is_last_level: # Potentially update metadata if this is the target category of the row
-                    existing_category_orm = db_session.query(CategoryOrm).filter_by(
-                        id=category_db_id,
-                        business_details_id=business_details_id # Ensure it belongs to the same business
-                    ).first()
+                logger.debug(f"Redis cache hit for category path '{current_level_full_path}' -> DB ID {category_db_id}")
+                if is_last_level:
+                    existing_category_orm = db_session.query(CategoryOrm).filter_by(id=category_db_id, business_details_id=business_details_id).first()
                     if existing_category_orm:
                         logger.info(f"Updating metadata for existing category: '{current_level_full_path}' (ID: {category_db_id})")
                         existing_category_orm.description = record_data.get("description", existing_category_orm.description)
@@ -155,25 +83,19 @@ def load_category_to_db(
                         existing_category_orm.seo_description = record_data.get("seo_description", existing_category_orm.seo_description)
                         existing_category_orm.seo_keywords = record_data.get("seo_keywords", existing_category_orm.seo_keywords)
                         existing_category_orm.seo_title = record_data.get("seo_title", existing_category_orm.seo_title)
-                        existing_category_orm.url = record_data.get("url", existing_category_orm.url) # Consider uniqueness for URL if it's a separate field
+                        existing_category_orm.url = record_data.get("url", existing_category_orm.url)
                         existing_category_orm.position_on_site = record_data.get("position_on_site", existing_category_orm.position_on_site)
-                        # created_by, created_date etc. are not typically updated from CSV for existing records
                     else:
-                        logger.error(f"Category ID {category_db_id} for path '{current_level_full_path}' found in Redis but not in DB for business {business_details_id}. Inconsistency.")
-                        return None # Critical error
+                        msg = f"Category ID {category_db_id} for path '{current_level_full_path}' found in Redis but not in DB or for wrong business {business_details_id}."
+                        logger.error(msg)
+                        raise DataLoaderError(message=msg, error_type=ErrorType.LOOKUP, field_name="category_path", offending_value=current_level_full_path)
             else:
-                # 2. Not in Redis, so query DB by name and parent_id for this business
-                db_category = db_session.query(CategoryOrm).filter_by(
-                    business_details_id=business_details_id,
-                    name=current_level_name,
-                    parent_id=current_parent_db_id
-                ).first()
-
-                if db_category: # Exists in DB
+                db_category = db_session.query(CategoryOrm).filter_by(business_details_id=business_details_id, name=current_level_name, parent_id=current_parent_db_id).first()
+                if db_category:
                     category_db_id = db_category.id
                     logger.debug(f"DB hit for category: '{current_level_name}' (Parent ID: {current_parent_db_id}) -> DB ID {category_db_id}")
-                    if is_last_level: # Update metadata if this is the target category
-                        logger.info(f"Updating metadata for existing category (found via DB query): '{current_level_full_path}' (ID: {category_db_id})")
+                    if is_last_level:
+                        logger.info(f"Updating metadata for existing category (DB query): '{current_level_full_path}' (ID: {category_db_id})")
                         db_category.description = record_data.get("description", db_category.description)
                         db_category.enabled = record_data.get("enabled", db_category.enabled)
                         db_category.image_name = record_data.get("image_name", db_category.image_name)
@@ -186,48 +108,34 @@ def load_category_to_db(
                         db_category.seo_title = record_data.get("seo_title", db_category.seo_title)
                         db_category.url = record_data.get("url", db_category.url)
                         db_category.position_on_site = record_data.get("position_on_site", db_category.position_on_site)
-                else: # New category level, create it
-                    logger.info(f"Creating new category level: Name='{current_level_name}', Parent DB ID='{current_parent_db_id}' for path '{current_level_full_path}'")
+                else:
+                    logger.info(f"Creating new category level: Name='{current_level_name}', Parent DB ID='{current_parent_db_id}'")
                     orm_fields = {
-                        "name": current_level_name,
-                        "parent_id": current_parent_db_id,
-                        "business_details_id": business_details_id,
-                        # Default description for intermediate categories if not the target of the row
-                        "description": f"Category: {current_level_name}",
-                        "enabled": True, # Default for new categories
+                        "name": current_level_name, "parent_id": current_parent_db_id, "business_details_id": business_details_id,
+                        "description": f"Category: {current_level_name}", "enabled": True,
                     }
-                    if is_last_level: # Populate all metadata only for the target category of this CSV row
+                    if is_last_level:
                         orm_fields.update({
-                            "description": record_data.get("description"), # Override default if provided
-                            "enabled": record_data.get("enabled", True),
-                            "image_name": record_data.get("image_name"),
-                            "long_description": record_data.get("long_description"),
-                            "order_type": record_data.get("order_type"),
-                            "shipping_type": record_data.get("shipping_type"),
-                            "active": record_data.get("active"),
-                            "seo_description": record_data.get("seo_description"),
-                            "seo_keywords": record_data.get("seo_keywords"),
-                            "seo_title": record_data.get("seo_title"),
-                            "url": record_data.get("url"),
-                            "position_on_site": record_data.get("position_on_site"),
-                            # Audit fields (created_by, created_date etc. are from ORM defaults or DDL)
+                            "description": record_data.get("description"), "enabled": record_data.get("enabled", True),
+                            "image_name": record_data.get("image_name"), "long_description": record_data.get("long_description"),
+                            "order_type": record_data.get("order_type"), "shipping_type": record_data.get("shipping_type"),
+                            "active": record_data.get("active"), "seo_description": record_data.get("seo_description"),
+                            "seo_keywords": record_data.get("seo_keywords"), "seo_title": record_data.get("seo_title"),
+                            "url": record_data.get("url"), "position_on_site": record_data.get("position_on_site"),
                         })
-
                     new_category_orm = CategoryOrm(**orm_fields)
                     db_session.add(new_category_orm)
-                    db_session.flush() # To get the new_category_orm.id
+                    db_session.flush()
                     category_db_id = new_category_orm.id
                     if category_db_id is None:
-                        logger.error(f"Failed to obtain DB ID for new category: '{current_level_name}' after flush.")
-                        # This indicates a serious issue, probably should halt this record.
-                        raise Exception(f"DB flush failed to return an ID for new category '{current_level_name}'.")
+                        msg = f"Failed to obtain DB ID for new category: '{current_level_name}' after flush."
+                        logger.error(msg)
+                        raise DataLoaderError(message=msg, error_type=ErrorType.DATABASE, field_name="category_path", offending_value=current_level_full_path)
                     logger.info(f"Created new category '{current_level_name}' with DB ID {category_db_id}")
 
-                # Add to Redis _db_pk map (using the full path as key)
-                # This happens whether it was found in DB or newly created, to populate cache for next levels/rows.
-                if db_pk_redis_pipeline is not None:
+                if db_pk_redis_pipeline is not None and category_db_id is not None:
                      add_to_id_map(session_id, f"categories{DB_PK_MAP_SUFFIX}", current_level_full_path, category_db_id, pipeline=db_pk_redis_pipeline)
-                else:
+                elif category_db_id is not None:
                      add_to_id_map(session_id, f"categories{DB_PK_MAP_SUFFIX}", current_level_full_path, category_db_id)
 
             current_parent_db_id = category_db_id
@@ -235,175 +143,143 @@ def load_category_to_db(
             if is_last_level:
                 final_category_db_id = category_db_id
 
-        # The db_session.commit() or rollback() is handled by the calling task (process_csv_task)
-        # after processing all records in a file.
         return final_category_db_id
 
+    except DataLoaderError:
+        raise
+    except IntegrityError as e:
+        logger.error(f"DB integrity error processing category path '{category_path_str}': {e.orig}", exc_info=False)
+        raise DataLoaderError(
+            message=f"Database integrity error for category path '{category_path_str}': {str(e.orig)}",
+            error_type=ErrorType.DATABASE,
+            field_name="category_path",
+            offending_value=category_path_str,
+            original_exception=e
+        )
+    except DataError as e:
+        logger.error(f"DB data error processing category path '{category_path_str}': {e.orig}", exc_info=False)
+        raise DataLoaderError(
+            message=f"Database data error for category path '{category_path_str}': {str(e.orig)}", # e.g. value too long for column
+            error_type=ErrorType.DATABASE, # Could also be VALIDATION if data is simply wrong type/length
+            field_name="category_path", # Or more specific if determinable
+            offending_value=category_path_str, # Or specific field's value if known
+            original_exception=e
+        )
     except Exception as e:
-        logger.error(f"Error processing category record (path: '{category_path_str}') for business {business_details_id}: {e}", exc_info=True)
-        # Do not rollback here; let the caller manage the transaction for the whole file.
-        return None
+        logger.error(f"Unexpected error processing category record (path: '{category_path_str}'): {e}", exc_info=True)
+        raise DataLoaderError(
+            message=f"Unexpected error processing category path '{category_path_str}': {str(e)}",
+            error_type=ErrorType.UNEXPECTED_ROW_ERROR,
+            field_name="category_path",
+            offending_value=category_path_str,
+            original_exception=e
+        )
 
 def load_brand_to_db(
     db_session: Session,
     business_details_id: int,
-    record_data: Dict[str, Any], # Dict from BrandCsvModel
+    records_data: List[Dict[str, Any]],
     session_id: str,
-    db_pk_redis_pipeline: Any # Redis pipeline object
-) -> Optional[int]:
-    """
-    Loads or updates a single brand record in the database.
-    Manages mapping of brand name to DB PK in Redis for the current session.
+    db_pk_redis_pipeline: Any
+) -> Dict[str, int]:
+    if not records_data:
+        return {"inserted": 0, "updated": 0, "errors": 0}
 
-    Args:
-        db_session: SQLAlchemy session.
-        business_details_id: The integer ID for the business.
-        record_data: A dictionary representing a row from the brand CSV,
-                     validated by BrandCsvModel. Expected to have 'name', 'logo',
-                     and other brand-specific fields.
-        session_id: The current upload session ID.
-        db_pk_redis_pipeline: The Redis pipeline for storing _db_pk mappings.
+    brand_names_from_csv = {record['name'] for record in records_data if record.get('name')}
+    if not brand_names_from_csv:
+        raise DataLoaderError(message="No brand names found in records_data list.", error_type=ErrorType.VALIDATION)
 
-    Returns:
-        The database primary key (integer / bigint) of the processed brand,
-        or None if processing failed for this record.
-    """
-    brand_name_from_csv = record_data.get("name")
-    if not brand_name_from_csv:
-        logger.error(f"Missing 'name' (brand name) in record_data for business {business_details_id}, session {session_id}. Record: {record_data}")
-        return None
-
-    brand_db_id: Optional[int] = None
+    summary = {"inserted": 0, "updated": 0, "errors": 0}
 
     try:
-        # Check if brand already exists for this business
-        db_brand = db_session.query(BrandOrm).filter_by(
-            business_details_id=business_details_id,
-            name=brand_name_from_csv
-        ).first()
+        existing_brands_query = db_session.query(BrandOrm).filter(
+            BrandOrm.business_details_id == business_details_id,
+            BrandOrm.name.in_(brand_names_from_csv)
+        )
+        existing_brands_map = {brand.name: brand for brand in existing_brands_query.all()}
 
-        if db_brand:  # Existing brand, update it
-            logger.info(f"Updating existing brand '{brand_name_from_csv}' (ID: {db_brand.id}) for business {business_details_id}")
-            db_brand.logo = record_data.get("logo", db_brand.logo) # Keep old if CSV doesn't provide new
-            db_brand.supplier_id = record_data.get("supplier_id", db_brand.supplier_id)
-            db_brand.active = record_data.get("active", db_brand.active)
+        new_brands_mappings = []
+        updated_brands_mappings = []
+        processed_brand_names_for_redis = {}
 
-            # Handle BigInt audit dates: only update if provided in CSV
-            # These are BigInt in ORM, matching DDL. Pydantic model provides them as Optional[int].
-            if record_data.get("created_by") is not None:
-                db_brand.created_by = record_data.get("created_by")
-            if record_data.get("created_date") is not None:
-                db_brand.created_date = record_data.get("created_date")
-            if record_data.get("updated_by") is not None:
-                db_brand.updated_by = record_data.get("updated_by")
-            if record_data.get("updated_date") is not None:
-                db_brand.updated_date = record_data.get("updated_date")
-
-            brand_db_id = db_brand.id
-        else:  # New brand, create it
-            logger.info(f"Creating new brand '{brand_name_from_csv}' for business {business_details_id}")
-
-            orm_data = {
-                "business_details_id": business_details_id,
-                "name": brand_name_from_csv,
-                "logo": record_data.get("logo"), # Mandatory in BrandCsvModel
-                "supplier_id": record_data.get("supplier_id"),
-                "active": record_data.get("active"),
-                "created_by": record_data.get("created_by"),
-                "created_date": record_data.get("created_date"),
-                "updated_by": record_data.get("updated_by"),
-                "updated_date": record_data.get("updated_date"),
-            }
-
-            new_brand_orm = BrandOrm(**orm_data)
-            db_session.add(new_brand_orm)
-            db_session.flush()  # To get the new_brand_orm.id
-
-            if new_brand_orm.id is None:
-                logger.error(f"Failed to obtain DB ID for new brand '{brand_name_from_csv}' after flush.")
-                raise Exception(f"DB flush failed to return an ID for new brand '{brand_name_from_csv}'.")
-            brand_db_id = new_brand_orm.id
-            logger.info(f"Created new brand '{brand_name_from_csv}' with DB ID {brand_db_id}")
-
-        # Store/Update mapping of brand_name_from_csv -> brand_db_id in Redis for this session
-        if brand_db_id is not None: # Should always be true if no exception before this
-            if db_pk_redis_pipeline is not None:
-                add_to_id_map(
-                    session_id,
-                    f"brands{DB_PK_MAP_SUFFIX}",
-                    brand_name_from_csv,
-                    brand_db_id,
-                    pipeline=db_pk_redis_pipeline
-                )
-            else: # Fallback, though pipeline is expected from process_csv_task
-                add_to_id_map(session_id, f"brands{DB_PK_MAP_SUFFIX}", brand_name_from_csv, brand_db_id)
-
-        return brand_db_id
-
+        for record in records_data:
+            brand_name = record.get("name")
+            if not brand_name:
+                logger.warning(f"Skipping record due to missing brand name: {record}")
+                summary["errors"] += 1
+                continue
+            db_brand = existing_brands_map.get(brand_name)
+            if db_brand:
+                update_mapping = record.copy()
+                update_mapping['id'] = db_brand.id
+                updated_brands_mappings.append(update_mapping)
+                processed_brand_names_for_redis[brand_name] = db_brand.id
+                summary["updated"] += 1
+            else:
+                insert_mapping = record.copy()
+                insert_mapping['business_details_id'] = business_details_id
+                new_brands_mappings.append(insert_mapping)
+        if updated_brands_mappings:
+            logger.info(f"Bulk updating {len(updated_brands_mappings)} brands for business {business_details_id}.")
+            db_session.bulk_update_mappings(BrandOrm, updated_brands_mappings)
+        if new_brands_mappings:
+            logger.info(f"Bulk inserting {len(new_brands_mappings)} new brands for business {business_details_id}.")
+            db_session.bulk_insert_mappings(BrandOrm, new_brands_mappings)
+            summary["inserted"] = len(new_brands_mappings)
+            if summary["inserted"] > 0:
+                db_session.flush()
+                for brand_mapping_dict in new_brands_mappings:
+                    if 'id' in brand_mapping_dict and brand_mapping_dict['id'] is not None:
+                         processed_brand_names_for_redis[brand_mapping_dict['name']] = brand_mapping_dict['id']
+                    else:
+                        logger.warning(f"ID not populated after bulk insert for brand: {brand_mapping_dict['name']}. Redis map might be incomplete for this new brand.")
+                        summary["errors"] += 1
+        if processed_brand_names_for_redis:
+            redis_pipe_to_use = db_pk_redis_pipeline if db_pk_redis_pipeline else db_session.get_bind().pool._redis_client.pipeline() if hasattr(db_session.get_bind().pool, '_redis_client') else None # Simplified
+            for brand_name, brand_id in processed_brand_names_for_redis.items():
+                add_to_id_map(session_id, f"brands{DB_PK_MAP_SUFFIX}", brand_name, brand_id, pipeline=redis_pipe_to_use)
+            if redis_pipe_to_use and not db_pk_redis_pipeline : redis_pipe_to_use.execute()
+        return summary
+    except IntegrityError as e:
+        logger.error(f"Bulk database integrity error processing brands for business {business_details_id}: {e.orig}", exc_info=False)
+        raise DataLoaderError(message=f"Bulk database integrity error for brands: {str(e.orig)}",error_type=ErrorType.DATABASE,original_exception=e)
     except Exception as e:
-        logger.error(f"Error processing brand record '{brand_name_from_csv}' for business {business_details_id}: {e}", exc_info=True)
-        return None
+        logger.error(f"Unexpected error during bulk processing of brands for business {business_details_id}: {e}", exc_info=True)
+        raise DataLoaderError(message=f"Unexpected error during bulk brand processing: {str(e)}", error_type=ErrorType.UNEXPECTED_ROW_ERROR, original_exception=e)
 
 def load_attribute_to_db(
     db_session: Session,
     business_details_id: int,
-    record_data: Dict[str, Any], # Dict from AttributeCsvModel
+    record_data: Dict[str, Any],
     session_id: str,
-    db_pk_redis_pipeline: Any # Redis pipeline object
+    db_pk_redis_pipeline: Any
 ) -> Optional[int]:
-    """
-    Loads or updates a parent attribute and its associated values in the database.
-    Handles parsing of pipe-separated value strings from the CSV record.
-    Maps parent attribute_name to its DB PK in Redis for the current session.
-
-    Args:
-        db_session: SQLAlchemy session.
-        business_details_id: The integer ID for the business.
-        record_data: A dictionary representing a row from the attribute CSV,
-                     validated by AttributeCsvModel. Expected to have 'attribute_name',
-                     pipe-separated value fields, etc.
-        session_id: The current upload session ID.
-        db_pk_redis_pipeline: The Redis pipeline for storing _db_pk mappings.
-
-    Returns:
-        The database primary key (integer/bigint) of the processed parent attribute,
-        or None if processing failed for this record.
-    """
     parent_attribute_name = record_data.get("attribute_name")
     if not parent_attribute_name:
-        logger.error(f"Missing 'attribute_name' in record_data for business {business_details_id}, session {session_id}. Record: {record_data}")
-        return None
+        msg = "Missing 'attribute_name' in record_data."
+        logger.error(f"{msg} Business: {business_details_id}, Session: {session_id}, Record: {record_data}")
+        raise DataLoaderError(message=msg, error_type=ErrorType.VALIDATION, field_name="attribute_name")
 
     attribute_db_id: Optional[int] = None
     parent_attr_orm_instance: Optional[AttributeOrm] = None
 
     try:
-        # 1. Upsert Parent Attribute (AttributeOrm)
-        parent_attr_orm_instance = db_session.query(AttributeOrm).filter_by(
-            business_details_id=business_details_id,
-            name=parent_attribute_name
-        ).first()
-
+        parent_attr_orm_instance = db_session.query(AttributeOrm).filter_by(business_details_id=business_details_id, name=parent_attribute_name).first()
         is_color_from_csv = record_data.get('is_color', False)
 
-        if parent_attr_orm_instance: # Existing parent attribute
-            logger.info(f"Updating existing attribute '{parent_attribute_name}' (ID: {parent_attr_orm_instance.id}) for business {business_details_id}")
+        if parent_attr_orm_instance:
+            logger.info(f"Updating existing attribute '{parent_attribute_name}' (ID: {parent_attr_orm_instance.id})")
             parent_attr_orm_instance.is_color = is_color_from_csv
             parent_attr_orm_instance.active = record_data.get("attribute_active", parent_attr_orm_instance.active)
-
             if record_data.get("updated_by") is not None: parent_attr_orm_instance.updated_by = record_data.get("updated_by")
             if record_data.get("updated_date") is not None: parent_attr_orm_instance.updated_date = record_data.get("updated_date")
-            # created_by and created_date are typically not updated for existing records from CSV.
             attribute_db_id = parent_attr_orm_instance.id
-        else: # New parent attribute
-            logger.info(f"Creating new attribute '{parent_attribute_name}' for business {business_details_id}")
+        else:
+            logger.info(f"Creating new attribute '{parent_attribute_name}'")
             parent_orm_data = {
-                "business_details_id": business_details_id,
-                "name": parent_attribute_name,
-                "is_color": is_color_from_csv,
-                "active": record_data.get("attribute_active"),
-                "created_by": record_data.get("created_by"),
-                "created_date": record_data.get("created_date"),
+                "business_details_id": business_details_id, "name": parent_attribute_name,
+                "is_color": is_color_from_csv, "active": record_data.get("attribute_active"),
+                "created_by": record_data.get("created_by"), "created_date": record_data.get("created_date"),
                 "updated_by": record_data.get("updated_by", record_data.get("created_by")),
                 "updated_date": record_data.get("updated_date", record_data.get("created_date")),
             }
@@ -411,309 +287,330 @@ def load_attribute_to_db(
             db_session.add(parent_attr_orm_instance)
             db_session.flush()
             if parent_attr_orm_instance.id is None:
-                logger.error(f"Failed to obtain DB ID for new attribute '{parent_attribute_name}' after flush.")
-                raise Exception(f"DB flush failed to return an ID for new attribute '{parent_attribute_name}'.")
+                msg = f"DB flush failed to return an ID for new attribute '{parent_attribute_name}'."
+                logger.error(msg)
+                raise DataLoaderError(message=msg, error_type=ErrorType.DATABASE, field_name="attribute_name", offending_value=parent_attribute_name)
             attribute_db_id = parent_attr_orm_instance.id
             logger.info(f"Created new attribute '{parent_attribute_name}' with DB ID {attribute_db_id}")
 
-        if attribute_db_id is not None: # Should always be true if no exception before this
-            if db_pk_redis_pipeline is not None:
-                add_to_id_map(
-                    session_id,
-                    f"attributes{DB_PK_MAP_SUFFIX}",
-                    parent_attribute_name,
-                    attribute_db_id,
-                    pipeline=db_pk_redis_pipeline
-                )
-            else:
-                 add_to_id_map(session_id, f"attributes{DB_PK_MAP_SUFFIX}", parent_attribute_name, attribute_db_id)
-
-
-        # 2. Process Attribute Values (AttributeValueOrm)
+        if attribute_db_id is not None:
+            redis_pipe_to_use = db_pk_redis_pipeline if db_pk_redis_pipeline else db_session.get_bind().pool._redis_client.pipeline() if hasattr(db_session.get_bind().pool, '_redis_client') else None # Simplified
+            add_to_id_map(session_id, f"attributes{DB_PK_MAP_SUFFIX}", parent_attribute_name, attribute_db_id, pipeline=redis_pipe_to_use)
+            if redis_pipe_to_use and not db_pk_redis_pipeline : redis_pipe_to_use.execute()
         values_name_str = record_data.get("values_name")
-        if values_name_str and attribute_db_id is not None:
+        if values_name_str and attribute_db_id is not None and parent_attr_orm_instance is not None:
             value_display_names = [name.strip() for name in values_name_str.split('|') if name.strip()]
-
             raw_value_values = record_data.get("value_value")
             value_actual_values = [v.strip() for v in raw_value_values.split('|')] if raw_value_values else []
-
             raw_img_urls = record_data.get("img_url")
             value_image_urls = [img.strip() for img in raw_img_urls.split('|')] if raw_img_urls else []
-
             raw_values_active = record_data.get("values_active")
             value_active_statuses = [status.strip().upper() for status in raw_values_active.split('|')] if raw_values_active else []
-
-            # Pydantic model should have already validated list length consistency.
-            # Here, we assume they are consistent or pad shorter lists.
-            num_values = len(value_display_names)
 
             for i, val_display_name in enumerate(value_display_names):
                 actual_value_part = value_actual_values[i] if i < len(value_actual_values) else None
                 image_url_part = value_image_urls[i] if i < len(value_image_urls) else None
-                # Default active status for a value to "INACTIVE" if not provided or if list is shorter.
-                # The ORM model has server_default="INACTIVE", so this explicit default might only be for clarity
-                # or if we want to override the ORM default based on CSV presence.
                 active_status_part = value_active_statuses[i] if i < len(value_active_statuses) and value_active_statuses[i] in ["ACTIVE", "INACTIVE"] else "INACTIVE"
-
-                value_for_db: str
-                if parent_attr_orm_instance.is_color: # parent_attr_orm_instance should be set from above
-                    value_for_db = actual_value_part if actual_value_part else val_display_name
-                else:
-                    value_for_db = actual_value_part if actual_value_part else val_display_name
-
+                value_for_db = actual_value_part if parent_attr_orm_instance.is_color and actual_value_part else val_display_name
                 if not value_for_db:
                     logger.warning(f"Skipping attribute value for '{parent_attribute_name}' due to missing value/name part at index {i}.")
                     continue
-
-                attr_value_orm = db_session.query(AttributeValueOrm).filter_by(
-                    attribute_id=attribute_db_id,
-                    name=val_display_name
-                ).first()
-
+                attr_value_orm = db_session.query(AttributeValueOrm).filter_by(attribute_id=attribute_db_id, name=val_display_name).first()
                 if attr_value_orm:
                     logger.debug(f"Updating existing attribute value '{val_display_name}' for attribute ID {attribute_db_id}")
                     attr_value_orm.value = value_for_db
                     attr_value_orm.attribute_image_url = image_url_part if image_url_part is not None else attr_value_orm.attribute_image_url
                     attr_value_orm.active = active_status_part
-                    # Audit fields for values are not typically updated from this CSV structure directly
                 else:
                     logger.debug(f"Creating new attribute value '{val_display_name}' for attribute ID {attribute_db_id}")
                     new_val_orm_data = {
-                        "attribute_id": attribute_db_id,
-                        "name": val_display_name,
-                        "value": value_for_db,
-                        "attribute_image_url": image_url_part,
-                        "active": active_status_part,
-                        # logo_name is from DDL, default is None or handled by DB
-                        # created_by, created_date for attribute values are not sourced from this CSV structure
+                        "attribute_id": attribute_db_id, "name": val_display_name, "value": value_for_db,
+                        "attribute_image_url": image_url_part, "active": active_status_part,
                     }
                     attr_value_orm = AttributeValueOrm(**new_val_orm_data)
                     db_session.add(attr_value_orm)
-            # Rely on process_csv_task's final commit for attribute values of this parent attribute.
-            # If a mix of new/updated values, flush might be needed if new value IDs were referenced elsewhere.
-            # db_session.flush() # If needed to get IDs for AttributeValueOrm immediately
-
         return attribute_db_id
-
+    except DataLoaderError:
+        raise
+    except IntegrityError as e:
+        logger.error(f"DB integrity error processing attribute '{parent_attribute_name}': {e.orig}", exc_info=False)
+        raise DataLoaderError(
+            message=f"Database integrity error for attribute '{parent_attribute_name}' or its values: {str(e.orig)}",
+            error_type=ErrorType.DATABASE,
+            field_name="attribute_name", # Or specific value if parsable from e.orig
+            offending_value=parent_attribute_name,
+            original_exception=e
+        )
+    except DataError as e:
+        logger.error(f"DB data error processing attribute '{parent_attribute_name}': {e.orig}", exc_info=False)
+        raise DataLoaderError(
+            message=f"Database data error for attribute '{parent_attribute_name}' or its values: {str(e.orig)}",
+            error_type=ErrorType.DATABASE,
+            field_name="attribute_name", # Or specific value field
+            offending_value=parent_attribute_name, # Or specific problematic value
+            original_exception=e
+        )
     except Exception as e:
-        logger.error(f"Error processing attribute record '{parent_attribute_name}' for business {business_details_id}: {e}", exc_info=True)
-        return None
+        logger.error(f"Unexpected error processing attribute record '{parent_attribute_name}': {e}", exc_info=True)
+        raise DataLoaderError(
+            message=f"Unexpected error for attribute '{parent_attribute_name}': {str(e)}",
+            error_type=ErrorType.UNEXPECTED_ROW_ERROR,
+            field_name="attribute_name",
+            offending_value=parent_attribute_name,
+            original_exception=e
+        )
 
 def load_return_policy_to_db(
     db_session: Session,
-    business_details_id: int, # This is the integer business ID
-    record_data: Dict[str, Any], # Dict from ReturnPolicyCsvModel
-    session_id: str, # Used for logging context and potentially future Redis use
-    db_pk_redis_pipeline: Any # Redis pipeline, not used in this loader for now
-) -> Optional[int]:
-    """
-    Loads or updates a single return policy record in the database.
-    Handles conditional nullification of fields based on return_policy_type.
-    No Redis _db_pk mapping is done here as products are expected to link by integer ID.
+    business_details_id: int,
+    records_data: List[Dict[str, Any]],
+    session_id: str,
+    db_pk_redis_pipeline: Any
+) -> Dict[str, int]:
+    if not records_data:
+        return {"inserted": 0, "updated": 0, "errors": 0}
 
-    Args:
-        db_session: SQLAlchemy session.
-        business_details_id: The integer ID for the business.
-        record_data: A dictionary representing a row from the return policy CSV,
-                     validated by ReturnPolicyCsvModel.
-        session_id: The current upload session ID (for logging).
-        db_pk_redis_pipeline: Redis pipeline (not used by this function for _db_pk map).
+    summary = {"inserted": 0, "updated": 0, "errors": 0}
 
-    Returns:
-        The database primary key (integer) of the processed return policy,
-        or None if processing failed for this record.
-    """
+    processed_records_for_bulk = []
+    for record in records_data:
+        processed_record = record.copy()
+        if record.get("return_policy_type") == "SALES_ARE_FINAL":
+            processed_record["policy_name"] = None
+            processed_record["time_period_return"] = None
+        if "time_period_return" in processed_record:
+            processed_record["return_days"] = processed_record.pop("time_period_return")
+        if "created_date" in processed_record:
+            processed_record["created_date_ts"] = processed_record.pop("created_date")
+        if "updated_date" in processed_record:
+            processed_record["updated_date_ts"] = processed_record.pop("updated_date")
+        processed_records_for_bulk.append(processed_record)
 
-    csv_policy_id = record_data.get("id") # ID from CSV, if provided (for updates)
-    return_policy_type = record_data.get("return_policy_type")
+    records_with_id_in_csv = [r for r in processed_records_for_bulk if r.get("id") is not None]
+    records_without_id_in_csv = [r for r in processed_records_for_bulk if r.get("id") is None]
 
-    if not return_policy_type: # Mandatory field
-        logger.error(f"Missing 'return_policy_type' in record_data for business {business_details_id}, session {session_id}. Record: {record_data}")
-        return None
-
-    db_pk: Optional[int] = None
-    db_policy: Optional[ReturnPolicyOrm] = None
+    updates_list_of_dicts = []
+    inserts_list_of_dicts = []
 
     try:
-        # Prepare data for ORM, applying conditional logic first
-        policy_data_for_orm = {
-            "policy_name": record_data.get("policy_name"),
-            "return_type": return_policy_type,
-            "return_days": record_data.get("time_period_return"), # Mapped to return_days
-            "business_details_id": business_details_id,
-            # grace_period_return is not directly mapped as ORM has no such field
-        }
-        if record_data.get('created_date') is not None: # Pydantic model makes it datetime
-            policy_data_for_orm['created_date_ts'] = record_data.get('created_date') # Changed key
-        if record_data.get('updated_date') is not None:
-            policy_data_for_orm['updated_date_ts'] = record_data.get('updated_date') # Changed key
+        if records_with_id_in_csv:
+            ids_from_csv = [r['id'] for r in records_with_id_in_csv]
+            existing_policies_by_id_query = db_session.query(ReturnPolicyOrm).filter(
+                ReturnPolicyOrm.business_details_id == business_details_id,
+                ReturnPolicyOrm.id.in_(ids_from_csv)
+            )
+            existing_policies_by_id_map = {p.id: p for p in existing_policies_by_id_query.all()}
 
+            for record in records_with_id_in_csv:
+                csv_id = record['id']
+                if csv_id in existing_policies_by_id_map:
+                    update_data = record.copy()
+                    updates_list_of_dicts.append(update_data)
+                else:
+                    logger.warning(f"Return policy ID '{csv_id}' provided in CSV not found for business {business_details_id}. Will attempt to process as new if name matches or insert.")
+                    records_without_id_in_csv.append(record)
+                    summary["errors"] +=1
 
-        if return_policy_type == "SALES_ARE_FINAL":
-            policy_data_for_orm["policy_name"] = None
-            policy_data_for_orm["return_days"] = None # Changed from time_period_return
-            # grace_period_return is already not in policy_data_for_orm
+        if records_without_id_in_csv:
+            policy_names_to_check = {r['policy_name'] for r in records_without_id_in_csv if r.get('policy_name')}
+            existing_policies_by_name_map = {}
+            if policy_names_to_check:
+                existing_policies_by_name_query = db_session.query(ReturnPolicyOrm).filter(
+                    ReturnPolicyOrm.business_details_id == business_details_id,
+                    ReturnPolicyOrm.policy_name.in_(policy_names_to_check)
+                )
+                existing_policies_by_name_map = {p.policy_name: p for p in existing_policies_by_name_query.all()}
 
-        # Upsert logic
-        if csv_policy_id is not None:
-            db_policy = db_session.query(ReturnPolicyOrm).filter_by(
-                id=csv_policy_id,
-                business_details_id=business_details_id # Ensure it belongs to this business
-            ).first()
+            for record in records_without_id_in_csv:
+                policy_name = record.get("policy_name")
+                existing_policy_by_name = existing_policies_by_name_map.get(policy_name) if policy_name else None
 
-        if db_policy:  # Existing policy, update it
-            logger.info(f"Updating existing return policy ID '{csv_policy_id}' for business {business_details_id}")
-            for key, value in policy_data_for_orm.items():
-                setattr(db_policy, key, value)
-            # db_policy.updated_date = datetime.utcnow() # Handled by onupdate=func.now() in ORM
-            db_pk = db_policy.id
-        else:  # New policy or ID from CSV not found (treat as new)
-            if csv_policy_id is not None:
-                logger.warning(f"Return policy ID '{csv_policy_id}' provided in CSV not found for business {business_details_id}. Creating as new.")
+                is_already_targeted_for_update_by_id = any(u['id'] == record.get('id') for u in updates_list_of_dicts if record.get('id') is not None)
 
-            new_policy_orm = ReturnPolicyOrm(**policy_data_for_orm)
-            db_session.add(new_policy_orm)
-            db_session.flush()
+                if existing_policy_by_name and not is_already_targeted_for_update_by_id:
+                    update_data = record.copy()
+                    update_data['id'] = existing_policy_by_name.id
+                    if not any(u['id'] == update_data['id'] for u in updates_list_of_dicts):
+                        updates_list_of_dicts.append(update_data)
+                elif not is_already_targeted_for_update_by_id :
+                    insert_data = record.copy()
+                    insert_data['business_details_id'] = business_details_id
+                    if 'id' in insert_data: del insert_data['id']
+                    inserts_list_of_dicts.append(insert_data)
 
-            if new_policy_orm.id is None:
-                logger.error(f"Failed to obtain DB ID for new return policy after flush. Name: {policy_data_for_orm.get('policy_name')}")
-                return None
-            db_pk = new_policy_orm.id
-            logger.info(f"Created new return policy with DB ID {db_pk}. Name: {policy_data_for_orm.get('policy_name')}")
+        if updates_list_of_dicts:
+            logger.info(f"Bulk updating {len(updates_list_of_dicts)} return policies for business {business_details_id}.")
+            db_session.bulk_update_mappings(ReturnPolicyOrm, updates_list_of_dicts)
+            summary["updated"] = len(updates_list_of_dicts)
 
-        return db_pk
+        if inserts_list_of_dicts:
+            logger.info(f"Bulk inserting {len(inserts_list_of_dicts)} new return policies for business {business_details_id}.")
+            db_session.bulk_insert_mappings(ReturnPolicyOrm, inserts_list_of_dicts)
+            summary["inserted"] = len(inserts_list_of_dicts)
 
+        return summary
+
+    except IntegrityError as e:
+        logger.error(f"Bulk database integrity error processing return policies for business {business_details_id}: {e.orig}", exc_info=False)
+        raise DataLoaderError(message=f"Bulk database integrity error for return policies: {str(e.orig)}", error_type=ErrorType.DATABASE, original_exception=e)
     except Exception as e:
-        logger.error(f"Error processing return policy record for business {business_details_id}: {record_data} - {e}", exc_info=True)
-        return None
+        logger.error(f"Unexpected error during bulk processing of return policies for business {business_details_id}: {e}", exc_info=True)
+        raise DataLoaderError(message=f"Unexpected error during bulk return policy processing: {str(e)}", error_type=ErrorType.UNEXPECTED_ROW_ERROR, original_exception=e)
 
 def load_price_to_db(
     db_session: Session,
-    business_details_id: int, # Integer business ID from context/token
-    record_data: Dict[str, Any], # This is a dict from PriceCsv model
-    session_id: str, # For logging context
-    db_pk_redis_pipeline: Any # Redis pipeline, not directly used for _db_pk map here
-) -> Optional[int]:
-    """
-    Loads or updates a single price record in the database for a product or SKU.
-    Validates that the target product/SKU exists and belongs to the business.
+    business_details_id: int,
+    records_data: List[Dict[str, Any]],
+    session_id: str,
+    db_pk_redis_pipeline: Any
+) -> Dict[str, Any]: # Returns a summary like {"inserted": count, "updated": count, "error_details": List[ErrorDetailModel]}
+    if not records_data:
+        return {"inserted": 0, "updated": 0, "errors_list": []} # Changed "errors" to "errors_list"
 
-    Args:
-        db_session: SQLAlchemy session.
-        business_details_id: The integer ID for the business.
-        record_data: A dictionary representing a row from the price CSV,
-                     validated by PriceCsv.
-        session_id: The current upload session ID (for logging).
-        db_pk_redis_pipeline: Redis pipeline (not used by this function for _db_pk map).
+    summary = {"inserted": 0, "updated": 0} # errors will be the list of ErrorDetailModel
+    error_details_list: List[ErrorDetailModel] = []
 
-    Returns:
-        The database primary key (integer) of the processed PriceOrm record,
-        or None if processing failed for this record.
-    """
+    product_price_records_data = []
+    sku_price_records_data = []
+
+    # Initial pass to categorize and validate price_type, and ensure target_id presence
+    for i, record in enumerate(records_data):
+        row_num_for_error = i + 2 # Assuming CSV row 2 is the first data row
+        try:
+            price_type_str = record.get("price_type")
+            if not price_type_str:
+                raise ValueError("price_type is missing.")
+            price_type = PriceCsvTypeEnum(price_type_str) # Validate enum value
+
+            if price_type == PriceCsvTypeEnum.PRODUCT:
+                if not record.get("product_id"):
+                    raise ValueError("product_id is required for PRODUCT price type.")
+                product_price_records_data.append(record)
+            elif price_type == PriceCsvTypeEnum.SKU:
+                if not record.get("sku_id"):
+                    raise ValueError("sku_id is required for SKU price type.")
+                sku_price_records_data.append(record)
+        except ValueError as ve:
+            logger.warning(f"Skipping price record (row approx {row_num_for_error}) due to validation error: {ve}. Record: {record}")
+            error_details_list.append(ErrorDetailModel(
+                row_number=row_num_for_error,
+                field_name="price_type" if "price_type" in str(ve).lower() else ("product_id" if "product_id" in str(ve).lower() else "sku_id"),
+                error_message=str(ve),
+                error_type=ErrorType.VALIDATION,
+                offending_value=str(record.get("price_type") or record.get("product_id") or record.get("sku_id"))
+            ))
+            continue
+
+    all_inserts = []
+    all_updates = []
+
     try:
-        # Pydantic model PriceCsv has already done primary validation.
-        # Here we focus on DB interaction and foreign key integrity.
-        price_type_csv_enum = PriceCsvTypeEnum(record_data["price_type"]) # Convert string to Enum
+        # Process Product Prices
+        if product_price_records_data:
+            product_ids_from_csv = {int(r['product_id']) for r in product_price_records_data if r.get('product_id') and r['product_id'].isdigit()}
 
-        target_product_id: Optional[int] = None
-        target_sku_id: Optional[int] = None
-
-        if price_type_csv_enum == PriceCsvTypeEnum.PRODUCT:
-            csv_product_id_str = record_data.get("product_id")
-            if not csv_product_id_str:
-                logger.error(f"Price load: product_id missing for PRODUCT type. Business: {business_details_id}, Data: {record_data}")
-                return None
-            # Assuming product_id from CSV is the DB PK of the product.
-            # Product IDs in ProductOrm are BigInteger.
-            try:
-                # ProductOrm.id is BigInteger, PriceOrm.product_id is BigInteger
-                target_product_id = int(csv_product_id_str)
-            except ValueError:
-                logger.error(f"Price load: Invalid product_id format '{csv_product_id_str}'. Must be integer. Business: {business_details_id}")
-                return None
-
-            # Verify product exists and belongs to this business
-            product_check = db_session.query(ProductOrm.id).filter(
-                ProductOrm.id == target_product_id,
-                ProductOrm.business_details_id == business_details_id # business_details_id is BigInteger
-            ).first()
-            if not product_check:
-                logger.warning(f"Price load: Product ID {target_product_id} not found or not associated with business {business_details_id}.")
-                return None
-
-        elif price_type_csv_enum == PriceCsvTypeEnum.SKU:
-            csv_sku_id_str = record_data.get("sku_id")
-            if not csv_sku_id_str:
-                logger.error(f"Price load: sku_id missing for SKU type. Business: {business_details_id}, Data: {record_data}")
-                return None
-            # SKU IDs in ProductItemOrm are Integer. PriceOrm.sku_id is Integer.
-            try:
-                target_sku_id = int(csv_sku_id_str)
-            except ValueError:
-                logger.error(f"Price load: Invalid sku_id format '{csv_sku_id_str}'. Must be integer. Business: {business_details_id}")
-                return None
-
-            # Verify SKU exists and belongs to this business
-            sku_check = db_session.query(ProductItemOrm.id).filter(
-                ProductItemOrm.id == target_sku_id,
-                ProductItemOrm.business_details_id == business_details_id # business_details_id is BigInteger
-            ).first()
-            if not sku_check:
-                logger.warning(f"Price load: SKU ID {target_sku_id} not found or not associated with business {business_details_id}.")
-                return None
-        else:
-            # This case should ideally be caught by Pydantic validation if PriceTypeEnum was used there.
-            logger.error(f"Price load: Unknown price_type '{record_data['price_type']}'. Business: {business_details_id}")
-            return None
-
-        # Upsert logic for PriceOrm
-        existing_price_query = db_session.query(PriceOrm).filter(
-            PriceOrm.business_details_id == business_details_id
-        )
-        if target_product_id:
-            existing_price_query = existing_price_query.filter(PriceOrm.product_id == target_product_id)
-        elif target_sku_id:
-            existing_price_query = existing_price_query.filter(PriceOrm.sku_id == target_sku_id)
-
-        existing_price: Optional[PriceOrm] = existing_price_query.first()
-
-        price_orm_instance: PriceOrm
-        if existing_price:
-            logger.info(f"Updating price for business {business_details_id}, {'product ' + str(target_product_id) if target_product_id else 'SKU ' + str(target_sku_id)}")
-            existing_price.price = record_data["price"]
-            existing_price.discount_price = record_data.get("discount_price")
-            existing_price.cost_price = record_data.get("cost_price")
-            existing_price.currency = record_data.get("currency", "USD") # Default if not provided
-            # updated_at is handled by ORM default onupdate
-            price_orm_instance = existing_price
-        else:
-            logger.info(f"Creating new price for business {business_details_id}, {'product ' + str(target_product_id) if target_product_id else 'SKU ' + str(target_sku_id)}")
-            new_price_data = {
-                "business_details_id": business_details_id,
-                "product_id": target_product_id,
-                "sku_id": target_sku_id,
-                "price": record_data["price"],
-                "discount_price": record_data.get("discount_price"),
-                "cost_price": record_data.get("cost_price"),
-                "currency": record_data.get("currency", "USD"),
-                # created_at and updated_at handled by ORM server_default
+            valid_db_product_ids = {
+                pid[0] for pid in db_session.query(ProductOrm.id).filter(
+                    ProductOrm.business_details_id == business_details_id,
+                    ProductOrm.id.in_(product_ids_from_csv)
+                ).all()
             }
-            price_orm_instance = PriceOrm(**new_price_data)
-            db_session.add(price_orm_instance)
 
-        db_session.flush() # To get ID if new, or ensure instance is tracked for commit.
-        if price_orm_instance.id is None:
-             logger.error(f"Failed to obtain DB ID for price record after flush. Data: {record_data}")
-             raise Exception("DB flush failed to return an ID for price record.")
+            existing_prices_for_products_map = {
+                p.product_id: p for p in db_session.query(PriceOrm).filter(
+                    PriceOrm.business_details_id == business_details_id,
+                    PriceOrm.product_id.in_(valid_db_product_ids)
+                ).all()
+            }
 
-        return price_orm_instance.id
+            for i, record in enumerate(product_price_records_data): # Use original index for row number if needed
+                row_num_for_error = records_data.index(record) + 2 if record in records_data else None # Approx row num
+                try:
+                    product_id_str = record['product_id']
+                    product_id = int(product_id_str)
+                    if product_id not in valid_db_product_ids:
+                        msg = f"Product ID {product_id} not found or not associated with business {business_details_id}."
+                        logger.warning(f"{msg} Skipping price record: {record}")
+                        error_details_list.append(ErrorDetailModel(row_number=row_num_for_error, field_name="product_id", error_message=msg, error_type=ErrorType.LOOKUP, offending_value=product_id_str))
+                        continue
 
-    except ValueError as ve: # Catch specific value errors e.g. from ID conversion
-        logger.error(f"Value error processing price record for business {business_details_id}: {record_data} - {ve}", exc_info=True)
-        return None
+                    orm_data = {
+                        "business_details_id": business_details_id, "product_id": product_id, "sku_id": None,
+                        "price": record["price"], "discount_price": record.get("discount_price"),
+                        "cost_price": record.get("cost_price"), "currency": record.get("currency", "USD"),
+                    }
+                    existing_price = existing_prices_for_products_map.get(product_id)
+                    if existing_price:
+                        orm_data['id'] = existing_price.id
+                        all_updates.append(orm_data)
+                    else:
+                        all_inserts.append(orm_data)
+                except ValueError:
+                    msg = f"Invalid product_id format '{record.get('product_id')}' in record."
+                    logger.warning(f"{msg} Skipping: {record}")
+                    error_details_list.append(ErrorDetailModel(row_number=row_num_for_error, field_name="product_id", error_message=msg, error_type=ErrorType.VALIDATION, offending_value=record.get('product_id')))
+
+
+        # Process SKU Prices
+        if sku_price_records_data:
+            sku_ids_from_csv = {int(r['sku_id']) for r in sku_price_records_data if r.get('sku_id') and r['sku_id'].isdigit()}
+            valid_db_sku_ids = {
+                sid[0] for sid in db_session.query(ProductItemOrm.id).filter(
+                    ProductItemOrm.business_details_id == business_details_id,
+                    ProductItemOrm.id.in_(sku_ids_from_csv)
+                ).all()
+            }
+            existing_prices_for_skus_map = {
+                p.sku_id: p for p in db_session.query(PriceOrm).filter(
+                    PriceOrm.business_details_id == business_details_id,
+                    PriceOrm.sku_id.in_(valid_db_sku_ids)
+                ).all()
+            }
+            for i, record in enumerate(sku_price_records_data):
+                row_num_for_error = records_data.index(record) + 2 if record in records_data else None
+                try:
+                    sku_id_str = record['sku_id']
+                    sku_id = int(sku_id_str)
+                    if sku_id not in valid_db_sku_ids:
+                        msg = f"SKU ID {sku_id} not found or not associated with business {business_details_id}."
+                        logger.warning(f"{msg} Skipping price record: {record}")
+                        error_details_list.append(ErrorDetailModel(row_number=row_num_for_error, field_name="sku_id", error_message=msg, error_type=ErrorType.LOOKUP, offending_value=sku_id_str))
+                        continue
+
+                    orm_data = {
+                        "business_details_id": business_details_id, "product_id": None, "sku_id": sku_id,
+                        "price": record["price"], "discount_price": record.get("discount_price"),
+                        "cost_price": record.get("cost_price"), "currency": record.get("currency", "USD"),
+                    }
+                    existing_price = existing_prices_for_skus_map.get(sku_id)
+                    if existing_price:
+                        orm_data['id'] = existing_price.id
+                        all_updates.append(orm_data)
+                    else:
+                        all_inserts.append(orm_data)
+                except ValueError:
+                    msg = f"Invalid sku_id format '{record.get('sku_id')}' in record."
+                    logger.warning(f"{msg} Skipping: {record}")
+                    error_details_list.append(ErrorDetailModel(row_number=row_num_for_error, field_name="sku_id", error_message=msg, error_type=ErrorType.VALIDATION, offending_value=record.get('sku_id')))
+
+        if all_updates:
+            logger.info(f"Bulk updating {len(all_updates)} prices for business {business_details_id}.")
+            db_session.bulk_update_mappings(PriceOrm, all_updates)
+            summary["updated"] = len(all_updates)
+
+        if all_inserts:
+            logger.info(f"Bulk inserting {len(all_inserts)} new prices for business {business_details_id}.")
+            db_session.bulk_insert_mappings(PriceOrm, all_inserts)
+            summary["inserted"] = len(all_inserts)
+
+        summary["errors_list"] = error_details_list # Attach collected pre-check errors
+        return summary
+
+    except IntegrityError as e:
+        logger.error(f"Bulk database integrity error processing prices for business {business_details_id}: {e.orig}", exc_info=False)
+        # This error applies to the batch; specific row is hard to determine from bulk error.
+        # Add the collected pre-check errors to the exception if any.
+        raise DataLoaderError(message=f"Bulk database integrity error for prices: {str(e.orig)}", error_type=ErrorType.DATABASE, original_exception=e) # errors_list can be passed to process_csv_task to merge
     except Exception as e:
-        logger.error(f"Generic error processing price record for business {business_details_id}: {record_data} - {e}", exc_info=True)
-        # Do not rollback here; let the calling task manage the transaction.
-        return None
-
-# ... other loader functions for products, attributes, etc. ...
+        logger.error(f"Unexpected error during bulk processing of prices for business {business_details_id}: {e}", exc_info=True)
+        raise DataLoaderError(message=f"Unexpected error during bulk price processing: {str(e)}", error_type=ErrorType.UNEXPECTED_ROW_ERROR, original_exception=e)

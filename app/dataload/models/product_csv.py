@@ -44,6 +44,7 @@ class ProductCsvModel(BaseModel):
 
     url: Optional[str] = None # Will be auto-generated if None, or validated
     video_url: Optional[str] = None
+    video_thumbnail_url: Optional[str] = None # New field for video thumbnail
 
     images: Optional[str] = None # Pipe-separated: "url1|main_image:true", "url2|main_image:false"
     specifications: Optional[str] = None # Pipe-separated: "SpecName1:Value1|SpecName2:Value2"
@@ -149,6 +150,10 @@ class ProductCsvModel(BaseModel):
             for pair in pairs:
                 if ':' not in pair or len(pair.split(':', 1)) != 2 or not pair.split(':', 1)[0] or not pair.split(':', 1)[1]:
                     raise ValueError(f"Specification entry '{pair}' must be in 'Name:Value' format and both Name and Value must be non-empty.")
+
+        # New validation: If video_url is provided, video_thumbnail_url must also be provided.
+        if self.video_url and not self.video_thumbnail_url:
+            raise ValueError("If 'video_url' is provided, 'video_thumbnail_url' must also be provided.")
 
         return self
 

@@ -187,12 +187,114 @@ def test_parse_specifications_empty_name_or_value():
          ProductCsvModel(**get_valid_product_data(specifications="Name:|Name2:Value2"))
 
 
-# --- Integration Tests for load_product_record_to_db ---
-# These tests will require database setup and fixtures for related entities.
-# For now, I'll outline the structure and necessary setup.
+# --- Unit Tests for load_product_record_to_db ---
 
+@pytest.fixture
+def mock_product_csv_model_data(request):
+    # Allows overriding parts of get_valid_product_data for different test cases
+    # Example: @pytest.mark.parametrize("mock_product_csv_model_data", [{"brand_name": "NonExistent"}], indirect=True)
+    overrides = {}
+    if hasattr(request, "param"):
+        overrides = request.param
+
+    valid_data = get_valid_product_data(**overrides)
+    # Ensure business_details_id is present as ProductCsvModel expects it,
+    # even if it's usually injected by the task in real flow.
+    # The loader itself receives it as a separate arg, but model might be created with it.
+    if 'business_details_id' not in valid_data: # Should be in get_valid_product_data
+        valid_data['business_details_id'] = 10 # Default if not in get_valid_product_data
+
+    return ProductCsvModel(**valid_data)
+
+
+def test_load_product_brand_lookup_fails(mock_db_session, mock_product_csv_model_data):
+    mock_db_session.query(BrandOrm).filter().one_or_none.return_value = None # Simulate brand not found
+
+    with pytest.raises(DataLoaderError) as excinfo:
+        load_product_record_to_db(mock_db_session, 10, mock_product_csv_model_data, "test_session_brand_fail")
+
+    assert excinfo.value.error_type == ErrorType.LOOKUP
+    assert excinfo.value.field_name == "brand_name"
+    assert excinfo.value.offending_value == mock_product_csv_model_data.brand_name
+    assert f"Brand '{mock_product_csv_model_data.brand_name}' not found" in excinfo.value.message
+
+def test_load_product_category_lookup_fails(mock_db_session, mock_product_csv_model_data):
+    # Setup successful brand lookup
+    mock_db_session.query(BrandOrm).filter().one_or_none.return_value = MagicMock(spec=BrandOrm)
+    # Simulate category not found
+    mock_db_session.query(CategoryOrm).filter().one_or_none.return_value = None
+
+    with pytest.raises(DataLoaderError) as excinfo:
+        load_product_record_to_db(mock_db_session, 10, mock_product_csv_model_data, "test_session_cat_fail")
+
+    assert excinfo.value.error_type == ErrorType.LOOKUP
+    assert excinfo.value.field_name == "category_id"
+    assert excinfo.value.offending_value == mock_product_csv_model_data.category_id
+    assert f"Category with id '{mock_product_csv_model_data.category_id}' not found" in excinfo.value.message
+
+def test_load_product_return_policy_lookup_fails(mock_db_session, mock_product_csv_model_data):
+    mock_db_session.query(BrandOrm).filter().one_or_none.return_value = MagicMock(spec=BrandOrm)
+    mock_db_session.query(CategoryOrm).filter().one_or_none.return_value = MagicMock(spec=CategoryOrm)
+    if mock_product_csv_model_data.shopping_category_name: # If shopping category is part of test data
+        mock_db_session.query(ShoppingCategoryOrm).filter().one_or_none.return_value = MagicMock(spec=ShoppingCategoryOrm)
+
+    # Simulate return policy not found
+    mock_db_session.query(ReturnPolicyOrm).filter().one_or_none.return_value = None
+
+    with pytest.raises(DataLoaderError) as excinfo:
+        load_product_record_to_db(mock_db_session, 10, mock_product_csv_model_data, "test_session_rp_fail")
+
+    assert excinfo.value.error_type == ErrorType.LOOKUP
+    assert excinfo.value.field_name == "return_type" # As per current loader logic
+    assert "No matching ReturnPolicy found" in excinfo.value.message
+
+def test_load_product_new_id_flush_fails(mock_db_session, mock_product_csv_model_data):
+    mock_db_session.query(BrandOrm).filter().one_or_none.return_value = MagicMock(spec=BrandOrm)
+    mock_db_session.query(CategoryOrm).filter().one_or_none.return_value = MagicMock(spec=CategoryOrm)
+    if mock_product_csv_model_data.shopping_category_name:
+        mock_db_session.query(ShoppingCategoryOrm).filter().one_or_none.return_value = MagicMock(spec=ShoppingCategoryOrm)
+    mock_db_session.query(ReturnPolicyOrm).filter().one_or_none.return_value = MagicMock(spec=ReturnPolicyOrm)
+
+    # Simulate creating a new product (product_orm_instance is None initially)
+    mock_db_session.query(ProductOrm).filter().one_or_none.return_value = None
+
+    # Simulate flush not setting an ID
+    def mock_add_and_flush(instance):
+        if isinstance(instance, ProductOrm):
+            instance.id = None # Simulate ID not being set by flush
+    mock_db_session.add.side_effect = mock_add_and_flush
+    # No need to mock flush itself to raise error, just check if id is None after
+
+    with pytest.raises(DataLoaderError) as excinfo:
+        load_product_record_to_db(mock_db_session, 10, mock_product_csv_model_data, "test_session_flush_fail")
+
+    assert excinfo.value.error_type == ErrorType.DATABASE
+    assert excinfo.value.field_name == "self_gen_product_id"
+    assert "DB flush failed to return an ID" in excinfo.value.message
+
+def test_load_product_integrity_error_on_save(mock_db_session, mock_product_csv_model_data):
+    mock_db_session.query(BrandOrm).filter().one_or_none.return_value = MagicMock(spec=BrandOrm)
+    # ... other successful lookups ...
+    mock_db_session.query(CategoryOrm).filter().one_or_none.return_value = MagicMock(spec=CategoryOrm)
+    mock_db_session.query(ReturnPolicyOrm).filter().one_or_none.return_value = MagicMock(spec=ReturnPolicyOrm)
+
+    mock_db_session.query(ProductOrm).filter().one_or_none.return_value = None # New product
+
+    # Simulate IntegrityError on flush (could happen after add or during spec/image adds if complex)
+    mock_db_session.flush.side_effect = IntegrityError("mock integrity error", params={}, orig=Exception("DB constraint violation"))
+
+    with pytest.raises(DataLoaderError) as excinfo:
+        load_product_record_to_db(mock_db_session, 10, mock_product_csv_model_data, "test_session_integrity_err")
+
+    assert excinfo.value.error_type == ErrorType.DATABASE
+    assert "Database integrity error" in excinfo.value.message
+    assert "DB constraint violation" in excinfo.value.message # Check original error
+    assert excinfo.value.field_name == "product_record_integrity_constraint"
+
+
+# Placeholder for existing integration tests if any, or to be fully developed with DB interaction
 # @pytest.fixture(scope="function")
-# def setup_lookups(db_session: Session):
+# def setup_lookups(db_session: Session): # This would be a real DB session
 #     # Create BrandOrm("AlphaBrand", business_details_id=10) -> brand_id_1
 #     # Create CategoryOrm(id=101, name="Test Category", business_details_id=10)
 #     # Create ShoppingCategoryOrm(name="ElectronicsTest") -> sc_id_1

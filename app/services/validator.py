@@ -4,18 +4,20 @@ from app.models.schemas import (
     ProductItemModel, ProductPriceModel, MetaTagModel
     # Assuming AttributeModel was meant to be AttributeCsvModel, and ReturnPolicyModel to be ReturnPolicyCsvModel
 )
+from app.dataload.models.product_csv import ProductCsvModel # Import the correct ProductCsvModel
 from pydantic import ValidationError
-from app.utils.redis_utils import get_from_id_map # Corrected import path to redis_utils
+from app.utils.redis_utils import get_from_id_map
 from collections import defaultdict
 
 MODEL_MAP = {
     "brands": BrandCsvModel,
     "attributes": AttributeCsvModel,
     "return_policies": ReturnPolicyCsvModel,
-    "products": ProductModel,
+    # "products": ProductModel, # Old, less detailed model
     "product_items": ProductItemModel,
     "product_prices": ProductPriceModel,
-    "meta_tags": MetaTagModel
+    "meta_tags": MetaTagModel,
+    "products": ProductCsvModel # Added correct model for products load_type
 }
 
 def validate_csv(load_type, records):
@@ -87,61 +89,108 @@ def check_referential_integrity(
 
 
 def validate_csv(load_type, records, session_id: str = None, record_key: str = None, referenced_entity_map: dict = None):
-    model_errors = []
-    file_uniqueness_errors = []
-    referential_integrity_errors = []
-    valid_rows = []
+from app.models.schemas import ErrorDetailModel, ErrorType # Import standardized error model
+from typing import List, Tuple # For type hinting
 
-    model = MODEL_MAP.get(load_type)
-    if not model:
-        return [{"error": f"Unsupported load type: {load_type}"}], []
+def validate_csv(
+    load_type: str,
+    records: List[Dict],
+    session_id: Optional[str] = None,
+    record_key: Optional[str] = None,
+    referenced_entity_map: Optional[Dict[str, str]] = None
+) -> Tuple[List[ErrorDetailModel], List[Dict]]:
 
-    # 1. Pydantic model validation
-    for i, row in enumerate(records):
+    all_error_details: List[ErrorDetailModel] = []
+    valid_rows_data: List[Dict] = [] # Will store dicts of Pydantic model validated data
+
+    model_class = MODEL_MAP.get(load_type)
+    if not model_class:
+        all_error_details.append(ErrorDetailModel(
+            error_message=f"Unsupported load type: {load_type}",
+            error_type=ErrorType.CONFIGURATION
+        ))
+        return all_error_details, []
+
+    # 1. Pydantic model validation for each row
+    temp_valid_for_further_checks = [] # Store records that pass Pydantic validation for subsequent checks
+
+    for i, row_data in enumerate(records):
+        row_num = i + 2 # CSV rows are often 1-indexed, plus header
         try:
-            validated_model = model(**row)
-            valid_rows.append(validated_model.dict())
+            # Add business_details_id if it's expected by the model but not in CSV row directly
+            # This is more relevant for ProductCsvModel if it's not passed from task.
+            # For now, assume row_data is complete or models handle missing optional fields.
+            # if load_type == "products" and 'business_details_id' not in row_data and business_id_for_session:
+            #     row_data_with_biz = {**row_data, 'business_details_id': business_id_for_session}
+            #     validated_model = model_class(**row_data_with_biz)
+            # else:
+            validated_model = model_class(**row_data)
+            temp_valid_for_further_checks.append({"row_number": row_num, "data": validated_model.model_dump()})
+            # valid_rows_data.append(validated_model.model_dump()) # Add to final valid list only if ALL checks pass for this row
         except ValidationError as e:
             for err in e.errors():
-                model_errors.append({
-                    "row": i + 1,
-                    "field": ".".join(str(f) for f in err['loc']),
-                    "error": err['msg']
-                })
+                all_error_details.append(ErrorDetailModel(
+                    row_number=row_num,
+                    field_name=".".join(str(f) for f in err['loc']) if err['loc'] else None,
+                    error_message=err['msg'],
+                    error_type=ErrorType.VALIDATION,
+                    offending_value=str(err.get('input', 'N/A'))[:255] # Truncate offending value
+                ))
+        except Exception as ex: # Catch any other unexpected error during model instantiation
+            all_error_details.append(ErrorDetailModel(
+                row_number=row_num,
+                error_message=f"Unexpected error validating row: {str(ex)}",
+                error_type=ErrorType.UNEXPECTED_ROW_ERROR
+            ))
 
-    # If Pydantic validation fails for some rows, we might not want to proceed with other checks for those rows,
-    # or we might want to only perform further checks on valid_rows.
-    # For now, let's assume further checks are performed on all original records if the model itself is valid.
-    # If valid_rows is empty and records is not, it means all rows failed Pydantic validation.
 
-    if not model_errors: # Proceed to other validations only if basic model validation passes for all rows
-        # 2. File-level uniqueness check (only on the original records that passed Pydantic validation if needed)
-        # For simplicity, checking on all records for now.
-        if record_key:
-            file_uniqueness_errors = check_file_uniqueness(records, record_key)
+    # If there were Pydantic errors, we might stop or only process fully valid rows.
+    # For now, subsequent checks (uniqueness, referential) will run on records that passed Pydantic validation.
+    # If a row failed Pydantic validation, it's already in all_error_details.
 
-        # 3. Referential integrity check
-        if session_id and referenced_entity_map:
-            for field_to_check, referenced_entity_type in referenced_entity_map.items():
-                referential_integrity_errors.extend(
-                    check_referential_integrity(records, field_to_check, referenced_entity_type, session_id)
-                )
+    # Create a list of just the data from Pydantic-valid records for further checks
+    pydantic_valid_data_list = [item["data"] for item in temp_valid_for_further_checks]
+    pydantic_valid_row_map = {idx: item for idx, item in enumerate(temp_valid_for_further_checks)}
 
-    all_errors = model_errors + file_uniqueness_errors + referential_integrity_errors
 
-    # If there were model errors, valid_rows might not contain all original records.
-    # The caller needs to be aware of this. If model_errors exist, valid_rows contains only Pydantic-valid rows.
-    # If no model_errors, valid_rows contains all rows.
-    # For consistency, if there are *any* errors, perhaps valid_rows should be considered empty or only truly valid ones.
-    # Let's adjust: if any error occurs, the valid_rows for those error cases are implicitly not valid.
-    # The current valid_rows only contains rows that passed pydantic validation.
-    # If other errors occur, those rows are also invalid.
+    # 2. File-level uniqueness check (on Pydantic-valid data)
+    if record_key and pydantic_valid_data_list:
+        uniqueness_errors_raw = check_file_uniqueness(pydantic_valid_data_list, record_key)
+        for err_dict in uniqueness_errors_raw:
+            # map internal row indices back to original CSV row numbers
+            original_rows_for_error = [pydantic_valid_row_map[internal_idx-1]["row_number"] for internal_idx in err_dict.get("rows", [])]
+            all_error_details.append(ErrorDetailModel(
+                # Uniqueness error applies to multiple rows, hard to assign one row_number.
+                # Could list all offending rows in message.
+                row_number=original_rows_for_error[0] if original_rows_for_error else None, # Report first row
+                field_name=err_dict.get("field"),
+                error_message=f"Duplicate key '{err_dict.get('key')}' found in file for field '{err_dict.get('field')}'. Offending CSV rows: {original_rows_for_error}",
+                error_type=ErrorType.VALIDATION,
+                offending_value=str(err_dict.get("key"))[:255]
+            ))
 
-    if all_errors:
-        # If there are any errors, we should clarify which rows are considered "valid"
-        # For now, let's return all Pydantic-valid rows, and the caller can decide based on errors.
-        # Or, more strictly, if any error, no rows are "valid" for processing.
-        # Let's stick to returning Pydantic-valid rows for now and let the caller handle it.
-        pass
+    # 3. Referential integrity check (on Pydantic-valid data)
+    if session_id and referenced_entity_map and pydantic_valid_data_list:
+        for field_to_check, referenced_entity_type in referenced_entity_map.items():
+            ref_errors_raw = check_referential_integrity(pydantic_valid_data_list, field_to_check, referenced_entity_type, session_id)
+            for err_dict in ref_errors_raw:
+                 # map internal row index back to original CSV row number
+                original_row_num_for_error = pydantic_valid_row_map[err_dict.get("row", 1)-1]["row_number"] # err_dict["row"] is 1-based for pydantic_valid_data_list
+                all_error_details.append(ErrorDetailModel(
+                    row_number=original_row_num_for_error,
+                    field_name=err_dict.get("field"),
+                    error_message=f"Referenced '{referenced_entity_type}' with value '{err_dict.get('value')}' not found (from field '{err_dict.get('field')}').",
+                    error_type=ErrorType.LOOKUP,
+                    offending_value=str(err_dict.get("value"))[:255]
+                ))
 
-    return all_errors, valid_rows
+    # Determine final valid_rows_data: only include rows that did not appear in any error
+    if all_error_details:
+        errored_row_numbers = {err.row_number for err in all_error_details if err.row_number is not None}
+        for item in temp_valid_for_further_checks:
+            if item["row_number"] not in errored_row_numbers:
+                valid_rows_data.append(item["data"])
+    else: # No errors at all
+        valid_rows_data = pydantic_valid_data_list
+
+    return all_error_details, valid_rows_data

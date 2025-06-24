@@ -132,6 +132,9 @@ Do **not** deploy `.env` files to these environments. The `.env.example` file ca
 
     Once both the FastAPI server and Celery worker are running, you can access the GraphQL API (e.g., via the GraphiQL interface at `/graphql`).
 
+    **Celery Task Reliability**:
+    The Celery tasks responsible for processing CSV files are configured to automatically retry on common transient errors. This includes temporary unavailability of the database, object storage (Wasabi), or Redis. Tasks will attempt up to 3 retries with a 60-second delay between attempts by default. If a task fails after all retries, or encounters a non-retryable error (like a data validation issue), it will be marked as failed, and the upload session status will be updated accordingly.
+
 ## CSV Upload Formats
 
 This section describes the expected CSV formats for different `load_type` values used with the `uploadFile` mutation.
@@ -273,6 +276,7 @@ This CSV format is used to upload core product information, including links to c
 *   `return_fee` (Optional, Float): The fee amount or percentage, corresponding to `return_fee_type`. Required and must be non-negative if `return_fee_type` is "FIXED" or "PERCENTAGE". Ignored and set to 0 if `return_fee_type` is "FREE". Must be empty/null if `return_type` is "SALES_ARE_FINAL".
 *   `url` (Optional, String): A custom URL slug for the product (e.g., "my-product-slug"). If not provided, a slug is auto-generated from `product_name`. Must be lowercase, alphanumeric with hyphens.
 *   `video_url` (Optional, String): URL to a product video.
+*   `video_thumbnail_url` (Optional, String): URL to a thumbnail image for the product video. **If `video_url` is provided, this field becomes mandatory.** If `video_thumbnail_url` is provided, it will be used for the product's main thumbnail. If `video_url` is provided but `video_thumbnail_url` is missing, the row will fail validation. If `video_url` is empty, and `video_thumbnail_url` is also empty, the product's main image (from the `images` column, if available) will be used as the thumbnail.
 *   `images` (Optional, String): Pipe-separated list of image URLs and their main image status. Format: `url1|main_image:true/false|url2|main_image:true/false|...`. Example: `https://cdn.com/img1.jpg|main_image:true|https://cdn.com/img2.jpg|main_image:false`. Images are processed only if `is_child_item` is 0.
 *   `specifications` (Optional, String): Pipe-separated list of product specifications. Format: `Name1:Value1|Name2:Value2|...`. Example: `Color:Red|Material:Steel`.
 *   `is_child_item` (Mandatory, Integer): Flag indicating if this is a parent product (1) with variants (items/SKUs to be loaded separately) or a standalone/non-variant product (0). If 0, `images` from this CSV are associated with this product. If 1, product-level images from this CSV are ignored (item-level images are expected in an items/SKUs dataload).
@@ -344,10 +348,34 @@ query GetMyBusinessUploads {
     updatedAt
     recordCount
     errorCount
-    details
+    details # Can be a JSON string of error details if processing failed or had errors.
   }
 }
 ```
+
+**Interpreting Upload Session Status and Details:**
+
+The `status` field of an `UploadSessionType` will reflect the current stage of the CSV processing. It can take values such as:
+*   `pending`: Initial state after upload.
+*   `downloading_file`: Celery worker is fetching the file.
+*   `validating_schema`: Initial row-by-row validation.
+*   `db_processing_started`: Saving data to the database has begun.
+*   `cleaning_up`: Post-processing cleanup.
+*   `completed`: Successful processing.
+*   `completed_with_errors`: Processed, but some rows had issues.
+*   `failed_validation`: CSV data validation failed.
+*   `failed_db_processing`: Errors during database operations.
+*   `failed_unhandled_exception`: Unexpected error in the task.
+(See `app.models.enums.UploadJobStatus` for a full list of possible statuses).
+
+If the `status` indicates errors (e.g., `completed_with_errors`, `failed_validation`), the `details` field will typically contain a JSON string. This JSON string is an array of error objects, each with the following structure (defined by `ErrorDetailModel` in `app/models/schemas.py`):
+*   `row_number` (Optional[int]): The CSV row number where the error occurred (2-indexed, assuming a header row).
+*   `field_name` (Optional[str]): The specific field related to the error.
+*   `error_message` (str): A description of the error.
+*   `error_type` (str): The category of the error (e.g., "VALIDATION", "DATABASE", "LOOKUP"). See `ErrorType` enum in `app/models/schemas.py`.
+*   `offending_value` (Optional[str]): The value that caused the error (may be truncated).
+
+Frontend applications should parse this JSON string from the `details` field to display user-friendly error information.
 
 ### Mutations
 
