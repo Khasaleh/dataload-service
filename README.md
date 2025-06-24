@@ -132,6 +132,9 @@ Do **not** deploy `.env` files to these environments. The `.env.example` file ca
 
     Once both the FastAPI server and Celery worker are running, you can access the GraphQL API (e.g., via the GraphiQL interface at `/graphql`).
 
+    **Celery Task Reliability**:
+    The Celery tasks responsible for processing CSV files are configured to automatically retry on common transient errors. This includes temporary unavailability of the database, object storage (Wasabi), or Redis. Tasks will attempt up to 3 retries with a 60-second delay between attempts by default. If a task fails after all retries, or encounters a non-retryable error (like a data validation issue), it will be marked as failed, and the upload session status will be updated accordingly.
+
 ## CSV Upload Formats
 
 This section describes the expected CSV formats for different `load_type` values used with the `uploadFile` mutation.
