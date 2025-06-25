@@ -1,7 +1,7 @@
 from csv_parser import load_skus_from_csv
 from validator import validate_sku_list
-from sku_processor import process_skus, ProcessedSKUData # Ensure ProcessedSKUData is imported if not already
-from data_models import SKU # For type hinting if needed
+from sku_processor import process_skus, ProcessedSKUData
+from data_models import SKU  # For type hinting if needed
 
 def run_sku_processing_pipeline(csv_file_path: str) -> ProcessedSKUData:
     """
@@ -25,7 +25,7 @@ def run_sku_processing_pipeline(csv_file_path: str) -> ProcessedSKUData:
     print("--- Initial Parsing Errors (if any) ---")
     found_parsing_errors = False
     for sku in raw_skus:
-        if sku.product_name and sku.errors: # Only print if there's a product name to identify the row somewhat
+        if sku.product_name and sku.errors:  # Only print if there's a product name to identify the row somewhat
             print(f"Row ~{sku.original_row_index} (Product: {sku.product_name}): Errors: {sku.errors}")
             found_parsing_errors = True
     if not found_parsing_errors:
@@ -44,11 +44,11 @@ def run_sku_processing_pipeline(csv_file_path: str) -> ProcessedSKUData:
         # Display errors if any were added *during validation* or if they existed before
         # This will show cumulative errors.
         if sku.product_name and sku.errors:
-             # To avoid re-printing parsing errors if we only want to show new validation errors,
-             # one would need to compare error lists before and after.
-             # For now, show all errors on items that have any.
+            # To avoid re-printing parsing errors if we only want to show new validation errors,
+            # one would need to compare error lists before and after.
+            # For now, show all errors on items that have any.
             print(f"Row ~{sku.original_row_index} (Product: {sku.product_name}): Final Errors: {sku.errors}")
-            skus_with_validation_errors_count +=1
+            skus_with_validation_errors_count += 1
 
     if skus_with_validation_errors_count == 0:
         print("No SKUs found with errors after validation.")
@@ -84,7 +84,7 @@ def print_processing_results(processed_data: ProcessedSKUData):
 
     print(f"\nChild SKUs Created: {len(processed_data.child_skus)}")
     for i, cs in enumerate(processed_data.child_skus):
-        if i < 5 or i > len(processed_data.child_skus) - 3: # Print first 5 and last 2 if many
+        if i < 5 or i > len(processed_data.child_skus) - 3:  # Print first 5 and last 2 if many
             print(f"  ChildSKU ID: {cs.child_sku_identifier} (Source Row: {cs.original_row_index})")
             print(f"    Main SKU Link: {cs.main_sku_identifier}, Is Default in Group: {cs.is_default_in_group}")
             print(f"    Price: {cs.price}, Qty: {cs.quantity}, Status: {cs.status}, Published: {cs.published}")
@@ -103,10 +103,10 @@ def print_processing_results(processed_data: ProcessedSKUData):
 
     print(f"\nProduct Variant Attributes Created: {len(processed_data.product_variant_attributes)}")
     for i, pva in enumerate(processed_data.product_variant_attributes):
-        if i < 5 or i > len(processed_data.product_variant_attributes) - 3: # Print first 5 and last 2 if many
+        if i < 5 or i > len(processed_data.product_variant_attributes) - 3:  # Print first 5 and last 2 if many
             print(f"  Variant Attr ID: {pva.variant_attribute_id} (Source SKU Row: {pva.original_row_index_of_source_sku})")
             print(f"    Child SKU Link: {pva.child_sku_identifier}, Attribute: {pva.attribute_name}={pva.attribute_value}")
-        elif i == 5: # Add ellipsis if there are many items
+        elif i == 5:  # Add ellipsis if there are many items
             print(f"    ... (omitting {len(processed_data.product_variant_attributes) - 7} variant attributes for brevity) ...")
 
     print("\n--- End of Processing Results ---")
@@ -126,25 +126,19 @@ if __name__ == "__main__":
         csv_to_process = 'validation_test_product_items.csv'
     except FileNotFoundError:
         print("'validation_test_product_items.csv' not found. Trying 'test_product_items.csv'.")
-        # test_product_items.csv was also removed from csv_parser.py, so it likely won't be found.
-        # We will rely on creating the dummy CSV here.
         try:
-            with open('test_product_items.csv', 'r') as f: # This check might be redundant now
+            with open('test_product_items.csv', 'r') as f:
                 pass
-            print("Using existing 'test_product_items.csv'") # Unlikely to hit this path
+            print("Using existing 'test_product_items.csv'")
             csv_to_process = 'test_product_items.csv'
         except FileNotFoundError:
             print("'test_product_items.csv' also not found. Creating a dummy CSV for main.py demonstration.")
-            # Corrected number of commas for empty optional fields before 'images'
-            # Added a '1' to order_limit for "Demo Product A" (row 2) for testing image parsing.
             dummy_csv_for_main = """product_name,business_details_id,main_attribute,attribute_combination,is_default_sku,price,discount_price,quantity,status,published,order_limit,package_size_length,package_size_width,package_size_height,package_weight,images
 Demo Product A,101,Color,Red,True,50,45,10,ACTIVE,Published,1,,,,https://cdn.example.com/red.jpg|main_image:true
 Demo Product A,101,Color,Blue,False,50,,5,ACTIVE,Published,,,,,https://cdn.example.com/blue.jpg|main_image:true
 Demo Product B,102,Size,Large,True,100,90,20,INACTIVE,Unpublished,1,,,,,https://cdn.example.com/large.jpg|main_image:true|https://cdn.example.com/large_detail.jpg|main_image:false
 Demo Product C (Error),103,Flavor,Vanilla,True,invalid_price,,10,ACTIVE,Published,,,,,https://cdn.example.com/vanilla.jpg|main_image:true
 """
-            # order_limit, package_size_length, package_size_width, package_size_height, package_weight (5 fields)
-            # So 5 commas if all are empty.
             csv_to_process = 'main_dummy_product_items.csv'
             with open(csv_to_process, 'w', newline='', encoding='utf-8') as f:
                 f.write(dummy_csv_for_main)
