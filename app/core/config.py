@@ -138,6 +138,6 @@ if settings.ENVIRONMENT == "development":
         else:
             print(f"{key}: {value}")
     print("--- End Application Settings ---")
-    print(f"Computed DB URL: {settings.computed_database_url}")
-    print(f"Computed Celery Broker URL: {settings.computed_celery_broker_url}")
-    print(f"Computed Celery Result Backend URL: {settings.computed_celery_result_backend_url}")
+    print(f"DATABASE_URL (from validator or env): {settings.DATABASE_URL}")
+    print(f"CELERY_BROKER_URL (from validator or env): {settings.CELERY_BROKER_URL}")
+    print(f"CELERY_RESULT_BACKEND_URL (from validator or env): {settings.CELERY_RESULT_BACKEND_URL}")
