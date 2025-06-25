@@ -54,27 +54,29 @@ class Settings(BaseSettings):
 
     @model_validator(mode='after')
     def _construct_derived_urls(self) -> 'Settings':
+        # Construct the DATABASE_URL if not provided directly
         if self.DATABASE_URL is None:
             if all([self.DB_DRIVER, self.DB_USER, self.DB_PASSWORD, self.DB_HOST, self.DB_PORT, self.DB_NAME]):
                 self.DATABASE_URL = PostgresDsn(
                     f"{self.DB_DRIVER}://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
                 )
 
+        # Construct Redis connection URLs for Celery
         if self.CELERY_BROKER_URL is None:
             self.CELERY_BROKER_URL = RedisDsn(
-                f"redis://{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.CELERY_BROKER_DB_NUMBER}"
+                f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.CELERY_BROKER_DB_NUMBER}"
             )
 
         if self.CELERY_RESULT_BACKEND_URL is None:
             self.CELERY_RESULT_BACKEND_URL = RedisDsn(
-                f"redis://{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.CELERY_RESULT_BACKEND_DB_NUMBER}"
+                f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.CELERY_RESULT_BACKEND_DB_NUMBER}"
             )
 
         return self
 
     @property
     def computed_redis_dsn_id_mapping(self) -> str:
-        return f"redis://{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB_ID_MAPPING}"
+        return f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB_ID_MAPPING}"
 
 # Instantiate settings
 settings = Settings()
