@@ -1,7 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Optional
 from pydantic import PostgresDsn, RedisDsn, HttpUrl, Field, model_validator
-
+from typing import Optional
 
 class Settings(BaseSettings):
     # Environment loading configuration
@@ -10,7 +9,7 @@ class Settings(BaseSettings):
     # General Application Settings
     PROJECT_NAME: str = "Catalog Data Load Service"
     API_PREFIX: str = "/graphql"
-    ENVIRONMENT: str = Field("development", validation_alias="ENV", alias_priority=2)
+    ENVIRONMENT: str = Field("stage", validation_alias="ENV", alias_priority=2)
     LOG_LEVEL: str = "INFO"
     RELOAD: bool = False
 
@@ -24,8 +23,8 @@ class Settings(BaseSettings):
     DATABASE_URL: Optional[PostgresDsn] = None
 
     # Schema names
-    CATALOG_SERVICE_SCHEMA: str = "catalog"
-    BUSINESS_SERVICE_SCHEMA: str = "business"
+    CATALOG_SERVICE_SCHEMA: str = "catalog_management"
+    BUSINESS_SERVICE_SCHEMA: str = "fazealbusiness"
 
     # Wasabi S3 Configuration
     WASABI_ENDPOINT_URL: HttpUrl
@@ -40,14 +39,15 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
     # Redis Configuration
-    REDIS_HOST: str = "localhost"
+    REDIS_HOST: str = "192.168.1.245"
     REDIS_PORT: int = 6379
-    REDIS_DSN: Optional[RedisDsn] = None
-
     REDIS_DB_ID_MAPPING: int = 1
     CELERY_BROKER_DB_NUMBER: int = 0
     CELERY_RESULT_BACKEND_DB_NUMBER: int = 0
     REDIS_SESSION_TTL_SECONDS: int = 86400
+
+    # Redis password from Kubernetes secret or environment variable
+    REDIS_PASSWORD: str = Field(..., env="REDIS_PASSWORD")  # This will be pulled from the environment (Kubernetes secret)
 
     CELERY_BROKER_URL: Optional[RedisDsn] = None
     CELERY_RESULT_BACKEND_URL: Optional[RedisDsn] = None
@@ -62,20 +62,19 @@ class Settings(BaseSettings):
 
         if self.CELERY_BROKER_URL is None:
             self.CELERY_BROKER_URL = RedisDsn(
-                f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.CELERY_BROKER_DB_NUMBER}"
+                f"redis://{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.CELERY_BROKER_DB_NUMBER}"
             )
 
         if self.CELERY_RESULT_BACKEND_URL is None:
             self.CELERY_RESULT_BACKEND_URL = RedisDsn(
-                f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.CELERY_RESULT_BACKEND_DB_NUMBER}"
+                f"redis://{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.CELERY_RESULT_BACKEND_DB_NUMBER}"
             )
 
         return self
 
     @property
     def computed_redis_dsn_id_mapping(self) -> str:
-        return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB_ID_MAPPING}"
-
+        return f"redis://{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB_ID_MAPPING}"
 
 # Instantiate settings
 settings = Settings()
@@ -83,7 +82,7 @@ settings = Settings()
 # Debug output for development
 if settings.ENVIRONMENT == "development":
     print("--- Loaded Application Settings ---")
-    for key, value in settings.model_dump().items():
+    for key, value in settings.dict().items():
         if "secret" in key.lower() or "password" in key.lower():
             print(f"{key}: ******")
         else:
