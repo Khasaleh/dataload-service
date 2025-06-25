@@ -1,105 +1,175 @@
-from pydantic import ValidationError
-from app.utils.redis_utils import get_from_id_map
-from collections import defaultdict
+from pydantic import BaseModel, Field, validator, constr, root_validator  # Added constr and root_validator
+from typing import Optional, List  # Added List
+from datetime import datetime  # Added datetime
+from enum import Enum  # Added this import
 
-# Model mapping dictionary to map load types to Pydantic models (will be lazy-loaded in validate_csv)
-MODEL_MAP = {
-    "brands": None,  # Lazy load of models will happen inside the function.
-    "attributes": None,
-    "return_policies": None,
-    "product_items": None,
-    "product_prices": None,
-    "meta_tags": None,
-    "products": None  # Lazy load of models
-}
+class BrandCsvModel(BaseModel):  # Renamed from BrandModel
+    """Pydantic model for validating a row from a Brand CSV file."""
+    name: constr(strip_whitespace=True, min_length=1)  # Was brand_name; this is the key identifier from CSV
+    logo: constr(strip_whitespace=True, min_length=1)  # Path or URL to the brand logo; mandatory
 
-def validate_csv(load_type, records):
-    # Import models only when needed to prevent circular import
-    from app.models.schemas import (
-        BrandCsvModel, AttributeCsvModel, ReturnPolicyCsvModel, ProductItemModel,
-        ProductPriceModel, MetaTagModel, ProductCsvModel
-    )
+    supplier_id: Optional[int] = None  # Pydantic int for DB BigInteger
+    active: Optional[str] = None  # e.g., "TRUE", "FALSE", or other status strings, matches DB String(255)
 
-    errors = []
-    valid_rows = []
+    # Optional audit fields if provided in CSV (DB type is BigInteger)
+    created_by: Optional[int] = None
+    created_date: Optional[int] = None  # If CSV provides epoch timestamp
+    updated_by: Optional[int] = None
+    updated_date: Optional[int] = None  # If CSV provides epoch timestamp
 
-    # Set the appropriate model based on the load_type
-    model = MODEL_MAP.get(load_type)
+    class Config:
+        anystr_strip_whitespace = True
+        # extra = "forbid" # If no other columns are allowed from CSV
 
-    if not model:
-        if load_type == "brands":
-            model = BrandCsvModel
-        elif load_type == "attributes":
-            model = AttributeCsvModel
-        elif load_type == "return_policies":
-            model = ReturnPolicyCsvModel
-        elif load_type == "product_items":
-            model = ProductItemModel
-        elif load_type == "product_prices":
-            model = ProductPriceModel
-        elif load_type == "meta_tags":
-            model = MetaTagModel
-        elif load_type == "products":
-            model = ProductCsvModel
-        else:
-            return [{"error": f"Unsupported load type: {load_type}"}], []
+class ProductItemModel(BaseModel):
+    """Pydantic model for validating a row from a Product Item CSV file."""
+    product_name: str
+    variant_sku: str
+    attribute_combination: str
+    status: str
+    published: str
+    default_sku: str
+    quantity: int
+    image_urls: Optional[str] = None
 
-    # Continue with the validation logic
-    for i, row in enumerate(records):
-        try:
-            valid = model(**row)
-            valid_rows.append(valid.dict())
-        except ValidationError as e:
-            for err in e.errors():
-                errors.append({
-                    "row": i + 1,
-                    "field": ".".join(str(f) for f in err['loc']),
-                    "error": err['msg']
-                })
-    return errors, valid_rows
+    @validator('product_name', 'variant_sku', 'attribute_combination', 'status', 'published', 'default_sku')
+    def item_text_fields_must_not_be_empty(cls, value):
+        if not value.strip():
+            raise ValueError('field must not be empty')
+        return value
 
-def check_file_uniqueness(records: list[dict], unique_key: str) -> list[dict]:
-    """
-    Checks for duplicate values of a specified key within a list of records.
-    Returns a list of error messages for any duplicate keys found.
-    """
-    errors = []
-    key_counts = defaultdict(list)
-    for i, record in enumerate(records):
-        key_value = record.get(unique_key)
-        if key_value is not None:
-            key_counts[key_value].append(i + 1)  # Store 1-based row index
+    @validator('quantity')
+    def quantity_must_be_non_negative(cls, value):
+        if value < 0:
+            raise ValueError('quantity must be non-negative')
+        return value
 
-    for key_value, rows in key_counts.items():
-        if len(rows) > 1:
-            errors.append({
-                "error": "Duplicate key found in file",
-                "key": key_value,
-                "rows": rows,
-                "field": unique_key
-            })
-    return errors
+class AttributeCsvModel(BaseModel):
+    """Pydantic model for validating a row from an Attributes CSV file."""
+    attribute_name: constr(strip_whitespace=True, min_length=1)  # Name of the parent attribute, e.g., "Color", "Size"
+    is_color: bool = False  # Mandatory, True if this attribute represents color swatches
+    attribute_active: Optional[str] = None  # Active status of the attribute itself (e.g., "ACTIVE", "INACTIVE")
 
-def check_referential_integrity(
-    records: list[dict],
-    field_to_check: str,
-    referenced_entity_type: str,
-    session_id: str
-) -> list[dict]:
-    """
-    Checks if referenced entities exist in Redis.
-    Returns a list of error messages for any references not found.
-    """
-    errors = []
-    for i, record in enumerate(records):
-        key_value = record.get(field_to_check)
-        if key_value:  # Only check if the field has a value
-            # Assuming get_from_id_map returns None or an empty list if not found
-            if not get_from_id_map(session_id, referenced_entity_type, key_value):
-                errors.append({
-                    "row": i + 1,
-                    "field": field_to_check,
-                    "error": f"Referenced {referenced_entity_type} not found",
-                    "value": key_value
-                })
-    return errors
+    values_name: Optional[str] = None  # e.g., "Red|Blue|Green" or "Small|Medium|Large"
+    value_value: Optional[str] = None  # e.g., "FF0000|0000FF|00FF00" or "S|M|L"
+    img_url: Optional[str] = None  # e.g., "url1|url2|url3"
+    values_active: Optional[str] = None  # e.g., "ACTIVE|INACTIVE|ACTIVE"
+
+    class Config:
+        anystr_strip_whitespace = True
+        # extra = "forbid"
+
+    @validator('values_name', 'value_value', 'img_url', 'values_active', pre=True, always=True)
+    def ensure_optional_fields_are_not_empty_strings(cls, v):
+        if v == "":
+            return None
+        return v
+
+    @validator('values_name', always=True)
+    def check_values_name_provided_if_any_value_list_is_provided(cls, v, values):
+        if (values.get('value_value') is not None or \
+            values.get('img_url') is not None or \
+            values.get('values_active') is not None) and not v:
+            raise ValueError("'values_name' must be provided if 'value_value', 'img_url', or 'values_active' are specified.")
+        return v
+
+    @validator('values_active', always=True)
+    def check_list_lengths_consistency(cls, v, values):
+        names_str = values.get('values_name')
+        if names_str is None:
+            if values.get('value_value') is not None or \
+               values.get('img_url') is not None or \
+               v is not None:
+                pass
+            return v
+
+        num_names = len(names_str.split('|'))
+        lists_to_check = {
+            "value_value": values.get('value_value'),
+            "img_url": values.get('img_url'),
+            "values_active": v
+        }
+
+        for field_name, val_str in lists_to_check.items():
+            if val_str is not None:
+                num_parts = len(val_str.split('|'))
+                if num_parts != num_names:
+                    raise ValueError(
+                        f"Mismatch in number of pipe-separated parts: "
+                        f"'{field_name}' has {num_parts} parts, "
+                        f"but 'values_name' ({names_str}) has {num_names} parts."
+                    )
+        return v
+
+class ReturnPolicyCsvModel(BaseModel):
+    """Pydantic model for validating a row from a Return Policy CSV file."""
+    id: Optional[int] = None
+    created_date: Optional[datetime] = None
+    updated_date: Optional[datetime] = None
+    grace_period_return: Optional[int] = None
+    policy_name: Optional[str] = None
+    return_policy_type: str
+    time_period_return: Optional[int] = None
+    business_details_id: Optional[int] = None
+
+    class Config:
+        anystr_strip_whitespace = True
+        extra = "forbid"
+
+    @root_validator(pre=False, skip_on_failure=True)
+    def check_conditional_fields(cls, values):
+        policy_type = values.get('return_policy_type')
+        time_period = values.get('time_period_return')
+
+        if policy_type == "SALES_RETURN_ALLOWED":
+            if time_period is None:
+                raise ValueError("'time_period_return' is required when 'return_policy_type' is 'SALES_RETURN_ALLOWED'.")
+        elif policy_type == "SALES_ARE_FINAL":
+            pass
+
+        return values
+
+class ProductCsvModel(BaseModel):
+    product_name: str
+    product_url: str
+    brand_name: str
+    category_path: str
+    return_policy_code: str
+    package_length: float
+    package_width: float
+    package_height: float
+    package_weight: float
+    status: str
+
+    @validator('product_name', 'product_url', 'brand_name', 'category_path', 'return_policy_code', 'status')
+    def product_text_fields_must_not_be_empty(cls, value):
+        if not value.strip():
+            raise ValueError('field must not be empty')
+        return value
+
+    @validator('package_length', 'package_width', 'package_height', 'package_weight')
+    def package_dimensions_must_be_positive(cls, value):
+        if value <= 0:
+            raise ValueError('package dimension/weight must be positive')
+        return value
+
+# Error Handling Models
+class ErrorType(str, Enum):
+    VALIDATION = "VALIDATION"
+    DATABASE = "DATABASE"
+    LOOKUP = "LOOKUP"
+    FILE_FORMAT = "FILE_FORMAT"
+    UNEXPECTED_ROW_ERROR = "UNEXPECTED_ROW_ERROR"
+    TASK_EXCEPTION = "TASK_EXCEPTION"
+    CONFIGURATION = "CONFIGURATION"
+    UNKNOWN = "UNKNOWN"
+
+class ErrorDetailModel(BaseModel):
+    row_number: Optional[int] = None
+    field_name: Optional[str] = None
+    error_message: str
+    error_type: ErrorType = ErrorType.UNKNOWN
+    offending_value: Optional[str] = None
+
+    class Config:
+        use_enum_values = True
