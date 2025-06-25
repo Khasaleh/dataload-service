@@ -1,7 +1,15 @@
+from fastapi import FastAPI
 from csv_parser import load_skus_from_csv
 from validator import validate_sku_list
 from sku_processor import process_skus, ProcessedSKUData
 from data_models import SKU  # For type hinting if needed
+import logging
+
+# Initialize the FastAPI app
+app = FastAPI()
+
+# Remove the reload attribute as it should be handled by Uvicorn or another method.
+logger = logging.getLogger(__name__)
 
 def run_sku_processing_pipeline(csv_file_path: str) -> ProcessedSKUData:
     """
