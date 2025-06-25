@@ -2,6 +2,7 @@ from pydantic import ValidationError
 from app.utils.redis_utils import get_from_id_map
 from collections import defaultdict
 
+# Model mapping dictionary to map load types to Pydantic models (will be lazy-loaded in validate_csv)
 MODEL_MAP = {
     "brands": None,  # Lazy load of models will happen inside the function.
     "attributes": None,
@@ -15,15 +16,16 @@ MODEL_MAP = {
 def validate_csv(load_type, records):
     # Import models only when needed to prevent circular import
     from app.models.schemas import (
-        BrandCsvModel, AttributeCsvModel, ReturnPolicyCsvModel, ProductItemModel, 
+        BrandCsvModel, AttributeCsvModel, ReturnPolicyCsvModel, ProductItemModel,
         ProductPriceModel, MetaTagModel, ProductCsvModel
     )
 
     errors = []
     valid_rows = []
-    
+
+    # Set the appropriate model based on the load_type
     model = MODEL_MAP.get(load_type)
-    
+
     if not model:
         if load_type == "brands":
             model = BrandCsvModel
@@ -42,7 +44,7 @@ def validate_csv(load_type, records):
         else:
             return [{"error": f"Unsupported load type: {load_type}"}], []
 
-    # Now continue with the validation logic
+    # Continue with the validation logic
     for i, row in enumerate(records):
         try:
             valid = model(**row)
@@ -57,6 +59,10 @@ def validate_csv(load_type, records):
     return errors, valid_rows
 
 def check_file_uniqueness(records: list[dict], unique_key: str) -> list[dict]:
+    """
+    Checks for duplicate values of a specified key within a list of records.
+    Returns a list of error messages for any duplicate keys found.
+    """
     errors = []
     key_counts = defaultdict(list)
     for i, record in enumerate(records):
@@ -80,10 +86,15 @@ def check_referential_integrity(
     referenced_entity_type: str,
     session_id: str
 ) -> list[dict]:
+    """
+    Checks if referenced entities exist in Redis.
+    Returns a list of error messages for any references not found.
+    """
     errors = []
     for i, record in enumerate(records):
         key_value = record.get(field_to_check)
-        if key_value:
+        if key_value:  # Only check if the field has a value
+            # Assuming get_from_id_map returns None or an empty list if not found
             if not get_from_id_map(session_id, referenced_entity_type, key_value):
                 errors.append({
                     "row": i + 1,
