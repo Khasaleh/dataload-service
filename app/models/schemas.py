@@ -113,6 +113,31 @@ class ReturnPolicyCsvModel(BaseModel):
 
         return values
 
+class ProductCsvModel(BaseModel):
+    # Added ProductCsvModel with necessary fields for CSV validation
+    product_name: str
+    product_url: str
+    brand_name: str
+    category_path: str
+    return_policy_code: str
+    package_length: float
+    package_width: float
+    package_height: float
+    package_weight: float
+    status: str
+
+    @validator('product_name', 'product_url', 'brand_name', 'category_path', 'return_policy_code', 'status')
+    def product_text_fields_must_not_be_empty(cls, value):
+        if not value.strip():
+            raise ValueError('field must not be empty')
+        return value
+
+    @validator('package_length', 'package_width', 'package_height', 'package_weight')
+    def package_dimensions_must_be_positive(cls, value):
+        if value <= 0:
+            raise ValueError('package dimension/weight must be positive')
+        return value
+
 # Define other models here similarly...
 
 # Define the ErrorDetailModel and ErrorType in a separate file, for instance `error_models.py`.
@@ -136,4 +161,3 @@ class ErrorDetailModel(BaseModel):
 
     class Config:
         use_enum_values = True  # Ensures enum values are used when serializing
-
