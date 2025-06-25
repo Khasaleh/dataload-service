@@ -1,169 +1,139 @@
-from app.models.schemas import (
-    BrandCsvModel, AttributeCsvModel, ReturnPolicyCsvModel, ProductModel,
-    ProductItemModel, ProductPriceModel, MetaTagModel, ProductCsvModel
-)
-from app.dataload.models.product_csv import ProductCsvModel  # Import the correct ProductCsvModel
-from pydantic import ValidationError
-from app.utils.redis_utils import get_from_id_map
-from collections import defaultdict
+from pydantic import BaseModel, Field, validator, constr, root_validator  # Added constr and root_validator
+from typing import Optional, List  # Added List
+from datetime import datetime  # Added datetime
+from enum import Enum  # Added this import
 
-from app.models.schemas import ErrorDetailModel, ErrorType  # Fixed import position
-from typing import List, Dict, Tuple  # Fixed import position
+class BrandCsvModel(BaseModel):  # Renamed from BrandModel
+    """Pydantic model for validating a row from a Brand CSV file."""
+    name: constr(strip_whitespace=True, min_length=1)  # Was brand_name; this is the key identifier from CSV
+    logo: constr(strip_whitespace=True, min_length=1)  # Path or URL to the brand logo; mandatory
 
-MODEL_MAP = {
-    "brands": BrandCsvModel,
-    "attributes": AttributeCsvModel,
-    "return_policies": ReturnPolicyCsvModel,
-    "product_items": ProductItemModel,
-    "product_prices": ProductPriceModel,
-    "meta_tags": MetaTagModel,
-    "products": ProductCsvModel  # Added correct model for products load_type
-}
+    supplier_id: Optional[int] = None  # Pydantic int for DB BigInteger
+    active: Optional[str] = None  # e.g., "TRUE", "FALSE", or other status strings, matches DB String(255)
 
-def validate_csv(load_type, records):
-    errors = []
-    valid_rows = []
-    model = MODEL_MAP.get(load_type)
-    if not model:
-        return [{"error": f"Unsupported load type: {load_type}"}], []
+    # Optional audit fields if provided in CSV (DB type is BigInteger)
+    created_by: Optional[int] = None
+    created_date: Optional[int] = None  # If CSV provides epoch timestamp
+    updated_by: Optional[int] = None
+    updated_date: Optional[int] = None  # If CSV provides epoch timestamp
 
-    for i, row in enumerate(records):
-        try:
-            valid = model(**row)
-            valid_rows.append(valid.dict())
-        except ValidationError as e:
-            for err in e.errors():
-                errors.append({
-                    "row": i + 1,
-                    "field": ".".join(str(f) for f in err['loc']),
-                    "error": err['msg']
-                })
-    return errors, valid_rows
+    class Config:
+        anystr_strip_whitespace = True
+        # extra = "forbid" # If no other columns are allowed from CSV
 
-
-def check_file_uniqueness(records: list[dict], unique_key: str) -> list[dict]:
+class AttributeCsvModel(BaseModel):
     """
-    Checks for duplicate values of a specified key within a list of records.
-    Returns a list of error messages for any duplicate keys found.
+    Pydantic model for validating a row from an Attributes CSV file.
+    A single row defines an attribute and all its associated values.
     """
-    errors = []
-    key_counts = defaultdict(list)
-    for i, record in enumerate(records):
-        key_value = record.get(unique_key)
-        if key_value is not None:
-            key_counts[key_value].append(i + 1)  # Store 1-based row index
+    attribute_name: constr(strip_whitespace=True, min_length=1)  # Name of the parent attribute, e.g., "Color", "Size"
+    is_color: bool = False  # Mandatory, True if this attribute represents color swatches
+    attribute_active: Optional[str] = None  # Active status of the attribute itself (e.g., "ACTIVE", "INACTIVE")
 
-    for key_value, rows in key_counts.items():
-        if len(rows) > 1:
-            errors.append({
-                "error": "Duplicate key found in file",
-                "key": key_value,
-                "rows": rows,
-                "field": unique_key
-            })
-    return errors
+    # Pipe-separated strings for attribute values
+    values_name: Optional[str] = None  # e.g., "Red|Blue|Green" or "Small|Medium|Large"
+    value_value: Optional[str] = None  # e.g., "FF0000|0000FF|00FF00" or "S|M|L" (optional for non-colors if same as name)
+    img_url: Optional[str] = None  # e.g., "url1|url2|url3"
+    values_active: Optional[str] = None  # e.g., "ACTIVE|INACTIVE|ACTIVE" (defaults to INACTIVE if not specified for a value part)
 
-def check_referential_integrity(
-    records: list[dict],
-    field_to_check: str,
-    referenced_entity_type: str,
-    session_id: str
-) -> list[dict]:
-    """
-    Checks if referenced entities exist in Redis.
-    Returns a list of error messages for any references not found.
-    """
-    errors = []
-    for i, record in enumerate(records):
-        key_value = record.get(field_to_check)
-        if key_value:  # Only check if the field has a value
-            # Assuming get_from_id_map returns None or an empty list if not found
-            if not get_from_id_map(session_id, referenced_entity_type, key_value):
-                errors.append({
-                    "row": i + 1,
-                    "field": field_to_check,
-                    "error": f"Referenced {referenced_entity_type} not found",
-                    "value": key_value
-                })
-    return errors
+    class Config:
+        anystr_strip_whitespace = True
+        # extra = "forbid"
 
+    @validator('values_name', 'value_value', 'img_url', 'values_active', pre=True, always=True)
+    def ensure_optional_fields_are_not_empty_strings(cls, v):
+        # If an optional field is provided as an empty string in CSV, convert to None
+        if v == "":
+            return None
+        return v
 
-def validate_csv(
-    load_type: str,
-    records: List[Dict],
-    session_id: Optional[str] = None,
-    record_key: Optional[str] = None,
-    referenced_entity_map: Optional[Dict[str, str]] = None
-) -> Tuple[List[ErrorDetailModel], List[Dict]]:
-    all_error_details: List[ErrorDetailModel] = []
-    valid_rows_data: List[Dict] = []  # Will store dicts of Pydantic model validated data
+    @validator('values_name', always=True)
+    def check_values_name_provided_if_any_value_list_is_provided(cls, v, values):
+        # If any of value_value, img_url, or values_active are provided, values_name must also be provided.
+        if (values.get('value_value') is not None or \
+            values.get('img_url') is not None or \
+            values.get('values_active') is not None) and not v:  # v is values_name
+            raise ValueError("'values_name' must be provided if 'value_value', 'img_url', or 'values_active' are specified.")
+        return v
 
-    model_class = MODEL_MAP.get(load_type)
-    if not model_class:
-        all_error_details.append(ErrorDetailModel(
-            error_message=f"Unsupported load type: {load_type}",
-            error_type=ErrorType.CONFIGURATION
-        ))
-        return all_error_details, []
+    @validator('values_active', always=True)  # This validator should ideally run after the others
+    def check_list_lengths_consistency(cls, v, values):
+        # This validator checks if all provided pipe-separated value lists have the same number of elements.
+        names_str = values.get('values_name')
+        if names_str is None:
+            if values.get('value_value') is not None or \
+               values.get('img_url') is not None or \
+               v is not None:  # v is values_active
+                pass  # Let previous validator handle mandatory nature of names_str if others are present.
+            return v
 
-    # 1. Pydantic model validation for each row
-    temp_valid_for_further_checks = []  # Store records that pass Pydantic validation for subsequent checks
+        num_names = len(names_str.split('|'))
+        lists_to_check = {
+            "value_value": values.get('value_value'),
+            "img_url": values.get('img_url'),
+            "values_active": v  # 'v' is the current field being validated ('values_active')
+        }
 
-    for i, row_data in enumerate(records):
-        row_num = i + 2  # CSV rows are often 1-indexed, plus header
-        try:
-            validated_model = model_class(**row_data)
-            temp_valid_for_further_checks.append({"row_number": row_num, "data": validated_model.model_dump()})
-        except ValidationError as e:
-            for err in e.errors():
-                all_error_details.append(ErrorDetailModel(
-                    row_number=row_num,
-                    field_name=".".join(str(f) for f in err['loc']) if err['loc'] else None,
-                    error_message=err['msg'],
-                    error_type=ErrorType.VALIDATION,
-                    offending_value=str(err.get('input', 'N/A'))[:255]  # Truncate offending value
-                ))
-        except Exception as ex:  # Catch any other unexpected error during model instantiation
-            all_error_details.append(ErrorDetailModel(
-                row_number=row_num,
-                error_message=f"Unexpected error validating row: {str(ex)}",
-                error_type=ErrorType.UNEXPECTED_ROW_ERROR
-            ))
+        for field_name, val_str in lists_to_check.items():
+            if val_str is not None:  # Only check if the string is provided
+                num_parts = len(val_str.split('|'))
+                if num_parts != num_names:
+                    raise ValueError(
+                        f"Mismatch in number of pipe-separated parts: "
+                        f"'{field_name}' has {num_parts} parts, "
+                        f"but 'values_name' ({names_str}) has {num_names} parts."
+                    )
+        return v
 
-    # 2. File-level uniqueness check (on Pydantic-valid data)
-    if record_key and temp_valid_for_further_checks:
-        uniqueness_errors_raw = check_file_uniqueness(temp_valid_for_further_checks, record_key)
-        for err_dict in uniqueness_errors_raw:
-            original_rows_for_error = [item["row_number"] for internal_idx in err_dict.get("rows", [])]
-            all_error_details.append(ErrorDetailModel(
-                row_number=original_rows_for_error[0] if original_rows_for_error else None,  # Report first row
-                field_name=err_dict.get("field"),
-                error_message=f"Duplicate key '{err_dict.get('key')}' found in file for field '{err_dict.get('field')}'. Offending CSV rows: {original_rows_for_error}",
-                error_type=ErrorType.VALIDATION,
-                offending_value=str(err_dict.get("key"))[:255]
-            ))
+class ReturnPolicyCsvModel(BaseModel):
+    """Pydantic model for validating a row from a Return Policy CSV file."""
+    id: Optional[int] = None  # For matching existing records if provided in CSV
+    created_date: Optional[datetime] = None
+    updated_date: Optional[datetime] = None
+    grace_period_return: Optional[int] = None
+    policy_name: Optional[str] = None
+    return_policy_type: str  # E.g., "SALES_ARE_FINAL", "SALES_RETURN_ALLOWED"
+    time_period_return: Optional[int] = None
+    business_details_id: Optional[int] = None  # Integer ID for business
 
-    # 3. Referential integrity check (on Pydantic-valid data)
-    if session_id and referenced_entity_map and temp_valid_for_further_checks:
-        for field_to_check, referenced_entity_type in referenced_entity_map.items():
-            ref_errors_raw = check_referential_integrity(temp_valid_for_further_checks, field_to_check, referenced_entity_type, session_id)
-            for err_dict in ref_errors_raw:
-                original_row_num_for_error = temp_valid_for_further_checks[err_dict.get("row", 1)-1]["row_number"]
-                all_error_details.append(ErrorDetailModel(
-                    row_number=original_row_num_for_error,
-                    field_name=err_dict.get("field"),
-                    error_message=f"Referenced '{referenced_entity_type}' with value '{err_dict.get('value')}' not found (from field '{err_dict.get('field')}').",
-                    error_type=ErrorType.LOOKUP,
-                    offending_value=str(err_dict.get("value"))[:255]
-                ))
+    class Config:
+        anystr_strip_whitespace = True
+        extra = "forbid"
 
-    # Final valid rows after all checks
-    if all_error_details:
-        errored_row_numbers = {err.row_number for err in all_error_details if err.row_number is not None}
-        for item in temp_valid_for_further_checks:
-            if item["row_number"] not in errored_row_numbers:
-                valid_rows_data.append(item["data"])
-    else:  # No errors at all
-        valid_rows_data = [item["data"] for item in temp_valid_for_further_checks]
+    @root_validator(pre=False, skip_on_failure=True)  # Run after individual field validation
+    def check_conditional_fields(cls, values):
+        policy_type = values.get('return_policy_type')
+        time_period = values.get('time_period_return')
 
-    return all_error_details, valid_rows_data
+        if policy_type == "SALES_RETURN_ALLOWED":
+            if time_period is None:
+                raise ValueError("'time_period_return' is required when 'return_policy_type' is 'SALES_RETURN_ALLOWED'.")
+        elif policy_type == "SALES_ARE_FINAL":
+            pass  # For "SALES_ARE_FINAL", other fields are typically null or ignored.
+
+        return values
+
+# Define other models here similarly...
+
+# Define the ErrorDetailModel and ErrorType in a separate file, for instance `error_models.py`.
+
+class ErrorType(str, Enum):
+    VALIDATION = "VALIDATION"
+    DATABASE = "DATABASE"
+    LOOKUP = "LOOKUP"
+    FILE_FORMAT = "FILE_FORMAT"
+    UNEXPECTED_ROW_ERROR = "UNEXPECTED_ROW_ERROR"
+    TASK_EXCEPTION = "TASK_EXCEPTION"
+    CONFIGURATION = "CONFIGURATION"
+    UNKNOWN = "UNKNOWN"
+
+class ErrorDetailModel(BaseModel):
+    row_number: Optional[int] = None
+    field_name: Optional[str] = None
+    error_message: str
+    error_type: ErrorType = ErrorType.UNKNOWN
+    offending_value: Optional[str] = None
+
+    class Config:
+        use_enum_values = True  # Ensures enum values are used when serializing
+
