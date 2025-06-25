@@ -1,6 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Optional
-from pydantic import PostgresDsn, RedisDsn, HttpUrl, Field
+from typing import Optional, List # Added List, though not strictly needed for this fix, good for general Pydantic use
+from pydantic import PostgresDsn, RedisDsn, HttpUrl, Field, model_validator, AliasChoices # Added model_validator, AliasChoices
 
 class Settings(BaseSettings):
     # Environment loading configuration
@@ -62,41 +62,36 @@ class Settings(BaseSettings):
     # FEATURE_NEW_THING_ENABLED: bool = False
 
     @model_validator(mode='after')
-    def _construct_derived_urls(cls, self_instance):
-        # In Pydantic V2, with mode='after', the first argument is the model instance itself.
-
+    def _construct_derived_urls(self) -> 'Settings': # Changed signature to use self
         # Construct DATABASE_URL if not provided and components are available
-        if self_instance.DATABASE_URL is None:
-            if (self_instance.DB_DRIVER and
-                self_instance.DB_USER and
-                self_instance.DB_PASSWORD and
-                self_instance.DB_HOST and
-                self_instance.DB_PORT is not None and # Ensure DB_PORT is not None
-                self_instance.DB_NAME):
-                # Directly assign to the model field
-                self_instance.DATABASE_URL = PostgresDsn(
-                    f"{self_instance.DB_DRIVER}://{self_instance.DB_USER}:{self_instance.DB_PASSWORD}@{self_instance.DB_HOST}:{self_instance.DB_PORT}/{self_instance.DB_NAME}"
+        if self.DATABASE_URL is None: # Use self
+            if (self.DB_DRIVER and
+                self.DB_USER and
+                self.DB_PASSWORD and
+                self.DB_HOST and
+                self.DB_PORT is not None and
+                self.DB_NAME):
+                self.DATABASE_URL = PostgresDsn(
+                    f"{self.DB_DRIVER}://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
                 )
-            # If components are missing, DATABASE_URL remains None.
-            # Application parts (like db.connection) must handle this (e.g., raise error if None).
 
         # Construct Celery URLs if not provided
-        if self_instance.CELERY_BROKER_URL is None and \
-           self_instance.REDIS_HOST and \
-           self_instance.REDIS_PORT is not None and \
-           self_instance.CELERY_BROKER_DB_NUMBER is not None:
-            self_instance.CELERY_BROKER_URL = RedisDsn(
-                f"redis://{self_instance.REDIS_HOST}:{self_instance.REDIS_PORT}/{self_instance.CELERY_BROKER_DB_NUMBER}"
+        if self.CELERY_BROKER_URL is None and \
+           self.REDIS_HOST and \
+           self.REDIS_PORT is not None and \
+           self.CELERY_BROKER_DB_NUMBER is not None:
+            self.CELERY_BROKER_URL = RedisDsn(
+                f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.CELERY_BROKER_DB_NUMBER}"
             )
 
-        if self_instance.CELERY_RESULT_BACKEND_URL is None and \
-           self_instance.REDIS_HOST and \
-           self_instance.REDIS_PORT is not None and \
-           self_instance.CELERY_RESULT_BACKEND_DB_NUMBER is not None:
-            self_instance.CELERY_RESULT_BACKEND_URL = RedisDsn(
-                f"redis://{self_instance.REDIS_HOST}:{self_instance.REDIS_PORT}/{self_instance.CELERY_RESULT_BACKEND_DB_NUMBER}"
+        if self.CELERY_RESULT_BACKEND_URL is None and \
+           self.REDIS_HOST and \
+           self.REDIS_PORT is not None and \
+           self.CELERY_RESULT_BACKEND_DB_NUMBER is not None:
+            self.CELERY_RESULT_BACKEND_URL = RedisDsn(
+                f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.CELERY_RESULT_BACKEND_DB_NUMBER}"
             )
-        return self_instance
+        return self # Return self
 
     # @property
     # def computed_database_url(self) -> str: # Now populated by validator
