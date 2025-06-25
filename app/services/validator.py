@@ -1,13 +1,10 @@
 from app.models.schemas import (
-    BrandCsvModel, AttributeCsvModel, ReturnPolicyCsvModel, ProductModel, 
-    ProductItemModel, ProductPriceModel, MetaTagModel, ProductCsvModel
-    # Assuming AttributeModel was meant to be AttributeCsvModel, and ReturnPolicyModel to be ReturnPolicyCsvModel
+    BrandCsvModel, AttributeCsvModel, ReturnPolicyCsvModel, ProductItemModel, 
+    ProductPriceModel, MetaTagModel, ProductCsvModel
 )
-from app.dataload.models.product_csv import ProductCsvModel  # Import the correct ProductCsvModel
 from pydantic import ValidationError
 from app.utils.redis_utils import get_from_id_map
 from collections import defaultdict
-
 from app.models.schemas import ErrorDetailModel, ErrorType  # Fixed import position
 from typing import List, Dict, Tuple  # Fixed import position
 
@@ -43,16 +40,12 @@ def validate_csv(load_type, records):
 
 
 def check_file_uniqueness(records: list[dict], unique_key: str) -> list[dict]:
-    """
-    Checks for duplicate values of a specified key within a list of records.
-    Returns a list of error messages for any duplicate keys found.
-    """
     errors = []
     key_counts = defaultdict(list)
     for i, record in enumerate(records):
         key_value = record.get(unique_key)
         if key_value is not None:
-            key_counts[key_value].append(i + 1) # Store 1-based row index
+            key_counts[key_value].append(i + 1)  # Store 1-based row index
 
     for key_value, rows in key_counts.items():
         if len(rows) > 1:
@@ -70,15 +63,10 @@ def check_referential_integrity(
     referenced_entity_type: str,
     session_id: str
 ) -> list[dict]:
-    """
-    Checks if referenced entities exist in Redis.
-    Returns a list of error messages for any references not found.
-    """
     errors = []
     for i, record in enumerate(records):
         key_value = record.get(field_to_check)
-        if key_value:  # Only check if the field has a value
-            # Assuming get_from_id_map returns None or an empty list if not found
+        if key_value:
             if not get_from_id_map(session_id, referenced_entity_type, key_value):
                 errors.append({
                     "row": i + 1,
@@ -87,7 +75,6 @@ def check_referential_integrity(
                     "value": key_value
                 })
     return errors
-
 
 def validate_csv(
     load_type: str,
