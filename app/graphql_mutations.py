@@ -5,28 +5,9 @@ import uuid  # For session_id generation
 from app.core.config import settings  # Import centralized settings
 from app.graphql_types import UploadSessionType, TokenResponseType, UserType
 from strawberry.file_uploads import Upload
-from jose import jwt
-from datetime import timedelta
-import logging
+from jose import jwt  # Added
+from datetime import timedelta  # Added
 
-from app.services.storage import upload_file as upload_to_wasabi
-from app.tasks.load_jobs import (
-    CELERY_TASK_MAP,  # Import CELERY_TASK_MAP
-    process_brands_file,
-    process_attributes_file,
-    process_return_policies_file,
-    process_products_file,
-    process_product_items_file,
-    process_meta_tags_file_specific,
-    process_categories_file,
-)
-from app.db.connection import get_session as get_db_session_sync
-from app.db.models import UploadSessionOrm, PriceOrm, ProductOrm, ProductItemOrm
-from app.graphql_types import PriceTypeGQL, PriceInput, PriceType as PriceResponseType
-from app.dataload.models.price_csv import PriceCsv, PriceTypeEnum as PriceCsvTypeEnum
-import logging  # For logging DB errors
-
-logger = logging.getLogger(__name__)
 
 # --- GraphQL Input Types ---
 @strawberry.input
@@ -69,14 +50,16 @@ class Mutation:
         access_token_payload = {
             "sub": user_details["username"],
             "userId": user_details["user_id"],
-            "companyId": user_details["business_id"],
+            "companyId": user_details["business_id"],  # Using companyId in token as per original spec
             "role": [{"authority": role_name} for role_name in user_details["roles"]],
             "iat": datetime.datetime.utcnow(),
             "exp": datetime.datetime.utcnow() + access_token_expires
         }
+
+        # Use SECRET_KEY and ALGORITHM from centralized settings
         encoded_jwt = jwt.encode(access_token_payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
-        # Generate a refresh token (for simplicity)
+        # Generate a refresh token
         refresh_token_value = f"mock-rt-{user_details['username']}-{uuid.uuid4()}"
 
         return TokenResponseType(
@@ -88,9 +71,12 @@ class Mutation:
     @strawberry.mutation
     async def refresh_token(self, input: RefreshTokenInput) -> Optional[TokenResponseType]:
         """
-        Refreshes an authentication token using the provided refresh token.
+        Refreshes an authentication token set (access and refresh tokens)
+        using a provided refresh token.
         """
         user_details_for_refresh = None
+
+        # Validate the refresh token
         if input.refreshToken and input.refreshToken.startswith("mock-rt-testuser"):
             user_details_for_refresh = _MOCK_USERS_DB.get("testuser")
         elif input.refreshToken and input.refreshToken.startswith("mock-rt-adminuser"):
@@ -99,9 +85,7 @@ class Mutation:
         if not user_details_for_refresh:
             raise strawberry.GraphQLError("Invalid or expired refresh token.")
 
-        if user_details_for_refresh.get("disabled", False):
-            raise strawberry.GraphQLError("User account is disabled.")
-
+        # Generate new access token
         access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token_payload = {
             "sub": user_details_for_refresh["username"],
@@ -111,6 +95,7 @@ class Mutation:
             "iat": datetime.datetime.utcnow(),
             "exp": datetime.datetime.utcnow() + access_token_expires
         }
+
         new_access_token = jwt.encode(access_token_payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
         new_refresh_token_value = f"mock-rt-{user_details_for_refresh['username']}-{uuid.uuid4()}"
@@ -122,15 +107,11 @@ class Mutation:
         )
 
     @strawberry.mutation
-    async def upload_file(
-        self,
-        info: strawberry.types.Info,
-        file: Upload,
-        input: UploadFileInput
-    ) -> UploadSessionType:
+    async def upload_file(self, info: strawberry.types.Info, file: Upload, input: UploadFileInput) -> UploadSessionType:
         """
         Handles a file upload, creates an upload session record,
         uploads the file to Wasabi, and dispatches a Celery task for processing.
+        Requires authentication.
         """
         current_user_data = info.context.get("current_user")
         if not current_user_data or not current_user_data.get("business_id"):
@@ -138,12 +119,11 @@ class Mutation:
 
         business_id = current_user_data["business_id"]
 
+        # Validate load_type and file type
         if input.load_type not in CELERY_TASK_MAP:
             raise strawberry.GraphQLError(f"Invalid load type: {input.load_type}. Supported types are: {list(CELERY_TASK_MAP.keys())}")
 
-        if not file.filename:
-            raise strawberry.GraphQLError("Filename cannot be empty.")
-        if not file.filename.lower().endswith('.csv'):
+        if not file.filename or not file.filename.lower().endswith('.csv'):
             raise strawberry.GraphQLError("Invalid file type. Only CSV files are allowed.")
 
         contents = await file.read()
@@ -154,19 +134,14 @@ class Mutation:
         original_filename = file.filename
         wasabi_path = f"uploads/{business_id}/{session_id}/{input.load_type}/{original_filename}"
 
-        WASABI_BUCKET_NAME = settings.WASABI_BUCKET_NAME
-        if not WASABI_BUCKET_NAME:
-            logger.error("WASABI_BUCKET_NAME is not configured in settings.")
-            raise strawberry.GraphQLError("Server configuration error: Wasabi bucket name is not set.")
-
-        # Create UploadSession record
+        # --- Create UploadSession record in DB ---
         session_data_to_save = {
             "session_id": session_id,
             "business_id": business_id,
             "load_type": input.load_type,
             "original_filename": original_filename,
             "wasabi_path": wasabi_path,
-            "status": "pending",
+            "status": "pending",  # Initial status
             "created_at": datetime.datetime.utcnow(),
             "updated_at": datetime.datetime.utcnow(),
             "details": None,
@@ -177,6 +152,7 @@ class Mutation:
         db_session = None
         try:
             db_session = get_db_session_sync(business_id=business_id)
+
             new_session_orm_instance = UploadSessionOrm(**session_data_to_save)
             db_session.add(new_session_orm_instance)
             db_session.commit()
@@ -184,6 +160,7 @@ class Mutation:
 
             created_session_dict = {c.name: getattr(new_session_orm_instance, c.name) for c in new_session_orm_instance.__table__.columns}
             logger.info(f"Upload session record created in DB for session_id: {session_id}")
+
         except Exception as e_db:
             logger.error(f"DB Error: Failed to create upload session record for session_id {session_id}: {e_db}", exc_info=True)
             if db_session:
@@ -193,15 +170,15 @@ class Mutation:
             if db_session:
                 db_session.close()
 
-        # Upload to Wasabi
+        # --- Upload to Wasabi ---
         try:
-            upload_to_wasabi(bucket=WASABI_BUCKET_NAME, path=wasabi_path, file_obj=file)
+            upload_to_wasabi(bucket=settings.WASABI_BUCKET_NAME, path=wasabi_path, file_obj=file)
             logger.info(f"File successfully uploaded to Wasabi: {wasabi_path} for session_id: {session_id}")
         except Exception as e_wasabi:
             logger.error(f"Wasabi Error: Failed to upload file for session_id {session_id}: {e_wasabi}", exc_info=True)
             raise strawberry.GraphQLError(f"Failed to upload file to Wasabi: {str(e_wasabi)}")
 
-        # Dispatch Celery Task
+        # --- Dispatch Celery Task ---
         celery_task_fn = CELERY_TASK_MAP.get(input.load_type)
         try:
             task_instance = celery_task_fn.delay(
@@ -211,7 +188,6 @@ class Mutation:
                 original_filename=original_filename
             )
         except Exception as e:
-            logger.error(f"Error dispatching Celery task: {e}", exc_info=True)
             raise strawberry.GraphQLError(f"Failed to dispatch Celery task: {str(e)}")
 
         return UploadSessionType(**created_session_dict)
