@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 import logging
+import sys
 from csv_parser import load_skus_from_csv
 from validator import validate_sku_list
 from sku_processor import process_skus, ProcessedSKUData
@@ -13,8 +14,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Detect if the app is running with --reload flag
-import sys
-
 def is_reload_mode() -> bool:
     return "--reload" in sys.argv
 
