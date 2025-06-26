@@ -8,10 +8,6 @@ from data_models import SKU  # For type hinting if needed
 # Initialize the FastAPI app
 app = FastAPI()
 
-# Disable reload in production environment (only enable in dev)
-if app.environment == 'production':
-    app.reload = False
-
 # Setting up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
