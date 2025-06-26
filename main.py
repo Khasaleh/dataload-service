@@ -12,6 +12,15 @@ app = FastAPI()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Detect if the app is running with --reload flag
+import sys
+
+def is_reload_mode() -> bool:
+    return "--reload" in sys.argv
+
+# Log the environment and whether --reload is enabled
+logger.info(f"FastAPI application startup... Environment: {settings.ENVIRONMENT}, Reload Mode: {is_reload_mode()}")
+
 def run_sku_processing_pipeline(csv_file_path: str) -> ProcessedSKUData:
     """
     Runs the full SKU processing pipeline:
