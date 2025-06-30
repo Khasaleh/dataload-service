@@ -1,25 +1,18 @@
 import strawberry
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict # Retain Dict if used by other mutations
 import datetime
 import uuid  # For session_id generation
 from app.core.config import settings  # Import centralized settings
-from app.graphql_types import UploadSessionType, TokenResponseType, UserType
+# TokenResponseType removed, UserType might be used by context or other mutations
+from app.graphql_types import UploadSessionType, UserType
 from strawberry.file_uploads import Upload
-from jose import jwt  # Added
-from datetime import timedelta  # Added
+# jose.jwt and timedelta are no longer needed here as token generation is removed
+# from jose import jwt
+# from datetime import timedelta
 
 
 # --- GraphQL Input Types ---
-@strawberry.input
-class GenerateTokenInput:
-    """Input type for generating an authentication token."""
-    username: str
-    password: str
-
-@strawberry.input
-class RefreshTokenInput:
-    """Input type for refreshing an authentication token."""
-    refreshToken: str
+# GenerateTokenInput and RefreshTokenInput are removed.
 
 @strawberry.input
 class UploadFileInput:
@@ -34,77 +27,12 @@ class Mutation:
     Defines all available write operations in the GraphQL API.
     """
 
-    @strawberry.mutation
-    def generate_token(self, input: GenerateTokenInput) -> Optional[TokenResponseType]:
-        """
-        Generates an authentication token (JWT) and a refresh token for a user
-        given valid credentials.
-        """
-        user_details = authenticate_user_placeholder(username=input.username, password=input.password)
+    # generate_token mutation removed.
+    # refresh_token mutation removed.
 
-        if not user_details:
-            raise strawberry.GraphQLError("Invalid username or password.")
-
-        # Create the JWT access token payload
-        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token_payload = {
-            "sub": user_details["username"],
-            "userId": user_details["user_id"],
-            "companyId": user_details["business_id"],  # Using companyId in token as per original spec
-            "role": [{"authority": role_name} for role_name in user_details["roles"]],
-            "iat": datetime.datetime.utcnow(),
-            "exp": datetime.datetime.utcnow() + access_token_expires
-        }
-
-        # Use SECRET_KEY and ALGORITHM from centralized settings
-        encoded_jwt = jwt.encode(access_token_payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
-
-        # Generate a refresh token
-        refresh_token_value = f"mock-rt-{user_details['username']}-{uuid.uuid4()}"
-
-        return TokenResponseType(
-            token=encoded_jwt,
-            token_type="bearer",
-            refreshToken=refresh_token_value
-        )
-
-    @strawberry.mutation
-    async def refresh_token(self, input: RefreshTokenInput) -> Optional[TokenResponseType]:
-        """
-        Refreshes an authentication token set (access and refresh tokens)
-        using a provided refresh token.
-        """
-        user_details_for_refresh = None
-
-        # Validate the refresh token
-        if input.refreshToken and input.refreshToken.startswith("mock-rt-testuser"):
-            user_details_for_refresh = _MOCK_USERS_DB.get("testuser")
-        elif input.refreshToken and input.refreshToken.startswith("mock-rt-adminuser"):
-            user_details_for_refresh = _MOCK_USERS_DB.get("adminuser")
-
-        if not user_details_for_refresh:
-            raise strawberry.GraphQLError("Invalid or expired refresh token.")
-
-        # Generate new access token
-        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token_payload = {
-            "sub": user_details_for_refresh["username"],
-            "userId": user_details_for_refresh["user_id"],
-            "companyId": user_details_for_refresh["business_id"],
-            "role": [{"authority": role_name} for role_name in user_details_for_refresh["roles"]],
-            "iat": datetime.datetime.utcnow(),
-            "exp": datetime.datetime.utcnow() + access_token_expires
-        }
-
-        new_access_token = jwt.encode(access_token_payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
-
-        new_refresh_token_value = f"mock-rt-{user_details_for_refresh['username']}-{uuid.uuid4()}"
-
-        return TokenResponseType(
-            token=new_access_token,
-            token_type="bearer",
-            refreshToken=new_refresh_token_value
-        )
+    # Placeholder authentication function and mock DB are removed as they were only for token generation.
+    # _MOCK_USERS_DB = { ... } removed
+    # def authenticate_user_placeholder(...) removed
 
     @strawberry.mutation
     async def upload_file(self, info: strawberry.types.Info, file: Upload, input: UploadFileInput) -> UploadSessionType:
