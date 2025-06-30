@@ -37,19 +37,7 @@ class UserType:
     business_id: str            # Corresponds to 'companyId' claim from JWT (mapped to 'business_id' in auth context).
     roles: List[str]            # List of role strings (e.g., ["ROLE_ADMIN", "ROLE_USER"]).
 
-@strawberry.type
-class TokenResponseType:
-    """
-    Response type for authentication token generation.
-    Includes the access token and a refresh token.
-    """
-    token: str          # The JWT access token (often referred to as auth-token).
-    token_type: str     # Typically "bearer".
-    refreshToken: str   # The refresh token (often referred to as auth-refreshtoken).
-    # Optional fields if the token generation response should directly include some user info:
-    # user_id: Optional[strawberry.ID] = None
-    # username: Optional[str] = None
-    # roles: Optional[List[str]] = None
+# TokenResponseType removed as token generation mutations are removed.
 
 @strawberry.type
 class StandardMessageType:
@@ -126,4 +114,3 @@ class PriceInput:
     discount_price: Optional[float] = None
     cost_price: Optional[float] = None
     currency: Optional[str] = "USD"
-
