@@ -3,7 +3,7 @@ import logging
 from typing import Any, Iterator
 from contextlib import contextmanager
 from redis.client import Pipeline
-from app.core.config import settings # Import centralized settings
+from app.core.config import settings  # Import centralized settings
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +12,7 @@ REDIS_HOST = settings.REDIS_HOST
 REDIS_PORT = settings.REDIS_PORT
 REDIS_DB_ID_MAPPING = settings.REDIS_DB_ID_MAPPING
 REDIS_SESSION_TTL_SECONDS = settings.REDIS_SESSION_TTL_SECONDS
+REDIS_PASSWORD = settings.REDIS_PASSWORD  # Get Redis password from settings
 
 redis_client_instance = None
 if REDIS_HOST and REDIS_PORT is not None and REDIS_DB_ID_MAPPING is not None:
@@ -22,14 +23,15 @@ if REDIS_HOST and REDIS_PORT is not None and REDIS_DB_ID_MAPPING is not None:
             host=REDIS_HOST,
             port=REDIS_PORT,
             db=REDIS_DB_ID_MAPPING,
+            password=REDIS_PASSWORD,  # Provide password if it exists
             decode_responses=True
         )
-        redis_client_instance.ping()
+        redis_client_instance.ping()  # Check if Redis is reachable
         logger.info(f"Connected to Redis for ID mapping utilities: {REDIS_HOST}:{REDIS_PORT}, DB: {REDIS_DB_ID_MAPPING}")
     except redis.exceptions.ConnectionError as e:
         logger.error(f"Redis connection failed for ID mapping utilities ({REDIS_HOST}:{REDIS_PORT}, DB: {REDIS_DB_ID_MAPPING}): {e}")
         redis_client_instance = None
-    except Exception as e: # Catch other potential errors like config issues if REDIS_PORT is somehow not int
+    except Exception as e:
         logger.error(f"Failed to initialize Redis client for ID mapping utilities: {e}", exc_info=True)
         redis_client_instance = None
 else:

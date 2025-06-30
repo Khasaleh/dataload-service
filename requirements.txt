@@ -12,3 +12,4 @@ passlib
 python-dotenv
 strawberry-graphql[fastapi]
 pytest-mock
+pydantic-settings
