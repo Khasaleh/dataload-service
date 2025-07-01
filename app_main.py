@@ -9,16 +9,34 @@ def main():
 
     # Optional: If the secret in env is base64 encoded (like in K8s secrets)
     jwt_secret_is_base64 = os.getenv("JWT_SECRET_IS_BASE64", "False").lower() == 'true'
+
+    # This variable will hold the secret, either as string or bytes
+    actual_jwt_secret_for_lib: str | bytes
+
     if jwt_secret_is_base64 and jwt_secret_key:
         try:
-            jwt_secret_key = base64.b64decode(jwt_secret_key).decode('utf-8')
-            print("Successfully decoded base64 encoded JWT_SECRET_KEY from environment.")
+            # Decode from base64, keep as bytes
+            actual_jwt_secret_for_lib = base64.b64decode(jwt_secret_key)
+            print("Successfully decoded base64 encoded JWT_SECRET_KEY from environment (kept as bytes).")
         except Exception as e:
             print(f"Error decoding base64 JWT_SECRET_KEY: {e}. Please ensure it's valid base64.")
-            jwt_secret_key = None # Set to None to indicate failure
+            jwt_secret_key = None # Indicate failure to load/decode the original string
+            actual_jwt_secret_for_lib = b'' # or some other indicator of failure for bytes
+    elif jwt_secret_key:
+        # Use the secret key as a string directly
+        actual_jwt_secret_for_lib = jwt_secret_key
+        print("Using JWT_SECRET_KEY from environment as a raw string.")
+    else:
+        # jwt_secret_key was not set initially
+        pass # The check below will handle it
 
-    if not jwt_secret_key:
-        print("Error: JWT_SECRET_KEY environment variable not set or failed to decode.")
+    if not jwt_secret_key: # This checks if the original env var was set
+        print("Error: JWT_SECRET_KEY environment variable not set.")
+        return
+
+    if isinstance(actual_jwt_secret_for_lib, bytes) and not actual_jwt_secret_for_lib and jwt_secret_is_base64 :
+        # This means base64 decoding failed, and we ended up with empty bytes from the error handling
+        print("Error: Failed to obtain a valid secret after base64 decoding attempt.")
         print("Please set it to your JWT signing secret (base64 decoded if JWT_SECRET_IS_BASE64 is True).")
         return
 
@@ -67,7 +85,7 @@ def main():
     token_details = extract_jwt_details(
         token_string=token_to_process,
         verify_signature=current_run_verify_mode,
-        secret=jwt_secret_key
+        secret=actual_jwt_secret_for_lib # Pass the potentially bytes secret
     )
 
     # --- Display Results ---

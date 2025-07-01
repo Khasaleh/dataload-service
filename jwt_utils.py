@@ -82,10 +82,11 @@ def extract_business_id_from_company_id(company_id_str: str, user_id_from_token)
     return business_id
 
 
-def extract_jwt_details(token_string: str, verify_signature: bool, secret: str) -> dict:
+def extract_jwt_details(token_string: str, verify_signature: bool, secret: str | bytes) -> dict:
     """
     Decodes a JWT token and extracts details.
     Allows switching between secure (verify signature/expiration) and insecure (bypass verification) modes.
+    The 'secret' can be a string or bytes. PyJWT handles both for HMAC algorithms.
     """
     print(f"--- Processing token. Secure mode: {'ON' if verify_signature else 'OFF'} ---")
 
