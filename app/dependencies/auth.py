@@ -57,10 +57,17 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
                 raise credentials_exception # Or a more specific configuration error
 
             logger.warning("JWT signature verification is DISABLED. Decoding token without checking signature.")
+            logger.debug(f"Attempting to decode with (disabled verification) - ALGORITHM: {ALGORITHM}, SECRET_KEY first 10 chars: {SECRET_KEY[:10] if SECRET_KEY and isinstance(SECRET_KEY, str) else 'SECRET_KEY_NOT_STRING_OR_NONE'}")
             try:
                 payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_signature": False})
+                logger.debug(f"Payload after decode (verification disabled): {payload}")
             except JWTError as e: # Catch errors during decoding even without signature check (e.g., malformed token)
                 logger.error(f"JWTError decoding token (verification disabled): {e}")
+                raise credentials_exception
+            except Exception as e_decode: # Catch any other unexpected error during decode
+                logger.error(f"Unexpected error during jwt.decode with verification disabled: {e_decode}", exc_info=True)
+                # It's possible an unexpected error here could lead to payload not being what's expected.
+                # For safety, re-raise as credentials_exception or a more specific internal server error.
                 raise credentials_exception
 
 
