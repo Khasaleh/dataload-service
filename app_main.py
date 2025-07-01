@@ -5,9 +5,16 @@ from jwt_utils import extract_jwt_details # Import the function from our new lib
 
 def main():
     # --- Load Configuration from Environment Variables ---
+    # CRITICAL: JWT_SECRET_KEY is the secret used to verify JWT signatures.
+    # This value MUST EXACTLY MATCH the secret key used by the JWT issuer
+    # (e.g., your Java/Spring application) to SIGN the tokens.
+    # If these keys do not match, signature verification WILL FAIL.
     jwt_secret_key = os.getenv("JWT_SECRET_KEY")
 
     # Optional: If the secret in env is base64 encoded (like in K8s secrets)
+    # Set JWT_SECRET_IS_BASE64="True" if JWT_SECRET_KEY holds a base64 encoded version
+    # of the actual raw secret. The script will then decode it.
+    # Otherwise, JWT_SECRET_KEY is treated as the raw secret string.
     jwt_secret_is_base64 = os.getenv("JWT_SECRET_IS_BASE64", "False").lower() == 'true'
 
     # This variable will hold the secret, either as string or bytes
