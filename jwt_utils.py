@@ -1,21 +1,18 @@
 import jwt
 import os
 import datetime
-import argparse # Added for command-line arguments
+import argparse # Added for command-line arguments -> No longer needed here, will be in app_main.py
+import jwt # PyJWT library
+import os # For potential future use if any os-dependent feature is needed within utils
+import datetime # For type hinting or potential date operations if added later
 
-# --- Configuration Switch ---
-# Set this to True to enforce JWT signature and expiration verification (secure mode).
-# Set this to False to bypass signature and expiration verification (insecure mode - FOR DEBUGGING/LIMITED USE ONLY).
-# In a real application, this would likely come from an environment variable or a config file.
-# Example for environment variable:
-# VERIFY_JWT_SIGNATURE = os.getenv('VERIFY_JWT_SIGNATURE', 'True').lower() == 'true'
-VERIFY_JWT_SIGNATURE = True # Default to secure
+# --- Configuration Switch --- (Removed - this will be handled by the calling application)
+# VERIFY_JWT_SIGNATURE = True
 
-# The decoded secret key (replace with your actual secret if different)
-# This is the same secret we've been using from the K8s example.
-DECODED_JWT_SECRET = "CIUISecretKeyqwertyuiopASDFGHJKLzxcvbnmQWERTYUIOPasdfghjklZXCVBNMCIUISecretKeyqwertyuiopASDFGHJKLzxcvbnmQWERTYUIOPasdfghjklZXCVBNM"
+# --- Decoded JWT Secret --- (Removed - this will be passed by the calling application)
+# DECODED_JWT_SECRET = "..."
 
-# DEFAULT_TOKEN is removed, token will come from command line argument.
+# --- Default Token --- (Removed - token comes from the calling application)
 
 def extract_business_id_from_company_id(company_id_str: str, user_id_from_token) -> str | None:
     """
@@ -218,43 +215,5 @@ def extract_jwt_details(token_string: str, verify_signature: bool, secret: str) 
                 "verified_securely": False
             }
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Process a JWT token securely or insecurely and extract claims, including business_id.")
-    parser.add_argument("token", help="The JWT token string to process.")
-    parser.add_argument("--secure", dest='verify_signature_arg', action='store_true', help="Force secure verification (overrides global VERIFY_JWT_SIGNATURE).")
-    parser.add_argument("--insecure", dest='verify_signature_arg', action='store_false', help="Force insecure verification (overrides global VERIFY_JWT_SIGNATURE).")
-    parser.set_defaults(verify_signature_arg=None) # Default to using the global switch
-
-    args = parser.parse_args()
-    token_to_test = args.token
-
-    # Determine verification mode: command-line arg > global switch
-    if args.verify_signature_arg is not None:
-        current_verify_mode = args.verify_signature_arg
-        print(f"Using command-line override for verification mode: {'Secure' if current_verify_mode else 'Insecure'}")
-    else:
-        current_verify_mode = VERIFY_JWT_SIGNATURE # Use global switch
-        print(f"Using global VERIFY_JWT_SIGNATURE setting: {'Secure' if current_verify_mode else 'Insecure'}")
-
-    # Scenario 1: Secure verification (VERIFY_JWT_SIGNATURE = True at the top of the script)
-    print(f"\n--- SCENARIO 1: TESTING WITH VERIFICATION MODE = {'Secure' if current_verify_mode else 'Insecure'} ---")
-    # To run this scenario, ensure VERIFY_JWT_SIGNATURE at the top is True or use --secure/--insecure
-
-    details = extract_jwt_details(token_to_test, verify_signature=current_verify_mode, secret=DECODED_JWT_SECRET)
-    print(f"Extracted: Company ID = {details.get('companyId')}, User ID = {details.get('userId')}, Subject = {details.get('subject')}, Business ID = {details.get('business_id')}")
-    if details.get("error"):
-        print(f"Error: {details.get('error')}")
-    # print(f"Full Payload: {details.get('payload')}") # Potentially verbose
-    print(f"Verified Securely: {details.get('verified_securely')}")
-
-
-    # Example with an EXPIRED token (from previous tests)
-    # This token will also be processed according to current_verify_mode
-    EXPIRED_TOKEN = "eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJtdW1haXJhd2FuIiwiY29tcGFueUlkIjoiRmF6LTItMi0yMDI0LTA3LTM3OTkzIiwidXNlcklkIjoyLCJyb2xlIjpbeyJhdXRob3JpdHkiOiJST0xFX0FETUlOIn1dLCJpYXQiOjE3NTEyOTkxNzEsImV4cCI6MTc1MTMwMDk3MX0.c4uMTzeGm4niU9sPnN8M3K6JP9peRh29WwJbkiDb27D1Qxmhxivq0KGp8Bl8Y89XkO08Jks2a73_X8ZiyFTeFw"
-    print(f"\n--- TESTING EXPIRED TOKEN WITH VERIFICATION MODE = {'Secure' if current_verify_mode else 'Insecure'} ---")
-    details_expired = extract_jwt_details(EXPIRED_TOKEN, verify_signature=current_verify_mode, secret=DECODED_JWT_SECRET)
-    print(f"Extracted (Expired Token): Company ID = {details_expired.get('companyId')}, User ID = {details_expired.get('userId')}, Subject = {details_expired.get('subject')}, Business ID = {details_expired.get('business_id')}")
-    if details_expired.get("error"):
-        print(f"Error (Expired Token): {details_expired.get('error')}")
-    # print(f"Full Payload (Expired Token): {details_expired.get('payload')}") # Potentially verbose
-    print(f"Verified Securely (Expired Token): {details_expired.get('verified_securely')}")
+# Removed the if __name__ == "__main__": block.
+# This module is now intended to be imported by another script.
