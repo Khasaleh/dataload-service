@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from app.db.connection import get_session
 from app.db.models import UploadSessionOrm
 from app.models import UploadJobStatus, ErrorDetailModel, ErrorType
-from app.services.storage import client as wasabi_client
+from app.services.storage import s3_client as wasabi_client
 from app.services.validator import validate_csv
 from app.services.db_loaders import (
     load_category_to_db, load_brand_to_db, load_attribute_to_db,
