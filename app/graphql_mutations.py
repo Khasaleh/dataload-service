@@ -13,7 +13,7 @@ from app.services.storage import upload_file
 from app.models import UploadJobStatus
 
 # Import the Celery task functions from load_jobs
-from app.load_jobs import (
+from app.dataload.load_jobs import (
     process_products_file,
     process_product_items_file,
     process_categories_file,
