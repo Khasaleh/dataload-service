@@ -129,14 +129,14 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
 
         user_data_to_return = {
             "username": username,
-            "user_id": user_id, 
-            "business_id": business_details_id, 
-            "company_id_str": company_id_str,   
+            "user_id": user_id,
+            "business_id": business_details_id,
+            "company_id_str": company_id_str,
             "roles": roles
         }
         logger.debug(f"Successfully processed token. Returning user data: {user_data_to_return}")
         return user_data_to_return
-        
+
     except JWTError as e:
         logger.error(f"JWTError decoding token: {e}")
         raise credentials_exception
