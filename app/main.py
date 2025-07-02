@@ -1,7 +1,6 @@
 from typing import Optional
 from fastapi import FastAPI, Request, Depends
 import logging
-import json
 
 import strawberry
 from strawberry.fastapi import GraphQLRouter
@@ -28,32 +27,26 @@ app = FastAPI(
 )
 
 
-# --- Request Logging Middleware ---
+# --- Request Logging Middleware (Safe) ---
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     logger.info("===== Incoming Request =====")
     logger.info(f"Method: {request.method}")
     logger.info(f"Path: {request.url.path}")
 
-    headers = dict(request.headers)
-    for k, v in headers.items():
+    for k, v in request.headers.items():
         logger.info(f"Header: {k} = {v}")
 
-    body_bytes = await request.body()
-    body_preview = body_bytes[:1000]
-
-    try:
-        body_json = json.loads(body_bytes.decode())
-        logger.info("Body JSON:\n" + json.dumps(body_json, indent=2))
-    except Exception:
-        logger.info(f"Body (raw bytes preview): {body_preview}")
+    # ⚠️ IMPORTANT:
+    # Do not consume request.body() here to avoid breaking file upload parsing
+    # For example, multipart/form-data bodies can't be read twice.
 
     response = await call_next(request)
     logger.info(f"===== Response Status: {response.status_code} =====")
     return response
 
 
-# --- GraphQL Setup ---
+# --- GraphQL Context Factory ---
 async def get_context(
     request: Request,
     current_user: Optional[dict] = Depends(get_current_user)
@@ -63,11 +56,17 @@ async def get_context(
         "current_user": current_user,
     }
 
-schema = strawberry.Schema(query=Query, mutation=Mutation)
 
+# --- Strawberry Schema Setup ---
+#schema = strawberry.Schema(query=Query, mutation=Mutation)
+
+#graphql_app_router = GraphQLRouter(
+#    schema,
+#    context_getter=get_context,
+#    graphiql=True
+#)
 graphql_app_router = GraphQLRouter(
     schema,
-    context_getter=get_context,
     graphiql=True
 )
 
