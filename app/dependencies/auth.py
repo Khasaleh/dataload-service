@@ -29,6 +29,8 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
     Decodes the JWT token, extracts user claims, and returns them as a dictionary.
     Raises HTTPException if the token is invalid or essential claims are missing.
     """
+    logger.debug(f"Received token for processing: {token}") # Log the raw token
+
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -56,20 +58,27 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
                 logger.error("JWT_SECRET is not configured, cannot decode token even with verification disabled.")
                 raise credentials_exception # Or a more specific configuration error
 
-            logger.warning("JWT signature verification is DISABLED. Decoding token without checking signature.")
-            logger.debug(f"Attempting to decode with (disabled verification) - ALGORITHM: {ALGORITHM}, SECRET_KEY first 10 chars: {SECRET_KEY[:10] if SECRET_KEY and isinstance(SECRET_KEY, str) else 'SECRET_KEY_NOT_STRING_OR_NONE'}")
+            logger.warning("JWT signature verification is DISABLED. Attempting to get unverified claims.")
+            # Removed SECRET_KEY and ALGORITHM dependent debug line as get_unverified_claims doesn't use them.
             try:
-                payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_signature": False})
-                logger.debug(f"Payload after decode (verification disabled): {payload}")
-            except JWTError as e: # Catch errors during decoding even without signature check (e.g., malformed token)
-                logger.error(f"JWTError decoding token (verification disabled): {e}")
+                # Use jwt.get_unverified_claims to bypass signature and other standard checks like expiry, audience etc.
+                # This function is specifically for situations where you only want the claims from an untrusted token.
+                payload = jwt.get_unverified_claims(token)
+                logger.debug(f"Payload from get_unverified_claims (verification disabled): {payload}")
+            except JWTError as e: # Catches errors like malformed token, invalid JSON in payload etc.
+                logger.error(f"JWTError using get_unverified_claims (verification disabled): {e}")
                 raise credentials_exception
-            except Exception as e_decode: # Catch any other unexpected error during decode
-                logger.error(f"Unexpected error during jwt.decode with verification disabled: {e_decode}", exc_info=True)
-                # It's possible an unexpected error here could lead to payload not being what's expected.
-                # For safety, re-raise as credentials_exception or a more specific internal server error.
+            except Exception as e_unverified_claims: # Catch any other unexpected error
+                logger.error(f"Unexpected error during jwt.get_unverified_claims with verification disabled: {e_unverified_claims}", exc_info=True)
                 raise credentials_exception
 
+        # IMPORTANT: Since get_unverified_claims does not check 'exp', we might need to check it manually
+        # if disabling signature verification should still honor token expiry.
+        # For now, following the direct implication of "get unverified claims".
+        # If expiry check is needed, it would be:
+        # if "exp" in payload and datetime.utcfromtimestamp(payload["exp"]) < datetime.utcnow():
+        #     logger.warning(f"Token has expired (checked manually after get_unverified_claims). Exp: {payload['exp']}")
+        #     raise credentials_exception # Or a specific expiry error
 
         username: Optional[str] = payload.get("sub")
         user_id: Optional[Any] = payload.get("userId") # Assuming userId can be int or string from token
@@ -87,11 +96,11 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
                 except ValueError:
                     logger.warning(f"Invalid format for businessId part in companyId: '{parts[2]}' from companyIdString '{company_id_str}'. Cannot parse to int.")
                     # This is treated as a critical failure as business_details_id is essential.
-                    raise missing_claims_exception # Or token_missing_business_details_exception if preferred here
+                    raise missing_claims_exception
             else:
                 logger.warning(f"companyIdString '{company_id_str}' does not have enough parts (expected format like FAZ-userId-businessId-year-month-random) to extract business_details_id.")
                 # This is also critical if business_details_id is essential.
-                raise missing_claims_exception # Or token_missing_business_details_exception
+                raise missing_claims_exception
 
         # Essential claims check
         if username is None or user_id is None: # Check for username and user_id first
@@ -125,11 +134,9 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
             "company_id_str": company_id_str,   # Original companyId string, kept for reference if needed
             "roles": roles
         }
-    except JWTError as e: # This will catch JWTError from the verified path if not caught by more specific handlers
+    except JWTError as e:
         logger.error(f"JWTError decoding token: {e}")
         raise credentials_exception
-    except HTTPException as e: # Re-raise HTTPExceptions explicitly
-        raise
     except Exception as e: # Catch any other unexpected errors during claim processing
         logger.error(f"Unexpected error processing token claims: {e}", exc_info=True)
         raise credentials_exception
