@@ -58,7 +58,7 @@ async def get_context(
 
 
 # --- Strawberry Schema Setup ---
-#schema = strawberry.Schema(query=Query, mutation=Mutation)
+schema = strawberry.Schema(query=Query, mutation=Mutation)
 
 #graphql_app_router = GraphQLRouter(
 #    schema,
