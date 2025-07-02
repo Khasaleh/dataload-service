@@ -37,7 +37,7 @@ graphql_app_router = GraphQLRouter(
 # Initialize FastAPI app
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Provides GraphQL interface for catalog data uploads, status tracking, and user authentication.",
+    description="Provides GraphQL interface for catalog data uploads, status tracking, and user authentication. Also provides REST API for file uploads.",
     version="2.0.0",
     contact={"name": "Fazeal Dev Team", "email": "support@fazeal.com"},
     license_info={"name": "MIT"},
@@ -45,7 +45,18 @@ app = FastAPI(
 
 logger.info(f"FastAPI application startup... Environment: {settings.ENVIRONMENT}")
 
+# Include GraphQL router
 app.include_router(graphql_app_router, prefix=settings.API_PREFIX, tags=["GraphQL"])
+
+# Include REST API routers
+from app.routes.upload import router as upload_api_router
+from app.routes.status_api import router as status_api_router # Assuming this might exist or be added
+from app.routes.token import router as token_api_router # Assuming this exists for token operations via REST
+
+app.include_router(upload_api_router, prefix="/api/v1", tags=["Uploads"])
+app.include_router(status_api_router, prefix="/api/v1/status", tags=["Status"]) # Example, adjust if needed
+app.include_router(token_api_router, prefix="/api/auth", tags=["Authentication"]) # Example, adjust if needed
+
 
 @app.get("/", tags=["Root"])
 async def read_root():

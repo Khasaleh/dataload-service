@@ -1,13 +1,11 @@
 import strawberry
-from typing import Optional, Any, Dict
+from typing import Optional, Dict, Any # Dict and Any are used in authenticate_user_placeholder
 import datetime
-import uuid  # For session_id generation
-from app.core.config import settings  # Import centralized settings
-from app.graphql_types import UploadSessionType, TokenResponseType, UserType
-from strawberry.file_uploads import Upload
-from jose import jwt  # Added
-from datetime import timedelta  # Added
-
+import uuid
+from app.core.config import settings
+from app.graphql_types import TokenResponseType # UploadSessionType and UserType removed
+from jose import jwt
+from datetime import timedelta
 
 # --- GraphQL Input Types ---
 @strawberry.input
@@ -21,10 +19,43 @@ class RefreshTokenInput:
     """Input type for refreshing an authentication token."""
     refreshToken: str
 
-@strawberry.input
-class UploadFileInput:
-    """Input type for the file upload mutation."""
-    load_type: str
+# Removed UploadFileInput as it's no longer needed
+# @strawberry.input
+# class UploadFileInput:
+#     """Input type for the file upload mutation."""
+#     load_type: str
+
+# Placeholder for authentication logic - replace with actual implementation
+# These would typically involve password hashing, DB lookups, etc.
+_MOCK_USERS_DB = {
+    "testuser": {
+        "username": "testuser",
+        "user_id": "user123",
+        "business_id": "FAZ-user123-1-2023-10-randomXYZ", # Example companyId string
+        "roles": ["catalog_editor"],
+        "hashed_password": "hashed_password_for_testuser" # Store hashed passwords
+    },
+    "adminuser": {
+        "username": "adminuser",
+        "user_id": "admin456",
+        "business_id": "FAZ-admin456-2-2023-11-randomABC", # Example companyId string
+        "roles": ["admin"],
+        "hashed_password": "hashed_password_for_adminuser"
+    }
+}
+
+def authenticate_user_placeholder(username: str, password: str) -> Optional[Dict[str, Any]]:
+    """
+    Placeholder for user authentication.
+    In a real app, this would check credentials against a database.
+    """
+    user = _MOCK_USERS_DB.get(username)
+    if user: # and check_password(password, user["hashed_password"]): # Replace with actual password check
+        # Simulate password check for now
+        if (username == "testuser" and password == "testpassword") or \
+           (username == "adminuser" and password == "adminpassword"):
+            return user
+    return None
 
 # --- GraphQL Root Mutation Type ---
 @strawberry.type
@@ -40,26 +71,25 @@ class Mutation:
         Generates an authentication token (JWT) and a refresh token for a user
         given valid credentials.
         """
+        # In a real app, authenticate_user_placeholder would validate against DB, check hashed passwords etc.
         user_details = authenticate_user_placeholder(username=input.username, password=input.password)
 
         if not user_details:
             raise strawberry.GraphQLError("Invalid username or password.")
 
-        # Create the JWT access token payload
         access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token_payload = {
             "sub": user_details["username"],
             "userId": user_details["user_id"],
-            "companyId": user_details["business_id"],  # Using companyId in token as per original spec
-            "role": [{"authority": role_name} for role_name in user_details["roles"]],
+            "companyId": user_details["business_id"], # This is the string like "FAZ-user123-1-..."
+            "role": [{"authority": role_name} for role_name in user_details["roles"]], # Standard role claim
             "iat": datetime.datetime.utcnow(),
             "exp": datetime.datetime.utcnow() + access_token_expires
         }
-
-        # Use SECRET_KEY and ALGORITHM from centralized settings
         encoded_jwt = jwt.encode(access_token_payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
-        # Generate a refresh token
+        # For simplicity, refresh token generation is also mocked.
+        # In production, refresh tokens should be securely generated, stored, and managed.
         refresh_token_value = f"mock-rt-{user_details['username']}-{uuid.uuid4()}"
 
         return TokenResponseType(
@@ -73,10 +103,13 @@ class Mutation:
         """
         Refreshes an authentication token set (access and refresh tokens)
         using a provided refresh token.
+        Placeholder implementation.
         """
-        user_details_for_refresh = None
+        # In a real app, this would involve validating the refresh token against a store
+        # and ensuring it hasn't been revoked or expired.
+        user_details_for_refresh = None # This would be fetched based on validated refresh token
 
-        # Validate the refresh token
+        # Mock validation based on username encoded in the mock refresh token
         if input.refreshToken and input.refreshToken.startswith("mock-rt-testuser"):
             user_details_for_refresh = _MOCK_USERS_DB.get("testuser")
         elif input.refreshToken and input.refreshToken.startswith("mock-rt-adminuser"):
@@ -85,109 +118,33 @@ class Mutation:
         if not user_details_for_refresh:
             raise strawberry.GraphQLError("Invalid or expired refresh token.")
 
-        # Generate new access token
-        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token_payload = {
+        new_access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        new_access_token_payload = {
             "sub": user_details_for_refresh["username"],
             "userId": user_details_for_refresh["user_id"],
             "companyId": user_details_for_refresh["business_id"],
             "role": [{"authority": role_name} for role_name in user_details_for_refresh["roles"]],
             "iat": datetime.datetime.utcnow(),
-            "exp": datetime.datetime.utcnow() + access_token_expires
+            "exp": datetime.datetime.utcnow() + new_access_token_expires
         }
+        new_access_token = jwt.encode(new_access_token_payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
-        new_access_token = jwt.encode(access_token_payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
-
+        # Optionally, generate a new refresh token as well (good practice)
         new_refresh_token_value = f"mock-rt-{user_details_for_refresh['username']}-{uuid.uuid4()}"
 
         return TokenResponseType(
             token=new_access_token,
             token_type="bearer",
-            refreshToken=new_refresh_token_value
+            refreshToken=new_refresh_token_value # Send back the new refresh token
         )
 
-    @strawberry.mutation
-    async def upload_file(self, info: strawberry.types.Info, file: Upload, input: UploadFileInput) -> UploadSessionType:
-        """
-        Handles a file upload, creates an upload session record,
-        uploads the file to Wasabi, and dispatches a Celery task for processing.
-        Requires authentication.
-        """
-        current_user_data = info.context.get("current_user")
-        if not current_user_data or not current_user_data.get("business_id"):
-            raise strawberry.GraphQLError("Authentication required: User or business ID not found in context.")
-
-        business_id = current_user_data["business_id"]
-
-        # Validate load_type and file type
-        if input.load_type not in CELERY_TASK_MAP:
-            raise strawberry.GraphQLError(f"Invalid load type: {input.load_type}. Supported types are: {list(CELERY_TASK_MAP.keys())}")
-
-        if not file.filename or not file.filename.lower().endswith('.csv'):
-            raise strawberry.GraphQLError("Invalid file type. Only CSV files are allowed.")
-
-        contents = await file.read()
-        if not contents:
-            raise strawberry.GraphQLError("Empty CSV file submitted.")
-
-        session_id = str(uuid.uuid4())
-        original_filename = file.filename
-        wasabi_path = f"uploads/{business_id}/{session_id}/{input.load_type}/{original_filename}"
-
-        # --- Create UploadSession record in DB ---
-        session_data_to_save = {
-            "session_id": session_id,
-            "business_id": business_id,
-            "load_type": input.load_type,
-            "original_filename": original_filename,
-            "wasabi_path": wasabi_path,
-            "status": "pending",  # Initial status
-            "created_at": datetime.datetime.utcnow(),
-            "updated_at": datetime.datetime.utcnow(),
-            "details": None,
-            "record_count": None,
-            "error_count": None
-        }
-
-        db_session = None
-        try:
-            db_session = get_db_session_sync(business_id=business_id)
-
-            new_session_orm_instance = UploadSessionOrm(**session_data_to_save)
-            db_session.add(new_session_orm_instance)
-            db_session.commit()
-            db_session.refresh(new_session_orm_instance)
-
-            created_session_dict = {c.name: getattr(new_session_orm_instance, c.name) for c in new_session_orm_instance.__table__.columns}
-            logger.info(f"Upload session record created in DB for session_id: {session_id}")
-
-        except Exception as e_db:
-            logger.error(f"DB Error: Failed to create upload session record for session_id {session_id}: {e_db}", exc_info=True)
-            if db_session:
-                db_session.rollback()
-            raise strawberry.GraphQLError(f"Failed to create upload session record in DB: {str(e_db)}")
-        finally:
-            if db_session:
-                db_session.close()
-
-        # --- Upload to Wasabi ---
-        try:
-            upload_to_wasabi(bucket=settings.WASABI_BUCKET_NAME, path=wasabi_path, file_obj=file)
-            logger.info(f"File successfully uploaded to Wasabi: {wasabi_path} for session_id: {session_id}")
-        except Exception as e_wasabi:
-            logger.error(f"Wasabi Error: Failed to upload file for session_id {session_id}: {e_wasabi}", exc_info=True)
-            raise strawberry.GraphQLError(f"Failed to upload file to Wasabi: {str(e_wasabi)}")
-
-        # --- Dispatch Celery Task ---
-        celery_task_fn = CELERY_TASK_MAP.get(input.load_type)
-        try:
-            task_instance = celery_task_fn.delay(
-                business_id=business_id,
-                session_id=session_id,
-                wasabi_file_path=wasabi_path,
-                original_filename=original_filename
-            )
-        except Exception as e:
-            raise strawberry.GraphQLError(f"Failed to dispatch Celery task: {str(e)}")
-
-        return UploadSessionType(**created_session_dict)
+    # The upload_file mutation has been removed.
+    # @strawberry.mutation
+    # async def upload_file(self, info: strawberry.types.Info, file: Upload, input: UploadFileInput) -> UploadSessionType:
+    #     """
+    #     Handles a file upload, creates an upload session record,
+    #     uploads the file to Wasabi, and dispatches a Celery task for processing.
+    #     Requires authentication.
+    #     """
+    #     # ... implementation was here ...
+    #     pass # Mutation removed
