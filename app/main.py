@@ -14,7 +14,7 @@ logger.info(f"Logging configured with level: {settings.LOG_LEVEL.upper()}")
 
 # --- GraphQL Setup ---
 from app.graphql_queries import Query
-from app.graphql_mutations import Mutation
+# from app.graphql_mutations import Mutation # Mutation class is no longer used
 from app.dependencies.auth import get_current_user
 
 async def get_context(
@@ -26,7 +26,8 @@ async def get_context(
         "current_user": current_user,
     }
 
-schema = strawberry.Schema(query=Query, mutation=Mutation)
+# Schema is now query-only
+schema = strawberry.Schema(query=Query)
 
 graphql_app_router = GraphQLRouter(
     schema,
