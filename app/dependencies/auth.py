@@ -29,8 +29,6 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
     Decodes the JWT token, extracts user claims, and returns them as a dictionary.
     Raises HTTPException if the token is invalid or essential claims are missing.
     """
-    logger.debug(f"Received token for processing: {token}") # Log the raw token
-
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -40,45 +38,9 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Invalid token: Missing or invalid essential claims (e.g., sub, userId, parsable companyId).",
     )
-    token_missing_business_details_exception = HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST, # Or 401/403 depending on desired strictness
-        detail="Token is missing required business details.",
-    )
 
     try:
-        if settings.JWT_VERIFICATION_ENABLED:
-            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        else:
-            # Decode without signature verification
-            # HS256/HS512 still require a key for structural decoding even if not verifying signature.
-            # If no SECRET_KEY is set in .env when verification is disabled, this might error.
-            # Consider if a dummy key or specific handling is needed if SECRET_KEY can be truly absent.
-            # For now, assume SECRET_KEY is always present in settings, even if it's a default/dummy one.
-            if not SECRET_KEY:
-                logger.error("JWT_SECRET is not configured, cannot decode token even with verification disabled.")
-                raise credentials_exception # Or a more specific configuration error
-
-            logger.warning("JWT signature verification is DISABLED. Attempting to get unverified claims.")
-            # Removed SECRET_KEY and ALGORITHM dependent debug line as get_unverified_claims doesn't use them.
-            try:
-                # Use jwt.get_unverified_claims to bypass signature and other standard checks like expiry, audience etc.
-                # This function is specifically for situations where you only want the claims from an untrusted token.
-                payload = jwt.get_unverified_claims(token)
-                logger.debug(f"Payload from get_unverified_claims (verification disabled): {payload}")
-            except JWTError as e: # Catches errors like malformed token, invalid JSON in payload etc.
-                logger.error(f"JWTError using get_unverified_claims (verification disabled): {e}")
-                raise credentials_exception
-            except Exception as e_unverified_claims: # Catch any other unexpected error
-                logger.error(f"Unexpected error during jwt.get_unverified_claims with verification disabled: {e_unverified_claims}", exc_info=True)
-                raise credentials_exception
-
-        # IMPORTANT: Since get_unverified_claims does not check 'exp', we might need to check it manually
-        # if disabling signature verification should still honor token expiry.
-        # For now, following the direct implication of "get unverified claims".
-        # If expiry check is needed, it would be:
-        # if "exp" in payload and datetime.utcfromtimestamp(payload["exp"]) < datetime.utcnow():
-        #     logger.warning(f"Token has expired (checked manually after get_unverified_claims). Exp: {payload['exp']}")
-        #     raise credentials_exception # Or a specific expiry error
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
 
         username: Optional[str] = payload.get("sub")
         user_id: Optional[Any] = payload.get("userId") # Assuming userId can be int or string from token
@@ -102,21 +64,14 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
                 # This is also critical if business_details_id is essential.
                 raise missing_claims_exception
 
-        # Essential claims check
-        if username is None or user_id is None: # Check for username and user_id first
+        # Essential claims check now includes the parsed integer business_details_id
+        if username is None or user_id is None or business_details_id is None:
             logger.warning(
-                f"Token missing username or userId. Username: {username}, UserID: {user_id}. Payload: {payload}"
+                f"Token missing one or more core claims or failed to parse/validate business_details_id. "
+                f"Username: {username}, UserID: {user_id}, Parsed BusinessDetailsID: {business_details_id}, "
+                f"Original CompanyIDStr: {company_id_str}. Payload: {payload}"
             )
             raise missing_claims_exception
-
-        if business_details_id is None: # Specific check for business_details_id
-            logger.warning(
-                f"Token failed to provide valid business_details_id. "
-                f"Original CompanyIDStr: {company_id_str}, Parsed BusinessDetailsID: {business_details_id}. "
-                f"Payload: {payload}"
-            )
-            # Raise the more specific exception if business_id is the issue
-            raise token_missing_business_details_exception
 
         roles: List[str] = []
         if isinstance(role_array, list):
@@ -127,21 +82,16 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
         # If roles list is empty and role is strictly expected, could also raise an exception here
         # or assign a default role. For now, an empty list is permissible.
 
-        user_data_to_return = {
+        return {
             "username": username,
-            "user_id": user_id,
-            "business_id": business_details_id,
-            "company_id_str": company_id_str,
+            "user_id": user_id, # Consider standardizing type if necessary (e.g., always int or always str)
+            "business_id": business_details_id, # This is now the parsed integer ID
+            "company_id_str": company_id_str,   # Original companyId string, kept for reference if needed
             "roles": roles
         }
-        logger.debug(f"Successfully processed token. Returning user data: {user_data_to_return}")
-        return user_data_to_return
-
     except JWTError as e:
         logger.error(f"JWTError decoding token: {e}")
         raise credentials_exception
-    except HTTPException as e: # Re-raise HTTPExceptions explicitly
-        raise
     except Exception as e: # Catch any other unexpected errors during claim processing
         logger.error(f"Unexpected error processing token claims: {e}", exc_info=True)
         raise credentials_exception

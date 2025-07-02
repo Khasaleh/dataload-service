@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+celery
+redis
+sqlalchemy
+python-jose[cryptography]
+boto3
+passlib

@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     JWT_SECRET: str = Field(..., validation_alias="SECRET_KEY")
     JWT_ALGORITHM: str = "HS512"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-    JWT_VERIFICATION_ENABLED: bool = False
+
     # Redis Configuration
     REDIS_HOST: str = "192.168.1.245"
     REDIS_PORT: int = 6379

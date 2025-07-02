@@ -1,4 +1,4 @@
-fastapi>=0.219
+fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.6
 python-multipart>=0.0.7
@@ -8,10 +8,7 @@ redis>=5.0
 sqlalchemy>=2.0
 python-jose[cryptography]>=3.3
 boto3>=1.34
-botocore>=1.34
 passlib>=1.7
 python-dotenv>=1.0
-strawberry-graphql[fastapi]>=0.219
 pytest-mock>=3.14
 pydantic-settings>=2.2
-Flask>=2.0
