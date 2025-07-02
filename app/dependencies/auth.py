@@ -127,16 +127,21 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
         # If roles list is empty and role is strictly expected, could also raise an exception here
         # or assign a default role. For now, an empty list is permissible.
 
-        return {
+        user_data_to_return = {
             "username": username,
-            "user_id": user_id, # Consider standardizing type if necessary (e.g., always int or always str)
-            "business_id": business_details_id, # This is now the parsed integer ID
-            "company_id_str": company_id_str,   # Original companyId string, kept for reference if needed
+            "user_id": user_id, 
+            "business_id": business_details_id, 
+            "company_id_str": company_id_str,   
             "roles": roles
         }
+        logger.debug(f"Successfully processed token. Returning user data: {user_data_to_return}")
+        return user_data_to_return
+        
     except JWTError as e:
         logger.error(f"JWTError decoding token: {e}")
         raise credentials_exception
+    except HTTPException as e: # Re-raise HTTPExceptions explicitly
+        raise
     except Exception as e: # Catch any other unexpected errors during claim processing
         logger.error(f"Unexpected error processing token claims: {e}", exc_info=True)
         raise credentials_exception
