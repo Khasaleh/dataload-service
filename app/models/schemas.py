@@ -139,3 +139,42 @@ class ErrorDetailModel(BaseModel):
 
     class Config:
         use_enum_values = True
+        from_attributes = True # Used for ORM mode (SQLAlchemy to Pydantic)
+
+# --- API Response Schemas ---
+
+class UserResponseSchema(BaseModel):
+    """Pydantic model for user information response."""
+    user_id: Any # Matches 'userId' from token context, can be int or str
+    username: str
+    business_id: int # Parsed integer business_id
+    roles: List[str]
+    company_id_str: Optional[str] = None # The original companyId string from token
+
+    class Config:
+        from_attributes = True
+
+class SessionResponseSchema(BaseModel):
+    """Pydantic model for individual upload session response."""
+    session_id: str # UUID as string
+    business_details_id: int # Renamed from business_id for clarity if it maps to ORM's business_details_id
+    load_type: str
+    original_filename: Optional[str] = None
+    wasabi_path: Optional[str] = None
+    status: str
+    details: Optional[str] = None
+    record_count: Optional[int] = None
+    error_count: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class SessionListResponseSchema(BaseModel):
+    """Pydantic model for a list of upload sessions with total count for pagination."""
+    items: List[SessionResponseSchema]
+    total: int
+
+    class Config:
+        from_attributes = True
