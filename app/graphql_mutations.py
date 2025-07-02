@@ -1,20 +1,33 @@
 import strawberry
 import datetime
-import uuid  # For session_id generation
+import uuid
+import logging
+from typing import Optional
+
 from strawberry.file_uploads import Upload
 from app.graphql_types import UploadSessionType
-from app.core.config import settings  # Import centralized settings
+from app.core.config import settings
 from app.db.connection import get_session
 from app.db.models import UploadSessionOrm
 from app.services.storage import upload_file
 from app.models import UploadJobStatus
-import logging
-from typing import Optional
+
+# Import the Celery task functions from load_jobs
+from app.load_jobs import (
+    process_products_file,
+    process_product_items_file,
+    process_categories_file,
+    process_brands_file,
+    process_return_policies_file,
+    process_product_prices_file,
+    process_attributes_file,
+    process_meta_tags_file,
+)
 
 # Logger setup
 logger = logging.getLogger(__name__)
 
-# Constant for the CELERY_TASK_MAP
+# Celery task mapping
 CELERY_TASK_MAP = {
     "products": process_products_file,
     "product_items": process_product_items_file,
@@ -41,7 +54,12 @@ class Mutation:
     """
 
     @strawberry.mutation
-    async def upload_file(self, info: strawberry.types.Info, file: Upload, input: UploadFileInput) -> UploadSessionType:
+    async def upload_file(
+        self,
+        info: strawberry.types.Info,
+        file: Upload,
+        input: UploadFileInput
+    ) -> UploadSessionType:
         """
         Handles a file upload, creates an upload session record,
         uploads the file to Wasabi, and dispatches a Celery task for processing.
@@ -56,7 +74,9 @@ class Mutation:
 
         # Validate load_type and file type
         if input.load_type not in CELERY_TASK_MAP:
-            raise strawberry.GraphQLError(f"Invalid load type: {input.load_type}. Supported types are: {list(CELERY_TASK_MAP.keys())}")
+            raise strawberry.GraphQLError(
+                f"Invalid load type: {input.load_type}. Supported types are: {list(CELERY_TASK_MAP.keys())}"
+            )
 
         if not file.filename or not file.filename.lower().endswith('.csv'):
             raise strawberry.GraphQLError("Invalid file type. Only CSV files are allowed.")
@@ -76,7 +96,7 @@ class Mutation:
             "load_type": input.load_type,
             "original_filename": original_filename,
             "wasabi_path": wasabi_path,
-            "status": "pending",  # Initial status
+            "status": "pending",
             "created_at": datetime.datetime.utcnow(),
             "updated_at": datetime.datetime.utcnow(),
             "details": None,
@@ -86,14 +106,15 @@ class Mutation:
 
         db_session = None
         try:
-            db_session = get_db_session_sync(business_id=business_id)
-
-            new_session_orm_instance = UploadSessionOrm(**session_data_to_save)
-            db_session.add(new_session_orm_instance)
+            db_session = get_session(business_id=business_id)
+            new_session = UploadSessionOrm(**session_data_to_save)
+            db_session.add(new_session)
             db_session.commit()
-            db_session.refresh(new_session_orm_instance)
-
-            created_session_dict = {c.name: getattr(new_session_orm_instance, c.name) for c in new_session_orm_instance.__table__.columns}
+            db_session.refresh(new_session)
+            created_session_dict = {
+                c.name: getattr(new_session, c.name)
+                for c in new_session.__table__.columns
+            }
             logger.info(f"Upload session record created in DB for session_id: {session_id}")
 
         except Exception as e_db:
@@ -107,7 +128,7 @@ class Mutation:
 
         # --- Upload to Wasabi ---
         try:
-            upload_to_wasabi(bucket=settings.WASABI_BUCKET_NAME, path=wasabi_path, file_obj=file)
+            upload_file(bucket=settings.WASABI_BUCKET_NAME, path=wasabi_path, file_obj=file)
             logger.info(f"File successfully uploaded to Wasabi: {wasabi_path} for session_id: {session_id}")
         except Exception as e_wasabi:
             logger.error(f"Wasabi Error: Failed to upload file for session_id {session_id}: {e_wasabi}", exc_info=True)
@@ -116,13 +137,14 @@ class Mutation:
         # --- Dispatch Celery Task ---
         celery_task_fn = CELERY_TASK_MAP.get(input.load_type)
         try:
-            task_instance = celery_task_fn.delay(
+            celery_task_fn.delay(
                 business_id=business_id,
                 session_id=session_id,
                 wasabi_file_path=wasabi_path,
                 original_filename=original_filename
             )
         except Exception as e:
+            logger.error(f"Failed to dispatch Celery task for session_id {session_id}: {e}", exc_info=True)
             raise strawberry.GraphQLError(f"Failed to dispatch Celery task: {str(e)}")
 
         return UploadSessionType(**created_session_dict)
