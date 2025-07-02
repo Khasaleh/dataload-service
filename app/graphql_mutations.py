@@ -5,6 +5,7 @@ import logging
 from typing import Optional
 
 from strawberry.file_uploads import Upload
+
 from app.graphql_types import UploadSessionType
 from app.core.config import settings
 from app.db.connection import get_session
@@ -12,40 +13,19 @@ from app.db.models import UploadSessionOrm
 from app.services.storage import upload_file
 from app.models import UploadJobStatus
 
-# Import the Celery task functions from load_jobs
-from app.dataload.load_jobs import (
-    process_products_file,
-    process_product_items_file,
-    process_categories_file,
-    process_brands_file,
-    process_return_policies_file,
-    process_product_prices_file,
-    process_attributes_file,
-    process_meta_tags_file,
-)
+# ✅ Corrected import for your folder structure
+from app.tasks.load_jobs import CELERY_TASK_MAP
 
 # Logger setup
 logger = logging.getLogger(__name__)
 
-# Celery task mapping
-CELERY_TASK_MAP = {
-    "products": process_products_file,
-    "product_items": process_product_items_file,
-    "categories": process_categories_file,
-    "brands": process_brands_file,
-    "return_policies": process_return_policies_file,
-    "product_prices": process_product_prices_file,
-    "attributes": process_attributes_file,
-    "meta_tags": process_meta_tags_file,
-}
 
-# GraphQL Input Type for file upload
 @strawberry.input
 class UploadFileInput:
     """Input type for the file upload mutation."""
     load_type: str
 
-# GraphQL Mutation Type
+
 @strawberry.type
 class Mutation:
     """
@@ -65,14 +45,12 @@ class Mutation:
         uploads the file to Wasabi, and dispatches a Celery task for processing.
         Requires authentication.
         """
-        # Authentication check
         current_user_data = info.context.get("current_user")
         if not current_user_data or not current_user_data.get("business_id"):
             raise strawberry.GraphQLError("Authentication required: User or business ID not found in context.")
 
         business_id = current_user_data["business_id"]
 
-        # Validate load_type and file type
         if input.load_type not in CELERY_TASK_MAP:
             raise strawberry.GraphQLError(
                 f"Invalid load type: {input.load_type}. Supported types are: {list(CELERY_TASK_MAP.keys())}"
@@ -89,7 +67,7 @@ class Mutation:
         original_filename = file.filename
         wasabi_path = f"uploads/{business_id}/{session_id}/{input.load_type}/{original_filename}"
 
-        # --- Create UploadSession record in DB ---
+        # Create UploadSession record in DB
         session_data_to_save = {
             "session_id": session_id,
             "business_id": business_id,
@@ -111,14 +89,16 @@ class Mutation:
             db_session.add(new_session)
             db_session.commit()
             db_session.refresh(new_session)
+
             created_session_dict = {
                 c.name: getattr(new_session, c.name)
                 for c in new_session.__table__.columns
             }
+
             logger.info(f"Upload session record created in DB for session_id: {session_id}")
 
         except Exception as e_db:
-            logger.error(f"DB Error: Failed to create upload session record for session_id {session_id}: {e_db}", exc_info=True)
+            logger.error(f"DB Error: Failed to create upload session {session_id}: {e_db}", exc_info=True)
             if db_session:
                 db_session.rollback()
             raise strawberry.GraphQLError(f"Failed to create upload session record in DB: {str(e_db)}")
@@ -126,7 +106,7 @@ class Mutation:
             if db_session:
                 db_session.close()
 
-        # --- Upload to Wasabi ---
+        # Upload to Wasabi
         try:
             upload_file(bucket=settings.WASABI_BUCKET_NAME, path=wasabi_path, file_obj=file)
             logger.info(f"File successfully uploaded to Wasabi: {wasabi_path} for session_id: {session_id}")
@@ -134,8 +114,8 @@ class Mutation:
             logger.error(f"Wasabi Error: Failed to upload file for session_id {session_id}: {e_wasabi}", exc_info=True)
             raise strawberry.GraphQLError(f"Failed to upload file to Wasabi: {str(e_wasabi)}")
 
-        # --- Dispatch Celery Task ---
-        celery_task_fn = CELERY_TASK_MAP.get(input.load_type)
+        # Dispatch Celery Task
+        celery_task_fn = CELERY_TASK_MAP[input.load_type]
         try:
             celery_task_fn.delay(
                 business_id=business_id,
