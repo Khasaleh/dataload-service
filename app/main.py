@@ -18,30 +18,37 @@ logger = logging.getLogger(__name__)
 logger.info(f"Logging configured with level: {settings.LOG_LEVEL.upper()}")
 
 
+# --- FastAPI App Instance ---
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    description="Provides GraphQL interface for catalog data uploads, status tracking, and user authentication.",
+    version="2.0.0",
+    contact={"name": "Fazeal Dev Team", "email": "support@fazeal.com"},
+    license_info={"name": "MIT"},
+)
+
+
 # --- Request Logging Middleware ---
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    logger.info(f"===== Incoming Request =====")
+    logger.info("===== Incoming Request =====")
     logger.info(f"Method: {request.method}")
     logger.info(f"Path: {request.url.path}")
 
-    # Log headers
     headers = dict(request.headers)
     for k, v in headers.items():
         logger.info(f"Header: {k} = {v}")
 
-    # Log body (safe)
     body_bytes = await request.body()
     body_preview = body_bytes[:1000]
 
     try:
         body_json = json.loads(body_bytes.decode())
-        logger.info(f"Body JSON: {json.dumps(body_json, indent=2)}")
+        logger.info("Body JSON:\n" + json.dumps(body_json, indent=2))
     except Exception:
         logger.info(f"Body (raw bytes preview): {body_preview}")
 
     response = await call_next(request)
-
     logger.info(f"===== Response Status: {response.status_code} =====")
     return response
 
@@ -65,20 +72,11 @@ graphql_app_router = GraphQLRouter(
 )
 
 
-# --- FastAPI App ---
-app = FastAPI(
-    title=settings.PROJECT_NAME,
-    description="Provides GraphQL interface for catalog data uploads, status tracking, and user authentication.",
-    version="2.0.0",
-    contact={"name": "Fazeal Dev Team", "email": "support@fazeal.com"},
-    license_info={"name": "MIT"},
-)
-
-logger.info(f"FastAPI application startup... Environment: {settings.ENVIRONMENT}")
-
+# --- Include GraphQL Router ---
 app.include_router(graphql_app_router, prefix=settings.API_PREFIX, tags=["GraphQL"])
 
 
+# --- Root Route ---
 @app.get("/", tags=["Root"])
 async def read_root():
     logger.info("Root path '/' accessed.")
