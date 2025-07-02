@@ -1,7 +1,7 @@
 {
 	"info": {
-		"_postman_id": "YOUR_COLLECTION_ID",
-		"name": "Catalog Service API",
+		"_postman_id": "YOUR_COLLECTION_ID_REST_API_V2",
+		"name": "Catalog Service REST API",
 		"description": "Postman collection for the Catalog Service REST API.",
 		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 	},
@@ -193,7 +193,7 @@
 								}
 							],
 							"cookie": [],
-							"body": "{\n    \"message\": \"File accepted for processing.\",\n    \"session_id\": \"a1b2c3d4-e5f6-7890-1234-567890abcdef\",\n    \"load_type\": \"brands\",\n    \"wasabi_path\": \"uploads/123/a1b2c3d4-e5f6-7890-1234-567890abcdef/brands/yourfile.csv\",\n    \"status\": \"pending\",\n    \"task_id\": \"c1d2e3f4-g5h6-7890-1234-567890ghijkl\"\n}"
+							"body": "{\n    \"message\": \"File accepted for processing.\",\n    \"session_id\": \"a1b2c3d4-e5f6-7890-1234-567890abcdef\",\n    \"load_type\": \"brands\",\n    \"original_filename\": \"yourfile.csv\",\n    \"wasabi_path\": \"uploads/123/a1b2c3d4-e5f6-7890-1234-567890abcdef/brands/yourfile.csv\",\n    \"status\": \"pending\",\n    \"task_id\": \"c1d2e3f4-g5h6-7890-1234-567890ghijkl\"\n}"
 						},
 						{
 							"name": "Invalid File Type (Non-CSV)",
