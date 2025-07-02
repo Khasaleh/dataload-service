@@ -87,11 +87,11 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
                 except ValueError:
                     logger.warning(f"Invalid format for businessId part in companyId: '{parts[2]}' from companyIdString '{company_id_str}'. Cannot parse to int.")
                     # This is treated as a critical failure as business_details_id is essential.
-                    raise missing_claims_exception
+                    raise missing_claims_exception # Or token_missing_business_details_exception if preferred here
             else:
                 logger.warning(f"companyIdString '{company_id_str}' does not have enough parts (expected format like FAZ-userId-businessId-year-month-random) to extract business_details_id.")
                 # This is also critical if business_details_id is essential.
-                raise missing_claims_exception
+                raise missing_claims_exception # Or token_missing_business_details_exception
 
         # Essential claims check
         if username is None or user_id is None: # Check for username and user_id first
@@ -125,9 +125,11 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
             "company_id_str": company_id_str,   # Original companyId string, kept for reference if needed
             "roles": roles
         }
-    except JWTError as e:
+    except JWTError as e: # This will catch JWTError from the verified path if not caught by more specific handlers
         logger.error(f"JWTError decoding token: {e}")
         raise credentials_exception
+    except HTTPException as e: # Re-raise HTTPExceptions explicitly
+        raise
     except Exception as e: # Catch any other unexpected errors during claim processing
         logger.error(f"Unexpected error processing token claims: {e}", exc_info=True)
         raise credentials_exception
