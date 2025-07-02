@@ -41,6 +41,8 @@ from app.dataload.meta_tags_loader import load_meta_tags_from_csv, DataloadSumma
 
 
 logger = logging.getLogger(__name__)
+
+
 WASABI_BUCKET_NAME = os.getenv("WASABI_BUCKET_NAME", "your-default-bucket-name-set-in-env")
 
 RETRYABLE_EXCEPTIONS = (
@@ -52,6 +54,17 @@ RETRYABLE_EXCEPTIONS = (
 COMMON_RETRY_KWARGS = {
     "max_retries": 3,
     "default_retry_delay": 60,
+}
+
+CELERY_TASK_MAP: Dict[str, Any] = {
+    "products": process_products_file,
+    "product_items": process_product_items_file,
+    "categories": process_categories_file,
+    "brands": process_brands_file,
+    "return_policies": process_return_policies_file,
+    "product_prices": process_product_prices_file,
+    "attributes": process_attributes_file,
+    "meta_tags": process_meta_tags_file,
 }
 
 
@@ -91,7 +104,7 @@ def _update_session_status(session_id: str, business_id_str: str, status: Upload
         if db:
             db.close()
 
-def process_csv_task(business_id_str: str, session_id: str, wasabi_file_path: str, original_filename: str, record_key: str, id_prefix: str, map_type: str):
+def process_csv_task(business_id_str: str, session_id: str, wasabi_file_path: str, original_filename: str, record_key: str, id_prefix: str, load_type: str):
     try:
         business_id = int(business_id_str)
     except ValueError:
@@ -99,41 +112,46 @@ def process_csv_task(business_id_str: str, session_id: str, wasabi_file_path: st
         logger.error(msg)
         raise ValueError(msg)
 
-    logger.info(f"Processing {map_type} for business: {business_id} session: {session_id} file: {original_filename} ({wasabi_file_path})")
+    logger.info(f"Processing {load_type} for business: {business_id} session: {session_id} file: {original_filename} ({wasabi_file_path})")
     _update_session_status(session_id, str(business_id), status=UploadJobStatus.DOWNLOADING_FILE)
 
     db_engine_session = None
     initial_validation_errors: List[ErrorDetailModel] = []
     try:
+        # Attempt to download the file from Wasabi
         response = wasabi_client.get_object(Bucket=WASABI_BUCKET_NAME, Key=wasabi_file_path)
         file_content = response['Body'].read().decode('utf-8')
         logger.info(f"File {original_filename} downloaded from Wasabi for session {session_id}.")
         original_records = list(csv.DictReader(io.StringIO(file_content)))
 
+        # If no records are found in the file, update session and return
         if not original_records:
             logger.warning(f"No records found in file: {wasabi_file_path}")
             _update_session_status(session_id, str(business_id), status=UploadJobStatus.COMPLETED_EMPTY_FILE, record_count=0, error_count=0)
             return {"status": UploadJobStatus.COMPLETED_EMPTY_FILE.value, "message": "No records found in the CSV file.", "session_id": session_id}
 
+        # Continue processing logic, validating and loading data
         db_pk_map_suffix = "_db_pk"
         referenced_entity_map_for_validation = {}
-        if map_type == "products":
+        if load_type == "products":
             referenced_entity_map_for_validation = {'brand_name': f"brands{db_pk_map_suffix}", 'return_policy_code': f"return_policies{db_pk_map_suffix}"}
-        elif map_type == "product_items":
+        elif load_type == "product_items":
             referenced_entity_map_for_validation = {'product_name': f"products{db_pk_map_suffix}"}
 
         _update_session_status(session_id, str(business_id), status=UploadJobStatus.VALIDATING_SCHEMA)
         initial_validation_errors, validated_records = validate_csv(
-            load_type=map_type, records=original_records, session_id=session_id,
+            load_type=load_type, records=original_records, session_id=session_id,
             record_key=record_key, referenced_entity_map=referenced_entity_map_for_validation
         )
 
+        # If validation fails, update session status and return the error details
         if initial_validation_errors:
-            logger.error(f"Initial validation errors for {map_type} in session {session_id}: {initial_validation_errors}")
+            logger.error(f"Initial validation errors for {load_type} in session {session_id}: {initial_validation_errors}")
             _update_session_status(session_id, str(business_id), status=UploadJobStatus.FAILED_VALIDATION,
                                    details=initial_validation_errors, error_count=len(initial_validation_errors), record_count=len(original_records))
             return {"status": UploadJobStatus.FAILED_VALIDATION.value, "errors": [err.model_dump() for err in initial_validation_errors], "processed_count": 0, "session_id": session_id}
 
+        # DB processing and handling records
         _update_session_status(session_id, str(business_id), status=UploadJobStatus.DB_PROCESSING_STARTED, record_count=len(validated_records))
         db_engine_session = get_session(business_id=business_id)
         string_id_redis_pipeline = get_redis_pipeline()
@@ -142,39 +160,41 @@ def process_csv_task(business_id_str: str, session_id: str, wasabi_file_path: st
         processed_db_count = 0
         db_error_details_list: List[ErrorDetailModel] = []
 
-        if map_type in ["brands", "return_policies", "product_prices"]:
+        # Specific loaders for different load types
+        if load_type in ["brands", "return_policies", "product_prices"]:
             loader_summary = {}
-            if map_type == "brands":
+            if load_type == "brands":
                 loader_summary = load_brand_to_db(db_engine_session, business_id, validated_records, session_id, db_pk_redis_pipeline)
-            elif map_type == "return_policies":
+            elif load_type == "return_policies":
                 loader_summary = load_return_policy_to_db(db_engine_session, business_id, validated_records, session_id, db_pk_redis_pipeline)
-            elif map_type == "product_prices":
+            elif load_type == "product_prices":
                 loader_summary = load_price_to_db(db_engine_session, business_id, validated_records, session_id, db_pk_redis_pipeline)
 
             processed_db_count = loader_summary.get("inserted", 0) + loader_summary.get("updated", 0)
             num_loader_errors = loader_summary.get("errors", 0)
             if num_loader_errors > 0:
-                db_error_details_list.append(ErrorDetailModel(error_message=f"{num_loader_errors} {map_type} record(s) had issues post-bulk operation. Check logs.", error_type=ErrorType.DATABASE))
+                db_error_details_list.append(ErrorDetailModel(error_message=f"{num_loader_errors} {load_type} record(s) had issues post-bulk operation. Check logs.", error_type=ErrorType.DATABASE))
             processed_csv_records_count = len(validated_records)
         else:
+            # Handle other load types and process the records
             for i, record_data in enumerate(validated_records):
                 csv_row_number = i + 2
                 db_pk = None
                 current_record_key_value = record_data.get(record_key, 'N/A')
                 try:
-                    if map_type == "categories":
+                    if load_type == "categories":
                         db_pk = load_category_to_db(db_engine_session, business_id, record_data, session_id, db_pk_redis_pipeline)
-                    elif map_type == "attributes":
+                    elif load_type == "attributes":
                         db_pk = load_attribute_to_db(db_engine_session, business_id, record_data, session_id, db_pk_redis_pipeline)
-                    elif map_type == "products":
+                    elif load_type == "products":
                         record_data_for_model = {**record_data, 'business_details_id': business_id}
                         product_csv_instance = ProductCsvModel(**record_data_for_model)
                         current_record_key_value = product_csv_instance.self_gen_product_id
                         db_pk = load_product_record_to_db(db_engine_session, business_id, product_csv_instance, session_id)
                     else:
-                        logger.info(f"Row {csv_row_number}: No specific DB loader for map_type: '{map_type}'. Record: {current_record_key_value}")
+                        logger.info(f"Row {csv_row_number}: No specific DB loader for load_type: '{load_type}'. Record: {current_record_key_value}")
                         if string_id_redis_pipeline and record_key and id_prefix and current_record_key_value != 'N/A':
-                            add_to_id_map(session_id, map_type, current_record_key_value, f"{id_prefix}:{str(current_record_key_value).lower().replace(' ', '_')}", pipeline=string_id_redis_pipeline)
+                            add_to_id_map(session_id, load_type, current_record_key_value, f"{id_prefix}:{str(current_record_key_value).lower().replace(' ', '_')}", pipeline=string_id_redis_pipeline)
                     if db_pk is not None:
                         processed_db_count += 1
                 except DataLoaderError as dle:
@@ -196,24 +216,26 @@ def process_csv_task(business_id_str: str, session_id: str, wasabi_file_path: st
         all_accumulated_errors = initial_validation_errors + db_error_details_list
 
         if db_error_details_list:
-            logger.warning(f"Session {session_id}: {len(db_error_details_list)} errors during DB processing for {map_type}. Rolling back.")
+            logger.warning(f"Session {session_id}: {len(db_error_details_list)} errors during DB processing for {load_type}. Rolling back.")
             if db_engine_session:
                 db_engine_session.rollback()
             _update_session_status(session_id, str(business_id), UploadJobStatus.FAILED_DB_PROCESSING, all_accumulated_errors, processed_csv_records_count, final_error_count)
             return {"status": UploadJobStatus.FAILED_DB_PROCESSING.value, "errors": [err.model_dump() for err in all_accumulated_errors], "processed_db_count": processed_db_count, "session_id": session_id}
 
+        # Commit the DB session and perform cleanup
         if string_id_redis_pipeline:
             string_id_redis_pipeline.execute()
         if db_pk_redis_pipeline:
             db_pk_redis_pipeline.execute()
-        set_id_map_ttl(session_id, map_type, redis_client)
-        set_id_map_ttl(session_id, f"{map_type}{DB_PK_MAP_SUFFIX}", redis_client)
+        set_id_map_ttl(session_id, load_type, redis_client)
+        set_id_map_ttl(session_id, f"{load_type}{DB_PK_MAP_SUFFIX}", redis_client)
 
         if db_engine_session:
             db_engine_session.commit()
             logger.info(f"DB session committed for {session_id}.")
         _update_session_status(session_id, str(business_id), UploadJobStatus.CLEANING_UP, None, processed_csv_records_count, final_error_count)
 
+        # Final status and cleanup logic
         final_status_enum = UploadJobStatus.COMPLETED
         final_user_message = f"Successfully processed {processed_db_count} records."
         final_details_for_user = None
@@ -245,12 +267,13 @@ def process_csv_task(business_id_str: str, session_id: str, wasabi_file_path: st
         raise
 
     except Exception as e:
-        logger.error(f"Major error processing {map_type} for session {session_id}: {e}", exc_info=True)
+        logger.error(f"Major error processing {load_type} for session {session_id}: {e}", exc_info=True)
         if db_engine_session:
             db_engine_session.rollback()
         critical_error_detail = [ErrorDetailModel(error_message=f"Major processing error: {str(e)}", error_type=ErrorType.TASK_EXCEPTION)]
         _update_session_status(session_id, str(business_id), UploadJobStatus.FAILED_UNHANDLED_EXCEPTION, critical_error_detail)
         raise
+
 
 
 @shared_task(name="process_meta_tags_file", bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
