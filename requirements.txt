@@ -13,4 +13,5 @@ python-dotenv
 strawberry-graphql[fastapi]
 pytest-mock
 pydantic-settings
+botocore
 Flask>=2.0
