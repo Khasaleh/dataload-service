@@ -6,7 +6,7 @@ from app.graphql_types import UploadSessionType
 from app.core.config import settings  # Import centralized settings
 from app.db.connection import get_session
 from app.db.models import UploadSessionOrm
-from app.services.storage import upload_to_wasabi  # Assuming you have a service for uploading files to Wasabi
+from app.services.storage import upload_file
 from app.models import UploadJobStatus
 import logging
 from typing import Optional
