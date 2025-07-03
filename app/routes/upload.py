@@ -2,7 +2,8 @@ import logging
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 
-from app.services.wassabiclient import upload_to_wasabi, delete_from_wasabi
+# Corrected import: match filename wasabiclient.py
+from app.services.wasabiclient import upload_to_wasabi, delete_from_wasabi
 from app.dependencies.auth import get_current_user
 from app.core.config import settings
 from app.db.models import UploadSessionOrm
@@ -91,7 +92,6 @@ def create_upload_session_in_db_sync(
         if db:
             db.close()
 
-
 @router.post(
     "/api/v1/business/{business_id}/upload/{load_type}",
     summary="Upload catalog file, store in Wasabi, create DB session, and queue for processing",
@@ -135,17 +135,14 @@ async def upload_file_and_queue_for_processing(
     wasabi_path_str = f"uploads/{path_business_id_int}/{session_id_str}/{load_type}/{file.filename}"
 
     # Create DB session
-    try:
-        new_session_orm = await run_in_threadpool(
-            create_upload_session_in_db_sync,
-            session_id_str,
-            user["business_id"],
-            load_type,
-            file.filename,
-            wasabi_path_str
-        )
-    except Exception:
-        raise
+    new_session_orm = await run_in_threadpool(
+        create_upload_session_in_db_sync,
+        session_id_str,
+        user["business_id"],
+        load_type,
+        file.filename,
+        wasabi_path_str
+    )
 
     # Upload to Wasabi
     try:
