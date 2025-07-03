@@ -5,7 +5,7 @@ from typing import Optional
 class Settings(BaseSettings):
     # Environment loading configuration
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding='utf-8', extra='ignore')
-
+    AUTH_VALIDATION_ENABLED: bool = False
     # General Application Settings
     PROJECT_NAME: str = "Catalog Data Load Service"
     API_PREFIX: str = "/graphql"
