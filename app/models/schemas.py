@@ -14,6 +14,41 @@ class UploadSessionModel(BaseModel):
     error_count: Optional[int] = None
     created_at: datetime
     updated_at: datetime
+    
+class CategoryCsvModel(BaseModel):
+    category_path: constr(strip_whitespace=True, min_length=1)
+    name: constr(strip_whitespace=True, min_length=1)
+    description: Optional[str] = None
+    enabled: bool = True
+    image_name: Optional[str] = None
+    long_description: Optional[str] = None
+    order_type: Optional[str] = None
+    shipping_type: Optional[str] = None
+    active: Optional[bool] = True
+    seo_description: Optional[str] = None
+    seo_keywords: Optional[str] = None
+    seo_title: Optional[str] = None
+    url: Optional[str] = None
+    position_on_site: Optional[int] = None
+
+    class Config:
+        anystr_strip_whitespace = True
+
+    @validator("category_path")
+    def must_be_slash_separated(cls, v):
+        segments = [seg for seg in v.split("/") if seg]
+        if not segments:
+            raise ValueError("category_path must contain at least one segment")
+        return v
+
+    @validator("name")
+    def name_must_match_last_path_segment(cls, v, values):
+        path = values.get("category_path")
+        if path:
+            last = path.split("/")[-1]
+            if v.strip().lower() != last.strip().lower():
+                raise ValueError(f"name '{v}' must equal last segment of category_path '{last}'")
+        return v
 class BrandCsvModel(BaseModel):
     """Pydantic model for validating a row from a Brand CSV file."""
     name: constr(strip_whitespace=True, min_length=1)

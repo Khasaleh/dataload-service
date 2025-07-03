@@ -23,16 +23,21 @@ from app.utils.redis_utils import (
 )
 from app.services.validator import validate_csv
 from app.services.storage import client as local_storage_client
-# Import core loader functions
+
+# Import core loader functions from db_loaders
 from app.services.db_loaders import (
     load_brand_to_db,
     load_attribute_to_db,
     load_return_policy_to_db,
-    load_price_to_db,
     load_category_to_db
 )
-from app.services.product_loader import load_product_record_to_db
+# Import price loader from dataload
+from app.dataload.price_loader import load_price_to_db
+# Import product loader from dataload
+from app.dataload.product_loader import load_product_record_to_db
+# Import meta-tags loader from dataload
 from app.dataload.meta_tags_loader import load_meta_tags_from_csv
+
 from app.models import UploadJobStatus, ErrorDetailModel, ErrorType
 from app.exceptions import DataLoaderError
 from pydantic import ValidationError
@@ -211,33 +216,41 @@ def process_csv_task(
 
 # Task wrappers
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+
 def process_brands_file(self, biz_id, session_id, storage_path, original_filename):
     return process_csv_task(biz_id, session_id, storage_path, original_filename, 'name', 'brand', 'brands')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+
 def process_attributes_file(self, biz_id, session_id, storage_path, original_filename):
     return process_csv_task(biz_id, session_id, storage_path, original_filename, 'attribute_name', 'attr', 'attributes')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+
 def process_return_policies_file(self, biz_id, session_id, storage_path, original_filename):
     return process_csv_task(biz_id, session_id, storage_path, original_filename, 'policy_name', 'rp', 'return_policies')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+
 def process_products_file(self, biz_id, session_id, storage_path, original_filename):
     return process_csv_task(biz_id, session_id, storage_path, original_filename, 'self_gen_product_id', 'prod', 'products')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+
 def process_product_items_file(self, biz_id, session_id, storage_path, original_filename):
     return process_csv_task(biz_id, session_id, storage_path, original_filename, 'variant_sku', 'item', 'product_items')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+
 def process_product_prices_file(self, biz_id, session_id, storage_path, original_filename):
     return process_csv_task(biz_id, session_id, storage_path, original_filename, 'product_id', 'price', 'product_prices')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+
 def process_meta_tags_file(self, biz_id, session_id, storage_path, original_filename):
     return process_csv_task(biz_id, session_id, storage_path, original_filename, 'meta_tag_key', 'meta', 'meta_tags')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+
 def process_categories_file(self, biz_id, session_id, storage_path, original_filename):
     return process_csv_task(biz_id, session_id, storage_path, original_filename, 'category_name', 'cat', 'categories')
