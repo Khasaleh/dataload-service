@@ -149,3 +149,5 @@ def delete_file(bucket: str, key: str) -> None:
 
 def put_small_file(file_obj, bucket: str, key: str) -> None:
     return _wasabi_client.put_small_file(file_obj, bucket, key)
+
+client = _wasabi_client
