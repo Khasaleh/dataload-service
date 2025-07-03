@@ -29,11 +29,10 @@ from app.services.db_loaders import (
     load_brand_to_db,
     load_attribute_to_db,
     load_return_policy_to_db,
-    load_category_to_db
+    load_category_to_db,
+    load_price_to_db
 )
-# Import price loader from db_loaders
-from app.services.db_loaders import load_price_to_db
-# Import product loader from dataload from dataload
+# Import product loader from dataload
 from app.dataload.product_loader import load_product_record_to_db
 # Import meta-tags loader from dataload
 from app.dataload.meta_tags_loader import load_meta_tags_from_csv
@@ -94,7 +93,7 @@ def _update_session_status(
 
 
 def process_csv_task(
-    biz_id: str,
+    business_id: str,
     session_id: str,
     storage_path: str,
     original_filename: str,
@@ -103,10 +102,10 @@ def process_csv_task(
     map_type: str
 ):
     """Download local file, validate, load to DB, update session status."""
-    db = get_session(business_id=int(biz_id))
+    db = get_session(business_id=int(business_id))
     _update_session_status(db, session_id, UploadJobStatus.DOWNLOADING_FILE)
 
-    file_path = os.path.join(STORAGE_ROOT, biz_id, storage_path)
+    file_path = os.path.join(STORAGE_ROOT, business_id, storage_path)
     with open(file_path, newline='', encoding='utf-8') as f:
         original_records = list(csv.DictReader(f))
     if not original_records:
@@ -150,31 +149,31 @@ def process_csv_task(
 
     # Bulk loaders
     if map_type == 'brands':
-        summary = load_brand_to_db(db, int(biz_id), validated, session_id)
+        summary = load_brand_to_db(db, int(business_id), validated, session_id)
         processed = summary.get('inserted', 0) + summary.get('updated', 0)
 
     elif map_type == 'return_policies':
-        summary = load_return_policy_to_db(db, int(biz_id), validated, session_id)
+        summary = load_return_policy_to_db(db, int(business_id), validated, session_id)
         processed = summary.get('inserted', 0) + summary.get('updated', 0)
 
     elif map_type == 'product_prices':
-        summary = load_price_to_db(db, int(biz_id), validated, session_id)
+        summary = load_price_to_db(db, int(business_id), validated, session_id)
         processed = summary.get('inserted', 0) + summary.get('updated', 0)
 
     else:
         for idx, rec in enumerate(validated, start=2):
             try:
                 if map_type == 'attributes':
-                    load_attribute_to_db(db, int(biz_id), rec, session_id)
+                    load_attribute_to_db(db, int(business_id), rec, session_id)
 
                 elif map_type == 'products':
-                    load_product_record_to_db(db, int(biz_id), rec, session_id)
+                    load_product_record_to_db(db, int(business_id), rec, session_id)
 
                 elif map_type == 'meta_tags':
-                    load_meta_tags_from_csv(db, int(biz_id), rec, session_id)
+                    load_meta_tags_from_csv(db, int(business_id), rec, session_id)
 
                 elif map_type == 'categories':
-                    load_category_to_db(db, int(biz_id), rec, session_id)
+                    load_category_to_db(db, int(business_id), rec, session_id)
 
                 processed += 1
 
@@ -216,44 +215,44 @@ def process_csv_task(
 
 # Task wrappers
 
-# EDIT: parameter renamed from biz_id to business_id to match caller
+# EDIT: parameters aligned with route names (business_id, wasabi_file_path)
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 
-def process_brands_file(self, business_id, session_id, storage_path, original_filename):
-    return process_csv_task(business_id, session_id, storage_path, original_filename, 'name', 'brand', 'brands')
+def process_brands_file(self, business_id, session_id, wasabi_file_path, original_filename):
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'name', 'brand', 'brands')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 
-def process_attributes_file(self, business_id, session_id, storage_path, original_filename):
-    return process_csv_task(business_id, session_id, storage_path, original_filename, 'attribute_name', 'attr', 'attributes')
+def process_attributes_file(self, business_id, session_id, wasabi_file_path, original_filename):
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'attribute_name', 'attr', 'attributes')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 
-def process_return_policies_file(self, business_id, session_id, storage_path, original_filename):
-    return process_csv_task(business_id, session_id, storage_path, original_filename, 'policy_name', 'rp', 'return_policies')
+def process_return_policies_file(self, business_id, session_id, wasabi_file_path, original_filename):
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'policy_name', 'rp', 'return_policies')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 
-def process_products_file(self, business_id, session_id, storage_path, original_filename):
-    return process_csv_task(business_id, session_id, storage_path, original_filename, 'self_gen_product_id', 'prod', 'products')
+def process_products_file(self, business_id, session_id, wasabi_file_path, original_filename):
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'self_gen_product_id', 'prod', 'products')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 
-def process_product_items_file(self, business_id, session_id, storage_path, original_filename):
-    return process_csv_task(business_id, session_id, storage_path, original_filename, 'variant_sku', 'item', 'product_items')
+def process_product_items_file(self, business_id, session_id, wasabi_file_path, original_filename):
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'variant_sku', 'item', 'product_items')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 
-def process_product_prices_file(self, business_id, session_id, storage_path, original_filename):
-    return process_csv_task(business_id, session_id, storage_path, original_filename, 'product_id', 'price', 'product_prices')
+def process_product_prices_file(self, business_id, session_id, wasabi_file_path, original_filename):
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'product_id', 'price', 'product_prices')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 
-def process_meta_tags_file(self, business_id, session_id, storage_path, original_filename):
-    return process_csv_task(business_id, session_id, storage_path, original_filename, 'meta_tag_key', 'meta', 'meta_tags')
+def process_meta_tags_file(self, business_id, session_id, wasabi_file_path, original_filename):
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'meta_tag_key', 'meta', 'meta_tags')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 
-def process_categories_file(self, business_id, session_id, storage_path, original_filename):
-    return process_csv_task(business_id, session_id, storage_path, original_filename, 'category_name', 'cat', 'categories')
+def process_categories_file(self, business_id, session_id, wasabi_file_path, original_filename):
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'category_name', 'cat', 'categories')
