@@ -2,7 +2,18 @@ from pydantic import BaseModel, Field, validator, constr, root_validator
 from typing import Optional, List, Any
 from datetime import datetime
 from enum import Enum
-
+class UploadSessionModel(BaseModel):
+    session_id: str
+    business_details_id: int
+    load_type: str
+    original_filename: str
+    wasabi_path: str
+    status: str
+    details: Optional[str] = None
+    record_count: Optional[int] = None
+    error_count: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
 class BrandCsvModel(BaseModel):
     """Pydantic model for validating a row from a Brand CSV file."""
     name: constr(strip_whitespace=True, min_length=1)
