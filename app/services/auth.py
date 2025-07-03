@@ -11,13 +11,8 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl=settings.API_PREFIX)
 SECRET_KEY = settings.JWT_SECRET
 ALGORITHM = settings.JWT_ALGORITHM
 
-if not SECRET_KEY and settings.ENVIRONMENT != "test":
-    logger.warning(
-        "WARNING (auth.py): Using default JWT_SECRET. This should be set via an environment variable for production."
-    )
-
 def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
-    logger.debug(f"Token received: {token}")
+    logger.debug(f"Token received for processing: {token}")
 
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -32,30 +27,31 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
 
     try:
         if settings.AUTH_VALIDATION_ENABLED:
-            logger.debug("AUTH_VALIDATION_ENABLED = True. Verifying signature.")
+            logger.debug("AUTH_VALIDATION_ENABLED=True: Verifying signature.")
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         else:
-            logger.debug("AUTH_VALIDATION_ENABLED = False. Skipping signature verification.")
+            logger.debug("AUTH_VALIDATION_ENABLED=False: Skipping signature verification. Using get_unverified_claims.")
             payload = jwt.get_unverified_claims(token)
-            logger.debug(f"Decoded payload without verification: {payload}")
 
+        logger.debug(f"Decoded payload: {payload}")
+
+        # Now extract user info
         username: Optional[str] = payload.get("sub")
         user_id: Optional[Any] = payload.get("userId")
         company_id_str: Optional[str] = payload.get("companyId")
         role_array: Optional[List[Dict[str, str]]] = payload.get("role")
 
         if not username or not user_id or not company_id_str:
-            logger.warning(f"Missing claims in token. sub={username}, userId={user_id}, companyId={company_id_str}")
+            logger.warning("Missing critical claims in token.")
             raise missing_claims_exception
 
         # Parse business_id from companyId string
-        business_details_id: Optional[int] = None
         parts = company_id_str.split('-')
         if len(parts) >= 3:
             try:
                 business_details_id = int(parts[2])
             except ValueError:
-                logger.warning(f"Failed to parse businessId from companyId: {company_id_str}")
+                logger.warning(f"Invalid businessId format in companyId: {company_id_str}")
                 raise missing_claims_exception
         else:
             logger.warning(f"Invalid companyId format: {company_id_str}")
@@ -74,12 +70,13 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
             "company_id_str": company_id_str,
             "roles": roles
         }
-        logger.debug(f"Returning user data: {user_data_to_return}")
+
+        logger.debug(f"User data extracted from token: {user_data_to_return}")
         return user_data_to_return
 
     except JWTError as e:
-        logger.error(f"JWTError decoding token: {e}", exc_info=True)
+        logger.error(f"JWTError decoding token: {e}")
         raise credentials_exception
     except Exception as e:
-        logger.error(f"Unexpected error processing token: {e}", exc_info=True)
+        logger.error(f"Unexpected error while decoding token: {e}", exc_info=True)
         raise credentials_exception
