@@ -4,12 +4,26 @@ from fastapi.security import OAuth2PasswordBearer
 from typing import List, Dict, Any, Optional
 import logging
 from app.core.config import settings
-
+import base64
+import json
 logger = logging.getLogger(__name__)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=settings.API_PREFIX)
 SECRET_KEY = settings.JWT_SECRET
 ALGORITHM = settings.JWT_ALGORITHM
+def decode_unverified_payload(token: str) -> dict:
+    try:
+        parts = token.split('.')
+        if len(parts) < 2:
+            raise ValueError("Invalid JWT format.")
+        payload_b64 = parts[1]
+        # Fix padding
+        payload_b64 += '=' * (-len(payload_b64) % 4)
+        decoded_bytes = base64.urlsafe_b64decode(payload_b64)
+        return json.loads(decoded_bytes.decode('utf-8'))
+    except Exception as e:
+        logger.error(f"Error decoding unverified JWT payload: {e}")
+        raise HTTPException(status_code=401, detail="Invalid JWT format.")
 
 def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
     logger.debug(f"Token received for processing: {token}")
@@ -31,7 +45,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         else:
             logger.debug("AUTH_VALIDATION_ENABLED=False: Skipping signature verification. Using get_unverified_claims.")
-            payload = jwt.get_unverified_claims(token)
+            payload = decode_unverified_payload(token)
 
         logger.debug(f"Decoded payload: {payload}")
 

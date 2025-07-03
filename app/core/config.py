@@ -1,11 +1,13 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import PostgresDsn, RedisDsn, HttpUrl, Field, model_validator
+from pydantic import PostgresDsn, RedisDsn, HttpUrl, Field, model_validator, field_validator
 from typing import Optional
 
 class Settings(BaseSettings):
     # Environment loading configuration
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding='utf-8', extra='ignore')
-    AUTH_VALIDATION_ENABLED: bool = Field(default=True, validation_alias="AUTH_VALIDATION_ENABLED")
+    
+    AUTH_VALIDATION_ENABLED: bool = False
+
     # General Application Settings
     PROJECT_NAME: str = "Catalog Data Load Service"
     API_PREFIX: str = "/graphql"
