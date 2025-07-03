@@ -2,7 +2,7 @@ import boto3
 import logging
 from boto3.s3.transfer import TransferConfig
 from app.core.config import settings
-
+import tempfile
 logger = logging.getLogger(__name__)
 
 # --- Wasabi S3 Client Configuration ---
@@ -44,21 +44,18 @@ TRANSFER_CONFIG = TransferConfig(
 
 def upload_file(file_obj, bucket: str, path: str):
     """
-    Uploads a file-like object to Wasabi, using multipart transfer config
-    for large files and keeping connections alive.
+    Streams file to disk and then uploads with boto3's upload_file
+    to avoid aws-chunked encoding.
     """
-    logger.info(f"Starting upload to Wasabi bucket: {bucket}, path: {path}")
-    try:
-        s3_client.upload_fileobj(
-            Fileobj=file_obj,
-            Bucket=bucket,
-            Key=path,
-            Config=TRANSFER_CONFIG
-        )
-        logger.info(f"Successfully uploaded to Wasabi: {bucket}/{path}")
-    except Exception as e:
-        logger.error(f"Failed to upload file to Wasabi: {e}", exc_info=True)
-        raise
+    logger.info(f"Uploading to Wasabi bucket: {bucket}, path: {path}")
+
+    with tempfile.NamedTemporaryFile(delete=True) as tmp:
+        file_obj.seek(0)
+        tmp.write(file_obj.read())
+        tmp.flush()
+        s3_client.upload_file(tmp.name, bucket, path)
+
+    logger.info(f"Successfully uploaded to Wasabi: {bucket}/{path}")
 
 def delete_file(bucket: str, path: str):
     """
