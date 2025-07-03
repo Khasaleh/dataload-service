@@ -4,6 +4,9 @@ from fastapi.security import OAuth2PasswordBearer
 import logging
 from typing import Optional, List, Dict, Any
 from app.core.config import settings # Import centralized settings
+import base64
+import json
+
 
 logger = logging.getLogger(__name__)
 
