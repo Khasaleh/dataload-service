@@ -1,4 +1,6 @@
-from uuid import UUID
+# session_api.py
+
+from uuid import UUID                                       # ← ADDED
 from fastapi import APIRouter, Depends, HTTPException, Query as FastAPIQuery
 from typing import List, Optional
 from sqlalchemy.orm import Session as SQLAlchemySession
@@ -10,7 +12,7 @@ from app.db.models import UploadSessionOrm
 from app.db.connection import get_session as get_sync_db_session  # Renamed for clarity
 
 router = APIRouter(
-    prefix="/sessions",  # This will result in /api/v1/sessions if you mount under /api/v1
+    prefix="/sessions",  # This prefix will result in /api/v1/sessions
     tags=["Sessions"]
 )
 
@@ -30,7 +32,7 @@ def _get_session_by_id_sync(
 
 @router.get("/{session_id}", response_model=SessionResponseSchema)
 async def get_upload_session_by_id(
-    session_id: UUID,                        # ← Changed from str to UUID
+    session_id: UUID,                      # ← CHANGED from `str` to `UUID`
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -41,11 +43,10 @@ async def get_upload_session_by_id(
     db_sync = get_sync_db_session(business_id=user_business_id)
 
     try:
-        # Cast UUID to str for the filter helper
         session_orm = await run_in_threadpool(
             _get_session_by_id_sync,
             db_sync,
-            str(session_id),                # ← str() here
+            str(session_id),              # ← CAST UUID → str for your DB lookup
             user_business_id
         )
     finally:
@@ -58,7 +59,7 @@ async def get_upload_session_by_id(
             detail="Upload session not found or not authorized for this business."
         )
 
-    return session_orm  # Pydantic will read the ORM attributes
+    return session_orm  # Pydantic will serialize the ORM attributes as JSON strings
 
 def _list_sessions_sync(
     db: SQLAlchemySession,
