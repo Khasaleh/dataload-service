@@ -29,7 +29,7 @@ app = FastAPI(
 logger.info(f"FastAPI application startup... Environment: {settings.ENVIRONMENT}")
 
 # --- Include REST API routers ---
-from app.routes.upload import router as upload_api_router
+from app.routes.upload_PK import router as upload_api_router
 from app.routes.users_api import router as users_api_router
 from app.routes.sessions_api import router as sessions_api_router
 # Assuming status_api and token_api are still relevant or managed elsewhere.

@@ -129,4 +129,4 @@ def test_successful_file_upload(client: TestClient, test_db_session_mock: MagicM
 
 # A helper to get the actual Celery task map for constructing mock paths, if needed for more complex scenarios
 # For this test, directly using the known task for "brands" is fine.
-from app.routes.upload import CELERY_TASK_MAP
+from app.routes.upload_PK import CELERY_TASK_MAP
