@@ -33,44 +33,42 @@ s3_client = boto3.client(
 
 def upload_file(file_obj, bucket: str, path: str):
     """
-    Uploads a FastAPI UploadFile or file-like object to Wasabi, using the same
-    working approach as your other uploader: write to disk, reopen in rb mode,
-    then upload_fileobj with ACL.
+    Uploads a FastAPI UploadFile or file-like object to Wasabi S3 by writing to disk,
+    then using upload_file() to avoid chunked encoding.
     """
     logger.info(f"[DEBUG] upload_file() called with bucket={bucket}, path={path}, file_obj type={type(file_obj)}")
 
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        tmp_path = tmp.name
         file_obj.seek(0)
         while chunk := file_obj.read(1024 * 1024):
             tmp.write(chunk)
-        tmp_path = tmp.name
+        tmp.flush()
 
-    logger.info(f"[DEBUG] Temp file created for upload: {tmp_path}")
+    logger.info(f"[DEBUG] Temp file created at {tmp_path}")
 
     try:
-        with open(tmp_path, "rb") as f:
-            s3_client.upload_fileobj(
-                f,
-                bucket,
-                path,
-                ExtraArgs={'ACL': 'public-read'}  # Consistent with your working uploader
-            )
-            logger.info(f"[DEBUG] Uploaded {tmp_path} to Wasabi at {bucket}/{path}")
+        s3_client.upload_file(
+            Filename=tmp_path,
+            Bucket=bucket,
+            Key=path,
+            ExtraArgs={'ACL': 'public-read'}
+        )
+        logger.info(f"[DEBUG] Uploaded {tmp_path} to Wasabi bucket={bucket}, key={path}")
 
     except Exception as e:
         logger.exception(f"Error uploading to Wasabi: {e}")
         raise
     finally:
-        # Always clean up temp file
         try:
             os.remove(tmp_path)
-            logger.info(f"[DEBUG] Temp file {tmp_path} removed after upload")
+            logger.info(f"[DEBUG] Deleted temp file {tmp_path}")
         except OSError as cleanup_error:
             logger.warning(f"Could not delete temp file {tmp_path}: {cleanup_error}")
 
 def delete_file(bucket: str, path: str):
     """
-    Deletes an object from Wasabi.
+    Deletes an object from Wasabi S3.
     """
     logger.info(f"Deleting from Wasabi bucket: {bucket}, path: {path}")
     s3_client.delete_object(Bucket=bucket, Key=path)
