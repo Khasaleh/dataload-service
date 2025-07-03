@@ -28,19 +28,22 @@ s3_client = boto3.client(
 )
 
 def upload_file(file_obj, bucket: str, path: str):
-    """
-    Streams the UploadFile to disk, then uses upload_file() to avoid aws-chunked encoding.
-    """
-    logger.info(f"Uploading to Wasabi bucket: {bucket}, path: {path}")
+    logger.info(f"[DEBUG] upload_file() called with bucket={bucket}, path={path}, file_obj type={type(file_obj)}")
 
-    with tempfile.NamedTemporaryFile(delete=True) as tmp:
+    import os
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
         file_obj.seek(0)
         while chunk := file_obj.read(1024 * 1024):
             tmp.write(chunk)
         tmp.flush()
-        s3_client.upload_file(tmp.name, bucket, path)
+        logger.info(f"[DEBUG] Temp file path for upload: {tmp.name}")
+        assert os.path.isfile(tmp.name), f"Temp file {tmp.name} does not exist!"
 
-    logger.info(f"Successfully uploaded to Wasabi: {bucket}/{path}")
+        s3_client.upload_file(tmp.name, bucket, path)
+        logger.info(f"[DEBUG] Called s3_client.upload_file() with local file path")
+
+    logger.info(f"[DEBUG] Successfully uploaded to Wasabi: {bucket}/{path}")
+
 
 def delete_file(bucket: str, path: str):
     logger.info(f"Deleting from Wasabi bucket: {bucket}, path: {path}")
