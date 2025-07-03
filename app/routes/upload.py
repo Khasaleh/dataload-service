@@ -8,6 +8,7 @@ from app.db.connection import get_session # For DB session
 from datetime import datetime
 import uuid
 import os
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
