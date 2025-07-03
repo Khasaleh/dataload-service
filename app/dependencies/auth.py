@@ -56,7 +56,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
     )
 
     try:
-        payload = decode_unverified_payload(token)(token)
+        payload = decode_unverified_payload(token)
 
         username: Optional[str] = payload.get("sub")
         user_id: Optional[Any] = payload.get("userId") # Assuming userId can be int or string from token
