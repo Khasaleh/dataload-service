@@ -77,6 +77,12 @@ class WasabiClient:
             logger.exception("Unexpected error uploading to Wasabi: %s/%s", bucket, key)
             raise
 
+    def put_small_file(self, file_obj, bucket: str, key: str) -> str:
+        """
+        Alias for upload_file for backward-compatibility with WasabiClient.put_small_file calls.
+        """
+        return self.upload_file(file_obj, bucket, key)
+
     def delete_file(self, bucket: str, key: str) -> None:
         """
         Deletes an object from Wasabi S3.
