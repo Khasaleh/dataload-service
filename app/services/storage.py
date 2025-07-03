@@ -1,10 +1,13 @@
 import boto3
 import logging
 import tempfile
+import os
+
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Validate required settings
 required_vars = [
     settings.WASABI_ENDPOINT_URL,
     settings.WASABI_ACCESS_KEY,
@@ -19,6 +22,7 @@ if not all(required_vars):
 
 logger.info("Initializing Wasabi S3 client with configured endpoint and credentials.")
 
+# Initialize Wasabi S3 client
 s3_client = boto3.client(
     "s3",
     endpoint_url=str(settings.WASABI_ENDPOINT_URL),
@@ -28,24 +32,46 @@ s3_client = boto3.client(
 )
 
 def upload_file(file_obj, bucket: str, path: str):
+    """
+    Uploads a FastAPI UploadFile or file-like object to Wasabi, using the same
+    working approach as your other uploader: write to disk, reopen in rb mode,
+    then upload_fileobj with ACL.
+    """
     logger.info(f"[DEBUG] upload_file() called with bucket={bucket}, path={path}, file_obj type={type(file_obj)}")
 
-    import os
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
         file_obj.seek(0)
         while chunk := file_obj.read(1024 * 1024):
             tmp.write(chunk)
-        tmp.flush()
-        logger.info(f"[DEBUG] Temp file path for upload: {tmp.name}")
-        assert os.path.isfile(tmp.name), f"Temp file {tmp.name} does not exist!"
+        tmp_path = tmp.name
 
-        s3_client.upload_file(tmp.name, bucket, path)
-        logger.info(f"[DEBUG] Called s3_client.upload_file() with local file path")
+    logger.info(f"[DEBUG] Temp file created for upload: {tmp_path}")
 
-    logger.info(f"[DEBUG] Successfully uploaded to Wasabi: {bucket}/{path}")
+    try:
+        with open(tmp_path, "rb") as f:
+            s3_client.upload_fileobj(
+                f,
+                bucket,
+                path,
+                ExtraArgs={'ACL': 'public-read'}  # Consistent with your working uploader
+            )
+            logger.info(f"[DEBUG] Uploaded {tmp_path} to Wasabi at {bucket}/{path}")
 
+    except Exception as e:
+        logger.exception(f"Error uploading to Wasabi: {e}")
+        raise
+    finally:
+        # Always clean up temp file
+        try:
+            os.remove(tmp_path)
+            logger.info(f"[DEBUG] Temp file {tmp_path} removed after upload")
+        except OSError as cleanup_error:
+            logger.warning(f"Could not delete temp file {tmp_path}: {cleanup_error}")
 
 def delete_file(bucket: str, path: str):
+    """
+    Deletes an object from Wasabi.
+    """
     logger.info(f"Deleting from Wasabi bucket: {bucket}, path: {path}")
     s3_client.delete_object(Bucket=bucket, Key=path)
     logger.info(f"Successfully deleted from Wasabi: {bucket}/{path}")
