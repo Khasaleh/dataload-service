@@ -25,8 +25,11 @@ UPLOAD_SEQUENCE_DEPENDENCIES = {
 }
 
 ROLE_PERMISSIONS = {
-    "ROLE_ADMIN": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags"},
-    "catalog_editor": {"products", "product_items", "product_prices", "meta_tags"},
+    "ROLE_ADMIN": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags", "categories"},
+    "ROLE_INVENTORY_SPECIALIST": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags", "categories"},
+    "ROLE_IT_TECHNICAL_SUPPORT": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags", "categories"},
+    "ROLE_MARKETING_COORDINATOR": {"product_prices", "meta_tags"},
+    "ROLE_STORE_MANAGER": {"return_policies"},
     "viewer": set(),
 }
 
