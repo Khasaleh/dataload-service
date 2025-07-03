@@ -31,9 +31,9 @@ from app.services.db_loaders import (
     load_return_policy_to_db,
     load_category_to_db
 )
-# Import price loader from dataload
-from app.dataload.price_loader import load_price_to_db
-# Import product loader from dataload
+# Import price loader from db_loaders
+from app.services.db_loaders import load_price_to_db
+# Import product loader from dataload from dataload
 from app.dataload.product_loader import load_product_record_to_db
 # Import meta-tags loader from dataload
 from app.dataload.meta_tags_loader import load_meta_tags_from_csv
