@@ -47,3 +47,4 @@ def delete_file(bucket: str, path: str):
     logger.info(f"Deleting from Wasabi bucket: {bucket}, path: {path}")
     s3_client.delete_object(Bucket=bucket, Key=path)
     logger.info(f"Successfully deleted from Wasabi: {bucket}/{path}")
+client = s3_client
