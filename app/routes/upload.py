@@ -24,7 +24,7 @@ UPLOAD_SEQUENCE_DEPENDENCIES = {
 }
 
 ROLE_PERMISSIONS = {
-    "admin": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags"},
+    "ROLE_ADMIN": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags"},
     "catalog_editor": {"products", "product_items", "product_prices", "meta_tags"},
     "viewer": set(),
 }
