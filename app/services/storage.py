@@ -1,11 +1,10 @@
 import os
 import logging
-tempfile = __import__('tempfile')
-from tempfile import NamedTemporaryFile
+from typing import Optional
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import ReadTimeoutError, ConnectTimeoutError, ClientError
+from botocore.exceptions import ClientError, ConnectTimeoutError, ReadTimeoutError
 
 from app.core.config import settings
 
@@ -47,59 +46,36 @@ class WasabiClient:
             config=self._config,
         )
 
-    def upload_file(self, file_obj, bucket: str, key: str) -> None:
+    def upload_file(self, file_obj, bucket: str, key: str) -> str:
         """
-        Uploads a file-like object to Wasabi, ensuring Content-Length is set,
-        then confirms via head_object().
+        Uploads a small file to Wasabi in one non-chunked PUT and returns the ETag as tracking ID.
         """
         logger.info("Uploading to Wasabi bucket=%s, key=%s", bucket, key)
-        tmp_path = None
-
+        file_obj.seek(0)
         try:
-            # Dump to a temp file so boto3 can stat() it
-            with NamedTemporaryFile(delete=False) as tmp:
-                tmp_path = tmp.name
-                file_obj.seek(0)
-                for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
-                    tmp.write(chunk)
-            logger.debug("Temp file written at %s", tmp_path)
-
-            # Perform the upload
-            self._client.upload_file(
-                Filename=tmp_path,
+            response = self._client.put_object(
                 Bucket=bucket,
                 Key=key,
-                ExtraArgs={"ACL": "public-read"},
+                Body=file_obj,
+                ACL="public-read",
             )
-
-            # Confirm via head_object
-            self._client.head_object(Bucket=bucket, Key=key)
-            logger.info("Confirmed upload: %s/%s", bucket, key)
+            etag = response.get("ETag")
+            logger.info("Successfully uploaded to Wasabi: %s/%s, ETag=%s", bucket, key, etag)
+            return etag
 
         except ConnectTimeoutError:
-            logger.error("Connection to Wasabi timed out during upload")
+            logger.error("Connection to Wasabi timed out during upload: %s/%s", bucket, key)
             raise
         except ReadTimeoutError:
-            logger.error("Read timed out while uploading to Wasabi")
+            logger.error("Read timed out while uploading to Wasabi: %s/%s", bucket, key)
             raise
         except ClientError as e:
             code = e.response.get("Error", {}).get("Code")
-            if code == "404":
-                logger.error("Upload did not show up in Wasabi: %s/%s", bucket, key)
-            logger.exception("ClientError during Wasabi upload: %s", e)
+            logger.exception("ClientError during Wasabi upload: %s, code=%s", e, code)
             raise
         except Exception:
-            logger.exception("Unexpected error uploading to Wasabi")
+            logger.exception("Unexpected error uploading to Wasabi: %s/%s", bucket, key)
             raise
-        finally:
-            if tmp_path and os.path.isfile(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                    logger.debug("Deleted temp file: %s", tmp_path)
-                except OSError as cleanup_error:
-                    logger.warning(
-                        "Could not delete temp file %s: %s", tmp_path, cleanup_error
-                    )
 
     def delete_file(self, bucket: str, key: str) -> None:
         """
@@ -113,25 +89,6 @@ class WasabiClient:
             logger.exception("Error deleting Wasabi object %s/%s", bucket, key)
             raise
 
-    def put_small_file(self, file_obj, bucket: str, key: str) -> None:
-        """
-        For small files (<~5 MB), bypass multipart/chunked upload.
-        """
-        logger.info("Putting small file to Wasabi bucket=%s, key=%s", bucket, key)
-        try:
-            file_obj.seek(0)
-            self._client.put_object(
-                Bucket=bucket,
-                Key=key,
-                Body=file_obj,
-                ACL="public-read",
-            )
-            self._client.head_object(Bucket=bucket, Key=key)
-            logger.info("Confirmed small-file put: %s/%s", bucket, key)
-        except Exception:
-            logger.exception("Error in put_object to Wasabi")
-            raise
-
 
 # Module-level client instance
 _wasabi_client = WasabiClient(
@@ -143,16 +100,12 @@ _wasabi_client = WasabiClient(
 
 # Exposed functions for importing elsewhere
 
-def upload_file(file_obj, bucket: str, key: str) -> None:
+def upload_file(file_obj, bucket: str, key: str) -> str:
     return _wasabi_client.upload_file(file_obj, bucket, key)
 
 
 def delete_file(bucket: str, key: str) -> None:
     return _wasabi_client.delete_file(bucket, key)
 
-
-def put_small_file(file_obj, bucket: str, key: str) -> None:
-    return _wasabi_client.put_small_file(file_obj, bucket, key)
-
-# Legacy alias for backward-compatibility
+# Alias for backward-compatibility
 client = _wasabi_client
