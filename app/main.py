@@ -3,6 +3,7 @@
 # Keep FastAPI and logging
 from fastapi import FastAPI
 import logging
+from app.services.storage import upload_file as upload_to_wasabi
 
 from app.core.config import settings
 # Removed GraphQL specific imports: strawberry, GraphQLRouter, Query, get_current_user (if only for GQL context)
