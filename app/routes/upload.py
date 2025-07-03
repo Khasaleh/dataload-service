@@ -1,62 +1,183 @@
-import os
 import logging
-from typing import Optional
+import uuid
+import json
+from datetime import datetime
+from typing import Optional, Union
+from io import BytesIO
+
+from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 
 from app.core.config import settings
+from app.dependencies.auth import get_current_user
+from app.db.models import UploadSessionOrm
+from app.db.connection import get_session
+from app.models import ErrorDetailModel, ErrorType
+from app.services.storage import upload_file as local_upload_file, delete_file as local_delete_file
+from app.tasks.load_jobs import (
+    process_brands_file, process_attributes_file,
+    process_return_policies_file, process_products_file,
+    process_product_items_file, process_product_prices_file,
+    process_meta_tags_file
+)
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+router = APIRouter()
 
-# Base directory for local file storage (ensure this exists or is creatable)
-STORAGE_ROOT = getattr(settings, "LOCAL_STORAGE_PATH", "/tmp/uploads")
+UPLOAD_SEQUENCE_DEPENDENCIES = {
+    "products": ["brands", "return_policies"],
+    "product_items": ["products"],
+    "product_prices": ["products"],
+    "meta_tags": ["products"],
+}
 
-class LocalStorageClient:
-    def __init__(self, storage_root: str = STORAGE_ROOT):
-        self.storage_root = storage_root
-        os.makedirs(self.storage_root, exist_ok=True)
+ROLE_PERMISSIONS = {
+    "ROLE_ADMIN": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags", "categories"},
+    "ROLE_INVENTORY_SPECIALIST": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags", "categories"},
+    "ROLE_IT_TECHNICAL_SUPPORT": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags", "categories"},
+    "ROLE_MARKETING_COORDINATOR": {"product_prices", "meta_tags"},
+    "ROLE_STORE_MANAGER": {"return_policies"},
+    "viewer": set(),
+}
 
-    def upload_file(self, file_obj, bucket: str, key: str) -> str:
-        """
-        Saves the incoming file-like object to local disk under STORAGE_ROOT/bucket/key.
-        Returns the full file path as a tracking ID.
-        """
-        dest_dir = os.path.join(self.storage_root, bucket)
-        os.makedirs(dest_dir, exist_ok=True)
+CELERY_TASK_MAP = {
+    "brands": process_brands_file,
+    "attributes": process_attributes_file,
+    "return_policies": process_return_policies_file,
+    "products": process_products_file,
+    "product_items": process_product_items_file,
+    "product_prices": process_product_prices_file,
+    "meta_tags": process_meta_tags_file,
+}
 
-        file_path = os.path.join(dest_dir, key)
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-
-        file_obj.seek(0)
-        with open(file_path, "wb") as f:
-            f.write(file_obj.read())
-
-        logger.info("Saved file locally to %s", file_path)
-        return file_path
-
-    def delete_file(self, bucket: str, key: str) -> None:
-        """
-        Deletes the local file at STORAGE_ROOT/bucket/key.
-        """
-        file_path = os.path.join(self.storage_root, bucket, key)
-        try:
-            os.remove(file_path)
-            logger.info("Deleted local file %s", file_path)
-        except FileNotFoundError:
-            logger.warning("Local file %s not found for deletion", file_path)
-        except Exception as e:
-            logger.error("Error deleting local file %s: %s", file_path, e)
-            raise
-
-# Module-level client instance for local storage
-_local_client = LocalStorageClient()
-
-# Exposed functions for importing elsewhere
-
-def upload_file(file_obj, bucket: str, key: str) -> str:
-    return _local_client.upload_file(file_obj, bucket, key)
+class UploadResponseModel(BaseModel):
+    message: str
+    session_id: str
+    load_type: str
+    storage_path: str
+    status: str
+    task_id: Optional[str] = None
+    tracking_id: Optional[str] = None
 
 
-def delete_file(bucket: str, key: str) -> None:
-    return _local_client.delete_file(bucket, key)
+def create_upload_session_in_db_sync(
+    session_id_str: str,
+    user_business_id: int,
+    load_type_str: str,
+    original_filename_str: str,
+    storage_path_str: str
+) -> UploadSessionOrm:
+    db = None
+    try:
+        db = get_session(business_id=user_business_id)
+        new_session_orm = UploadSessionOrm(
+            session_id=session_id_str,
+            business_details_id=user_business_id,
+            load_type=load_type_str,
+            original_filename=original_filename_str,
+            wasabi_path=storage_path_str,
+            status="pending",
+        )
+        db.add(new_session_orm)
+        db.commit()
+        db.refresh(new_session_orm)
+        logger.info(f"Upload session record created for session_id: {session_id_str}")
+        return new_session_orm
+    except Exception as e_db:
+        logger.error("DB Error creating upload session: %s", e_db, exc_info=True)
+        if db:
+            db.rollback()
+        raise HTTPException(status_code=500, detail=str(e_db))
+    finally:
+        if db:
+            db.close()
 
-# Alias for backward compatibility
-client = _local_client
+@router.post(
+    "/api/v1/business/{business_id}/upload/{load_type}",
+    summary="Upload catalog file to local storage, create DB session, and queue processing",
+    status_code=202,
+    response_model=UploadResponseModel
+)
+async def upload_file_and_queue_for_processing(
+    business_id: str,
+    load_type: str,
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user)
+):
+    try:
+        biz_id = int(business_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid business_id; must be integer.")
+    if biz_id != user["business_id"]:
+        raise HTTPException(403, "Unauthorized business_id.")
+
+    role = user.get("roles", ["viewer"])[0]
+    if role not in ROLE_PERMISSIONS or load_type not in ROLE_PERMISSIONS[role]:
+        raise HTTPException(403, "Insufficient permissions.")
+    if load_type not in CELERY_TASK_MAP:
+        raise HTTPException(400, f"Unsupported load_type: {load_type}")
+    if not file.filename.lower().endswith('.csv'):
+        raise HTTPException(400, "Only CSV files allowed.")
+
+    # Read file into BytesIO for local storage
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(400, "Empty file.")
+    file_stream = BytesIO(file_bytes)
+
+    session_id = str(uuid.uuid4())
+    storage_key = f"uploads/{biz_id}/{session_id}/{load_type}/{file.filename}"
+
+    # Create DB record
+    session_orm = await run_in_threadpool(
+        create_upload_session_in_db_sync,
+        session_id, biz_id, load_type, file.filename, storage_key
+    )
+
+    # Upload to local storage
+    try:
+        tracking_id = await run_in_threadpool(
+            local_upload_file,
+            file_stream,
+            str(biz_id),
+            storage_key
+        )
+        logger.info("File saved locally at %s, tracking_id=%s", storage_key, tracking_id)
+    except Exception as e_loc:
+        logger.error("Local storage upload failed: %s", e_loc, exc_info=True)
+        # Mark DB as failed
+        def mark_failed():
+            db2 = get_session(business_id=biz_id)
+            try:
+                sess = db2.query(UploadSessionOrm).filter(UploadSessionOrm.session_id==session_id).first()
+                if sess:
+                    sess.status = "failed_storage_upload"
+                    sess.details = json.dumps([
+                        ErrorDetailModel(error_message=str(e_loc), error_type=ErrorType.TASK_EXCEPTION).model_dump()
+                    ])
+                    sess.updated_at = datetime.utcnow()
+                    db2.commit()
+            finally:
+                db2.close()
+        await run_in_threadpool(mark_failed)
+        raise HTTPException(500, "Failed saving file locally.")
+
+    # Dispatch Celery task
+    task = CELERY_TASK_MAP[load_type].delay(
+        business_id=str(biz_id),
+        session_id=session_orm.session_id,
+        wasabi_file_path=session_orm.wasabi_path,
+        original_filename=session_orm.original_filename
+    )
+    logger.info("Queued Celery task %s for session %s", task.id, session_id)
+
+    return UploadResponseModel(
+        message="File accepted.",
+        session_id=session_id,
+        load_type=load_type,
+        storage_path=storage_key,
+        status=session_orm.status,
+        task_id=task.id,
+        tracking_id=tracking_id
+    )
