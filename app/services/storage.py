@@ -34,25 +34,25 @@ s3_client = boto3.client(
 
 def upload_file(file_obj, bucket: str, path: str):
     """
-    Saves the FastAPI UploadFile to disk, then uploads with boto3.upload_file()
-    to avoid aws-chunked encoding and ensure Content-Length header.
+    Writes UploadFile to disk, closes it, then re-opens it by path to ensure boto3.upload_file()
+    sets Content-Length header and disables aws-chunked encoding.
     """
     logger.info(f"Uploading to Wasabi bucket={bucket}, path={path}")
 
     tmp_path = None
 
     try:
-        # Write UploadFile to a local file
+        # 1. Write to temp file
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             tmp_path = tmp.name
             file_obj.seek(0)
             for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
                 tmp.write(chunk)
-            tmp.flush()
 
-        logger.info(f"Local temp file for upload: {tmp_path}")
+        logger.info(f"Temp file written at {tmp_path}")
 
-        # Now call boto3's upload_file (never uses chunked encoding)
+        # 2. Close handle, reopen cleanly in read mode
+        # boto3.upload_file() uses stat on filename to get size
         s3_client.upload_file(
             Filename=tmp_path,
             Bucket=bucket,
@@ -67,11 +67,10 @@ def upload_file(file_obj, bucket: str, path: str):
         raise
 
     finally:
-        # Always try to delete the temp file
         if tmp_path and os.path.isfile(tmp_path):
             try:
                 os.remove(tmp_path)
-                logger.debug(f"Deleted local temp file: {tmp_path}")
+                logger.debug(f"Deleted temp file: {tmp_path}")
             except OSError as cleanup_error:
                 logger.warning(f"Could not delete temp file {tmp_path}: {cleanup_error}")
 
