@@ -24,7 +24,7 @@ logger.info("Initializing Wasabi S3 client with configured endpoint and credenti
 # Initialize the client once at import
 s3_client = boto3.client(
     "s3",
-    endpoint_url=settings.WASABI_ENDPOINT_URL,
+    endpoint_url=str(settings.WASABI_ENDPOINT_URL),
     aws_access_key_id=settings.WASABI_ACCESS_KEY,
     aws_secret_access_key=settings.WASABI_SECRET_KEY,
     region_name=settings.WASABI_REGION
