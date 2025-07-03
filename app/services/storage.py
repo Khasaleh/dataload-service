@@ -1,6 +1,7 @@
 import os
 import logging
-import tempfile
+tempfile = __import__('tempfile')
+from tempfile import NamedTemporaryFile
 
 import boto3
 from botocore.config import Config
@@ -56,7 +57,7 @@ class WasabiClient:
 
         try:
             # Dump to a temp file so boto3 can stat() it
-            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            with NamedTemporaryFile(delete=False) as tmp:
                 tmp_path = tmp.name
                 file_obj.seek(0)
                 for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
@@ -96,7 +97,9 @@ class WasabiClient:
                     os.remove(tmp_path)
                     logger.debug("Deleted temp file: %s", tmp_path)
                 except OSError as cleanup_error:
-                    logger.warning("Could not delete temp file %s: %s", tmp_path, cleanup_error)
+                    logger.warning(
+                        "Could not delete temp file %s: %s", tmp_path, cleanup_error
+                    )
 
     def delete_file(self, bucket: str, key: str) -> None:
         """
@@ -139,6 +142,7 @@ _wasabi_client = WasabiClient(
 )
 
 # Exposed functions for importing elsewhere
+
 def upload_file(file_obj, bucket: str, key: str) -> None:
     return _wasabi_client.upload_file(file_obj, bucket, key)
 
@@ -150,4 +154,5 @@ def delete_file(bucket: str, key: str) -> None:
 def put_small_file(file_obj, bucket: str, key: str) -> None:
     return _wasabi_client.put_small_file(file_obj, bucket, key)
 
+# Legacy alias for backward-compatibility
 client = _wasabi_client
