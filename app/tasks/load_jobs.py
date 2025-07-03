@@ -252,24 +252,40 @@ def process_csv_task(business_id_str: str, session_id: str, wasabi_file_path: st
         _update_session_status(session_id, str(business_id), UploadJobStatus.FAILED_UNHANDLED_EXCEPTION, critical_error_detail)
         raise
 
+# ----------------------------
+# Celery Task Wrappers
+# ----------------------------
+
+@shared_task(name="process_brands_file", bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+def process_brands_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, "name", "brand", "brands")
+
+
+@shared_task(name="process_attributes_file", bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+def process_attributes_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, "attribute_name", "attr", "attributes")
+
+
+@shared_task(name="process_return_policies_file", bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+def process_return_policies_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, "policy_name", "rp", "return_policies")
+
+
+@shared_task(name="process_products_file", bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+def process_products_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, "self_gen_product_id", "prod", "products")
+
+
+@shared_task(name="process_product_items_file", bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+def process_product_items_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, "variant_sku", "item", "product_items")
+
+
+@shared_task(name="process_product_prices_file", bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+def process_product_prices_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, "product_id", "price", "product_prices")
+
 
 @shared_task(name="process_meta_tags_file", bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 def process_meta_tags_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
-    try:
-        return process_csv_task(str(business_id), session_id, wasabi_file_path, original_filename, "meta_tag_key", "meta", "meta_tags")
-    except Exception as e:
-        logger.error(f"Task process_meta_tags_file FAILED ultimately for session {session_id}: {e}", exc_info=True)
-        _update_session_status(session_id, str(business_id), UploadJobStatus.FAILED_UNHANDLED_EXCEPTION,
-                               [ErrorDetailModel(error_message=f"Task failed: {str(e)}", error_type=ErrorType.TASK_EXCEPTION)])
-        raise
-
-
-@shared_task(name="process_brands_file", bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_brands_file(self, business_id: int, session_id: str, wasabi_file_path: str, original_filename: str):
-    try:
-        return process_csv_task(str(business_id), session_id, wasabi_file_path, original_filename, "name", "brand", "brands")
-    except Exception as e:
-        logger.error(f"Task process_brands_file FAILED ultimately for session {session_id}: {e}", exc_info=True)
-        _update_session_status(session_id, str(business_id), UploadJobStatus.FAILED_UNHANDLED_EXCEPTION,
-                               [ErrorDetailModel(error_message=f"Task failed: {str(e)}", error_type=ErrorType.TASK_EXCEPTION)])
-        raise
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, "meta_tag_key", "meta", "meta_tags")
