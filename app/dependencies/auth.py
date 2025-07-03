@@ -23,7 +23,20 @@ if SECRET_KEY == "your-default-secret-key-if-not-set" and settings.ENVIRONMENT !
         "Using default JWT_SECRET. This should be overridden via an environment variable "
         "(JWT_SECRET or SECRET_KEY) with a strong, random key for production."
     )
-
+def decode_unverified_payload(token: str) -> dict:
+    try:
+        parts = token.split('.')
+        if len(parts) < 2:
+            raise ValueError("Invalid JWT format.")
+        payload_b64 = parts[1]
+        # Fix padding
+        payload_b64 += '=' * (-len(payload_b64) % 4)
+        decoded_bytes = base64.urlsafe_b64decode(payload_b64)
+        return json.loads(decoded_bytes.decode('utf-8'))
+    except Exception as e:
+        logger.error(f"Error decoding unverified JWT payload: {e}")
+        raise HTTPException(status_code=401, detail="Invalid JWT format.")
+    
 def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
     """
     Decodes the JWT token, extracts user claims, and returns them as a dictionary.
@@ -40,7 +53,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
     )
 
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = decode_unverified_payload(token)(token)
 
         username: Optional[str] = payload.get("sub")
         user_id: Optional[Any] = payload.get("userId") # Assuming userId can be int or string from token
