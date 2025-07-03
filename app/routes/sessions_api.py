@@ -1,5 +1,5 @@
 # session_api.py
-
+import json
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query as FastAPIQuery
 from typing import List, Optional
@@ -53,16 +53,16 @@ def _list_sessions_sync(
     return sessions, total_count
 
 def _orm_to_response(session: UploadSessionOrm) -> SessionResponseSchema:
-    """
-    Copy out the ORM attributes, cast the UUID to str,
-    and drop SQLAlchemy internals so that Pydantic only
-    ever sees plain Python types.
-    """
     data = session.__dict__.copy()
-    # Remove the SQLAlchemy instance state
     data.pop("_sa_instance_state", None)
-    # Cast the UUID to string
+    # session_id → string
     data["session_id"] = str(data["session_id"])
+
+    # ensure details is a string (JSON-dump it if it's a list/dict)
+    details = data.get("details")
+    if details is not None and not isinstance(details, str):
+        data["details"] = json.dumps(details)
+
     return SessionResponseSchema(**data)
 
 @router.get("/{session_id}", response_model=SessionResponseSchema)
