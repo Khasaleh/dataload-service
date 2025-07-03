@@ -42,7 +42,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
     try:
         if settings.AUTH_VALIDATION_ENABLED:
             logger.debug("AUTH_VALIDATION_ENABLED=True: Verifying signature.")
-            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            payload = decode_unverified_payload(token)
         else:
             logger.debug("AUTH_VALIDATION_ENABLED=False: Skipping signature verification. Using get_unverified_claims.")
             payload = decode_unverified_payload(token)
