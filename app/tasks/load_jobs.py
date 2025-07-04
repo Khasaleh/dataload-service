@@ -83,7 +83,7 @@ def _update_session_status(
 def process_csv_task(
     business_id: str,
     session_id: str,
-    storage_path: str,
+    wasabi_file_path: str,
     original_filename: str,
     record_key: str,
     id_prefix: str,
@@ -195,11 +195,11 @@ def process_csv_task(
 # Celery task wrappers
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 def process_brands_file(self, business_id: str, session_id: str, storage_path: str, original_filename: str):
-    return process_csv_task(business_id, session_id, storage_path, original_filename, 'name', 'brand', 'brands')
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'name', 'brand', 'brands')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 def process_attributes_file(self, business_id: str, session_id: str, storage_path: str, original_filename: str):
-    return process_csv_task(business_id, session_id, storage_path, original_filename, 'attribute_name', 'attr', 'attributes')
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'attribute_name', 'attr', 'attributes')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 def process_return_policies_file(self, business_id: str, session_id: str, storage_path: str, original_filename: str):
