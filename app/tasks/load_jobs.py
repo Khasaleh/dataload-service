@@ -71,8 +71,17 @@ def _update_session_status(
         return
     sess.status = status.value
     sess.updated_at = datetime.utcnow()
+
     if details is not None:
-        sess.details = json.dumps([d.model_dump() for d in details])
+        # details may be list of Pydantic models or plain dicts
+        normalized = []
+        for d in details:
+            if hasattr(d, 'model_dump'):
+                normalized.append(d.model_dump())
+            else:
+                normalized.append(d)
+        sess.details = json.dumps(normalized)
+
     if record_count is not None:
         sess.record_count = record_count
     if error_count is not None:
