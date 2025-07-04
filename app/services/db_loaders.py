@@ -78,7 +78,6 @@ def load_category_to_db(
 
     # Auto-generate slug if missing
     if not url:
-        from app.utils.slug import generate_slug
         name = record_data.get("name", "").strip()
         slug = generate_slug(name)
         url = f"/{slug}"
