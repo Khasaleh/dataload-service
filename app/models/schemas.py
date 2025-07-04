@@ -3,6 +3,8 @@ from typing import Optional, List, Any
 from datetime import datetime
 from enum import Enum
 import re
+from app.utils.slug import generate_slug
+
 
 def generate_slug(input_string: str) -> str:
     slug = input_string.lower().strip()
@@ -32,7 +34,9 @@ class CategoryCsvModel(BaseModel):
     long_description: Optional[str] = None
     order_type: Optional[str] = None
     shipping_type: Optional[str] = None
-    active: constr(strip_whitespace=True) = Field("INACTIVE", description="Either 'ACTIVE' or 'INACTIVE'")
+    active: constr(strip_whitespace=True) = Field(
+        "INACTIVE", description="Either 'ACTIVE' or 'INACTIVE'"
+    )
     seo_description: Optional[str] = None
     seo_keywords: Optional[str] = None
     seo_title: Optional[str] = None
@@ -51,28 +55,21 @@ class CategoryCsvModel(BaseModel):
             raise ValueError("category_path must contain at least one non-empty segment")
         return v
 
-    @validator("name")
-    def name_matches_last_path_segment(cls, v, values):
-        path = values.get("category_path", "")
-        last = path.rsplit("/", 1)[-1]
-        if v.strip().lower() != last.strip().lower():
-            raise ValueError(f"name '{v}' must equal last segment of category_path '{last}'")
-        return v
-
     @root_validator(pre=True)
     def fill_and_normalize_defaults(cls, values):
-        # enabled: required, default to False if absent
-        if "enabled" not in values or values["enabled"] is None:
-            values["enabled"] = False
-
-        # active: normalize to 'ACTIVE' or 'INACTIVE'
+        # → enabled is required; Field(...) ensures it's present
+        # active: normalize to 'ACTIVE'/'INACTIVE'
         raw_active = values.get("active")
-        flag = str(raw_active).strip().upper() if raw_active is not None else ""
+        flag = str(raw_active or "").strip().upper()
         values["active"] = "ACTIVE" if flag in ("TRUE", "1", "ACTIVE") else "INACTIVE"
 
         # url: generate slug from name if missing or blank
         if not values.get("url") and values.get("name"):
-            values["url"] = generate_slug(values["name"])
+            values["url"] = f"/{generate_slug(values['name'])}"
+
+        # final sanity check: url must now be non-empty
+        if not values.get("url"):
+            raise ValueError("url must be provided or derivable from name")
 
         return values
 class BrandCsvModel(BaseModel):
