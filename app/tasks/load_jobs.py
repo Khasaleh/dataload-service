@@ -17,6 +17,7 @@ from redis.exceptions import (
     BusyLoadingError as RedisBusyLoadingError
 )
 
+from app.core.config import settings
 from app.db.connection import get_session
 from app.db.models import UploadSessionOrm
 from app.utils.redis_utils import (
@@ -28,7 +29,6 @@ from app.utils.redis_utils import (
     get_redis_pipeline
 )
 from app.services.validator import validate_csv
-from app.services.storage import client as local_storage_client
 
 # Import loader functions
 from app.services.db_loaders import (
@@ -43,18 +43,12 @@ from app.dataload.meta_tags_loader import load_meta_tags_from_csv
 
 from app.models import UploadJobStatus, ErrorDetailModel, ErrorType
 from app.exceptions import DataLoaderError
-from pydantic import ValidationError
 import csv
-import io
 
 logger = logging.getLogger(__name__)
 
-# Base directory for uploaded files
-STORAGE_ROOT = getattr(
-    __import__('app.core.config', fromlist=['settings']).settings,
-    'LOCAL_STORAGE_PATH',
-    '/tmp/uploads'
-)
+# Base directory for uploaded files (mounted via PVC at /data/uploads)
+STORAGE_ROOT = settings.LOCAL_STORAGE_PATH
 
 # Exceptions that trigger a retry
 RETRYABLE_EXCEPTIONS = (
@@ -77,9 +71,9 @@ def _update_session_status(
     record_count=None,
     error_count=None
 ):
-    sess = db.query(UploadSessionOrm).filter(
-        UploadSessionOrm.session_id == session_id
-    ).first()
+    sess = db.query(UploadSessionOrm)\
+             .filter(UploadSessionOrm.session_id == session_id)\
+             .first()
     if not sess:
         logger.error("Session %s not found for status update", session_id)
         return
@@ -106,16 +100,16 @@ def process_csv_task(
     db = get_session(business_id=int(business_id))
     _update_session_status(db, session_id, UploadJobStatus.DOWNLOADING_FILE)
 
+    # Build the absolute path on shared storage
     file_path = os.path.join(STORAGE_ROOT, business_id, storage_path)
     with open(file_path, newline='', encoding='utf-8') as f:
         original_records = list(csv.DictReader(f))
+
     if not original_records:
         _update_session_status(
-            db,
-            session_id,
+            db, session_id,
             UploadJobStatus.COMPLETED_EMPTY_FILE,
-            record_count=0,
-            error_count=0
+            record_count=0, error_count=0
         )
         return
 
@@ -123,14 +117,11 @@ def process_csv_task(
     init_errors, validated = validate_csv(
         map_type,
         original_records,
-        session_id,
-        record_key,
-        get_from_id_map(session_id, map_type, redis_client)
+        session_id
     )
     if init_errors:
         _update_session_status(
-            db,
-            session_id,
+            db, session_id,
             UploadJobStatus.FAILED_VALIDATION,
             details=init_errors,
             record_count=len(original_records),
@@ -139,8 +130,7 @@ def process_csv_task(
         return
 
     _update_session_status(
-        db,
-        session_id,
+        db, session_id,
         UploadJobStatus.DB_PROCESSING_STARTED,
         record_count=len(validated)
     )
@@ -182,18 +172,17 @@ def process_csv_task(
     db.commit()
 
     final_status = (
-        UploadJobStatus.COMPLETED if not errors
-        else UploadJobStatus.COMPLETED_WITH_ERRORS
+        UploadJobStatus.COMPLETED
+        if not errors else UploadJobStatus.COMPLETED_WITH_ERRORS
     )
     _update_session_status(
-        db,
-        session_id,
-        final_status,
+        db, session_id, final_status,
         details=errors if errors else None,
         record_count=len(validated),
         error_count=len(errors)
     )
 
+    # Optionally remove the file after processing
     try:
         os.remove(file_path)
     except OSError:
@@ -206,35 +195,68 @@ def process_csv_task(
         'errors': [e.model_dump() for e in errors]
     }
 
+
 # Task wrappers
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_brands_file(self, business_id, session_id, wasabi_file_path, original_filename):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'name', 'brand', 'brands')
+def process_brands_file(self, business_id, session_id, storage_path, original_filename):
+    return process_csv_task(
+        business_id, session_id,
+        storage_path, original_filename,
+        'name', 'brand', 'brands'
+    )
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_attributes_file(self, business_id, session_id, wasabi_file_path, original_filename):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'attribute_name', 'attr', 'attributes')
+def process_attributes_file(self, business_id, session_id, storage_path, original_filename):
+    return process_csv_task(
+        business_id, session_id,
+        storage_path, original_filename,
+        'attribute_name', 'attr', 'attributes'
+    )
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_return_policies_file(self, business_id, session_id, wasabi_file_path, original_filename):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'policy_name', 'rp', 'return_policies')
+def process_return_policies_file(self, business_id, session_id, storage_path, original_filename):
+    return process_csv_task(
+        business_id, session_id,
+        storage_path, original_filename,
+        'policy_name', 'rp', 'return_policies'
+    )
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_products_file(self, business_id, session_id, wasabi_file_path, original_filename):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'self_gen_product_id', 'prod', 'products')
+def process_products_file(self, business_id, session_id, storage_path, original_filename):
+    return process_csv_task(
+        business_id, session_id,
+        storage_path, original_filename,
+        'self_gen_product_id', 'prod', 'products'
+    )
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_product_items_file(self, business_id, session_id, wasabi_file_path, original_filename):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'variant_sku', 'item', 'product_items')
+def process_product_items_file(self, business_id, session_id, storage_path, original_filename):
+    return process_csv_task(
+        business_id, session_id,
+        storage_path, original_filename,
+        'variant_sku', 'item', 'product_items'
+    )
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_product_prices_file(self, business_id, session_id, wasabi_file_path, original_filename):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'product_id', 'price', 'product_prices')
+def process_product_prices_file(self, business_id, session_id, storage_path, original_filename):
+    return process_csv_task(
+        business_id, session_id,
+        storage_path, original_filename,
+        'product_id', 'price', 'product_prices'
+    )
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_meta_tags_file(self, business_id, session_id, wasabi_file_path, original_filename):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'meta_tag_key', 'meta', 'meta_tags')
+def process_meta_tags_file(self, business_id, session_id, storage_path, original_filename):
+    return process_csv_task(
+        business_id, session_id,
+        storage_path, original_filename,
+        'meta_tag_key', 'meta', 'meta_tags'
+    )
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_categories_file(self, business_id, session_id, wasabi_file_path, original_filename):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'category_name', 'cat', 'categories')
+def process_categories_file(self, business_id, session_id, storage_path, original_filename):
+    return process_csv_task(
+        business_id, session_id,
+        storage_path, original_filename,
+        'category_name', 'cat', 'categories'
+    )

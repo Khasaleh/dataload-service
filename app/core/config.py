@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     WASABI_SECRET_KEY: str
     WASABI_BUCKET_NAME: str
     WASABI_REGION: Optional[str] = None
-
+    LOCAL_STORAGE_PATH: str = "/data/uploads"
     # JWT Authentication Configuration
     JWT_SECRET: str = Field(..., validation_alias="SECRET_KEY")
     JWT_ALGORITHM: str = "HS512"
