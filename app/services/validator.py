@@ -34,23 +34,16 @@ def check_category_hierarchy(
     records: List[Dict],
     session_id: str
 ) -> List[Dict]:
-    """
-    Ensure no sub‐category is added under an existing product‐holding category,
-    and that every parent in the hierarchy is either already in the DB or
-    is present in this batch of CSV records.
-    """
     errors: List[Dict] = []
-    # all the new paths in this upload
     seen_paths = {rec["category_path"] for rec in records}
 
     for idx, rec in enumerate(records, start=1):
         path = rec.get("category_path", "")
         segments = [seg for seg in path.split("/") if seg]
-        # for each prefix (excluding the full path), check:
         for level in range(1, len(segments)):
             parent = "/".join(segments[:level])
 
-            # 1) disallow if parent already has products in DB
+            # 1) block if parent already has products
             if get_from_id_map(session_id, "products", parent):
                 errors.append({
                     "row": idx,
@@ -61,10 +54,9 @@ def check_category_hierarchy(
                     ),
                     "value": path
                 })
-                # no need to check further up for this row
                 break
 
-            # 2) disallow if parent is neither in DB nor in this CSV
+            # 2) block if parent is neither in Redis _nor_ in this CSV
             if not get_from_id_map(session_id, "categories", parent) \
                and parent not in seen_paths:
                 errors.append({

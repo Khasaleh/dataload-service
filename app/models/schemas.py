@@ -56,14 +56,6 @@ class CategoryCsvModel(BaseModel):
             raise ValueError("category_path must contain at least one non-empty segment")
         return v
 
-    @validator("name")
-    def name_matches_last_path_segment(cls, v, values):
-        path = values.get("category_path", "")
-        last = path.rsplit("/", 1)[-1]
-        if v.strip().lower() != last.strip().lower():
-            raise ValueError(f"name '{v}' must equal last segment of category_path '{last}'")
-        return v
-
     @validator("position_on_site", pre=True)
     def empty_position_to_none(cls, v):
         # blank or whitespace-only → None
