@@ -1,27 +1,14 @@
+# app/tasks/celery_worker.py  (or whatever module you use to start Celery)
 from celery import Celery
-from app.core.config import settings  # centralized settings
-import logging
+from app.core.config import settings
 
-logger = logging.getLogger(__name__)
-
-# Initialize Celery application with broker and backend URLs from settings
 celery_app = Celery(
     'dataload_service',
-    broker=settings.CELERY_BROKER_URL,
-    backend=settings.CELERY_RESULT_BACKEND_URL,
-    include=['app.tasks.load_jobs']  # ensure load_jobs module is imported
+    broker=str(settings.CELERY_BROKER_URL),
+    backend=str(settings.CELERY_RESULT_BACKEND_URL),
+    include=['app.tasks.load_jobs']   # make sure your tasks module is imported
 )
 
-# Load additional configuration from celeryconfig.py
-# Using namespace 'CELERY' to pick up env vars like CELERY_BROKER_URL, etc.
+# now load any additional Celery config (if you still need it)
 celery_app.config_from_object('celeryconfig', namespace='CELERY')
-
-# Auto-discover tasks in the app.tasks package
 celery_app.autodiscover_tasks(['app.tasks'])
-
-# Optional: configure logging
-# from celery.signals import setup_logging
-# @setup_logging.connect
-# def config_loggers(*args, **kwargs):
-#     ...
-# celery_app.log.setup()
