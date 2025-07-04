@@ -22,11 +22,7 @@ from app.db.connection import get_session
 from app.db.models import UploadSessionOrm
 from app.utils.redis_utils import (
     redis_client_instance as redis_client,
-    add_to_id_map,
     get_from_id_map,
-    DB_PK_MAP_SUFFIX,
-    set_id_map_ttl,
-    get_redis_pipeline
 )
 from app.services.validator import validate_csv
 
@@ -36,7 +32,7 @@ from app.services.db_loaders import (
     load_attribute_to_db,
     load_return_policy_to_db,
     load_category_to_db,
-    load_price_to_db
+    load_price_to_db,
 )
 from app.dataload.product_loader import load_product_record_to_db
 from app.dataload.meta_tags_loader import load_meta_tags_from_csv
@@ -47,7 +43,7 @@ import csv
 
 logger = logging.getLogger(__name__)
 
-# Base directory for uploaded files (mounted via PVC at /data/uploads)
+# Base directory for uploaded files (mounted via PVC at settings.LOCAL_STORAGE_PATH)
 STORAGE_ROOT = settings.LOCAL_STORAGE_PATH
 
 # Exceptions that trigger a retry
@@ -58,7 +54,7 @@ RETRYABLE_EXCEPTIONS = (
     BotoReadTimeoutError,
     RedisConnectionError,
     RedisTimeoutError,
-    RedisBusyLoadingError
+    RedisBusyLoadingError,
 )
 COMMON_RETRY_KWARGS = {"max_retries": 3, "default_retry_delay": 60}
 
@@ -91,7 +87,7 @@ def _update_session_status(
 def process_csv_task(
     business_id: str,
     session_id: str,
-    storage_path: str,
+    file_path_rel: str,
     original_filename: str,
     record_key: str,
     id_prefix: str,
@@ -100,16 +96,16 @@ def process_csv_task(
     db = get_session(business_id=int(business_id))
     _update_session_status(db, session_id, UploadJobStatus.DOWNLOADING_FILE)
 
-    # Build the absolute path on shared storage
-    file_path = os.path.join(STORAGE_ROOT, business_id, storage_path)
-    with open(file_path, newline='', encoding='utf-8') as f:
+    # Build absolute path to file
+    abs_path = os.path.join(STORAGE_ROOT, business_id, file_path_rel)
+    with open(abs_path, newline='', encoding='utf-8') as f:
         original_records = list(csv.DictReader(f))
-
     if not original_records:
         _update_session_status(
             db, session_id,
             UploadJobStatus.COMPLETED_EMPTY_FILE,
-            record_count=0, error_count=0
+            record_count=0,
+            error_count=0
         )
         return
 
@@ -117,7 +113,9 @@ def process_csv_task(
     init_errors, validated = validate_csv(
         map_type,
         original_records,
-        session_id
+        session_id,
+        record_key,
+        get_from_id_map(session_id, map_type, redis_client)
     )
     if init_errors:
         _update_session_status(
@@ -172,19 +170,20 @@ def process_csv_task(
     db.commit()
 
     final_status = (
-        UploadJobStatus.COMPLETED
-        if not errors else UploadJobStatus.COMPLETED_WITH_ERRORS
+        UploadJobStatus.COMPLETED if not errors
+        else UploadJobStatus.COMPLETED_WITH_ERRORS
     )
     _update_session_status(
-        db, session_id, final_status,
+        db, session_id,
+        final_status,
         details=errors if errors else None,
         record_count=len(validated),
         error_count=len(errors)
     )
 
-    # Optionally remove the file after processing
+    # Remove file after processing
     try:
-        os.remove(file_path)
+        os.remove(abs_path)
     except OSError:
         pass
 
@@ -196,67 +195,5 @@ def process_csv_task(
     }
 
 
-# Task wrappers
+# Task wrappers — ensure keyword alignment with .delay() calls
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_brands_file(self, business_id, session_id, storage_path, original_filename):
-    return process_csv_task(
-        business_id, session_id,
-        storage_path, original_filename,
-        'name', 'brand', 'brands'
-    )
-
-@shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_attributes_file(self, business_id, session_id, storage_path, original_filename):
-    return process_csv_task(
-        business_id, session_id,
-        storage_path, original_filename,
-        'attribute_name', 'attr', 'attributes'
-    )
-
-@shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_return_policies_file(self, business_id, session_id, storage_path, original_filename):
-    return process_csv_task(
-        business_id, session_id,
-        storage_path, original_filename,
-        'policy_name', 'rp', 'return_policies'
-    )
-
-@shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_products_file(self, business_id, session_id, storage_path, original_filename):
-    return process_csv_task(
-        business_id, session_id,
-        storage_path, original_filename,
-        'self_gen_product_id', 'prod', 'products'
-    )
-
-@shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_product_items_file(self, business_id, session_id, storage_path, original_filename):
-    return process_csv_task(
-        business_id, session_id,
-        storage_path, original_filename,
-        'variant_sku', 'item', 'product_items'
-    )
-
-@shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_product_prices_file(self, business_id, session_id, storage_path, original_filename):
-    return process_csv_task(
-        business_id, session_id,
-        storage_path, original_filename,
-        'product_id', 'price', 'product_prices'
-    )
-
-@shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_meta_tags_file(self, business_id, session_id, storage_path, original_filename):
-    return process_csv_task(
-        business_id, session_id,
-        storage_path, original_filename,
-        'meta_tag_key', 'meta', 'meta_tags'
-    )
-
-@shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_categories_file(self, business_id, session_id, storage_path, original_filename):
-    return process_csv_task(
-        business_id, session_id,
-        storage_path, original_filename,
-        'category_name', 'cat', 'categories'
-    )
