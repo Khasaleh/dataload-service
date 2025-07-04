@@ -1,10 +1,26 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import PostgresDsn, RedisDsn, HttpUrl, Field, model_validator
+from pydantic import PostgresDsn, RedisDsn, HttpUrl, Field, model_validator, field_validator
 from typing import Optional
+
+
+@field_validator('WASABI_ACCESS_KEY', 'WASABI_SECRET_KEY', mode='before')
+@classmethod
+def strip_whitespace(cls, v):
+    if isinstance(v, str):
+        return v.strip()
+    return v
+@field_validator('WASABI_ACCESS_KEY')
+@classmethod
+def validate_ascii(cls, v):
+    if not all(ord(c) < 128 for c in v):
+        raise ValueError("WASABI_ACCESS_KEY contains invalid non-ASCII characters")
+    return v.strip()
 
 class Settings(BaseSettings):
     # Environment loading configuration
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding='utf-8', extra='ignore')
+    
+    AUTH_VALIDATION_ENABLED: bool = False
 
     # General Application Settings
     PROJECT_NAME: str = "Catalog Data Load Service"
@@ -23,8 +39,8 @@ class Settings(BaseSettings):
     DATABASE_URL: Optional[PostgresDsn] = None
 
     # Schema names
-    CATALOG_SERVICE_SCHEMA: str = "catalog_management"
-    BUSINESS_SERVICE_SCHEMA: str = "fazealbusiness"
+    CATALOG_SERVICE_SCHEMA: str = "public"
+    BUSINESS_SERVICE_SCHEMA: str = "public"
 
     # Wasabi S3 Configuration
     WASABI_ENDPOINT_URL: HttpUrl
@@ -32,7 +48,7 @@ class Settings(BaseSettings):
     WASABI_SECRET_KEY: str
     WASABI_BUCKET_NAME: str
     WASABI_REGION: Optional[str] = None
-
+    LOCAL_STORAGE_PATH: str = "/data/uploads"
     # JWT Authentication Configuration
     JWT_SECRET: str = Field(..., validation_alias="SECRET_KEY")
     JWT_ALGORITHM: str = "HS512"

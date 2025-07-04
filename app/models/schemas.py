@@ -1,8 +1,54 @@
 from pydantic import BaseModel, Field, validator, constr, root_validator
-from typing import Optional, List
+from typing import Optional, List, Any
 from datetime import datetime
 from enum import Enum
+class UploadSessionModel(BaseModel):
+    session_id: str
+    business_details_id: int
+    load_type: str
+    original_filename: str
+    wasabi_path: str
+    status: str
+    details: Optional[str] = None
+    record_count: Optional[int] = None
+    error_count: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+    
+class CategoryCsvModel(BaseModel):
+    category_path: constr(strip_whitespace=True, min_length=1)
+    name: constr(strip_whitespace=True, min_length=1)
+    description: Optional[str] = None
+    enabled: bool = True
+    image_name: Optional[str] = None
+    long_description: Optional[str] = None
+    order_type: Optional[str] = None
+    shipping_type: Optional[str] = None
+    active: Optional[bool] = True
+    seo_description: Optional[str] = None
+    seo_keywords: Optional[str] = None
+    seo_title: Optional[str] = None
+    url: Optional[str] = None
+    position_on_site: Optional[int] = None
 
+    class Config:
+        anystr_strip_whitespace = True
+
+    @validator("category_path")
+    def must_be_slash_separated(cls, v):
+        segments = [seg for seg in v.split("/") if seg]
+        if not segments:
+            raise ValueError("category_path must contain at least one segment")
+        return v
+
+    @validator("name")
+    def name_must_match_last_path_segment(cls, v, values):
+        path = values.get("category_path")
+        if path:
+            last = path.split("/")[-1]
+            if v.strip().lower() != last.strip().lower():
+                raise ValueError(f"name '{v}' must equal last segment of category_path '{last}'")
+        return v
 class BrandCsvModel(BaseModel):
     """Pydantic model for validating a row from a Brand CSV file."""
     name: constr(strip_whitespace=True, min_length=1)
@@ -16,6 +62,13 @@ class BrandCsvModel(BaseModel):
 
     class Config:
         anystr_strip_whitespace = True
+
+    @validator('supplier_id', 'created_by', 'created_date', 'updated_by', 'updated_date', pre=True)
+    def empty_str_to_none(cls, v):
+        # convert blanks or pure whitespace to None so Pydantic won’t try int("") 
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        return v
 
 class AttributeCsvModel(BaseModel):
     """Pydantic model for validating a row from an Attributes CSV file."""
@@ -139,3 +192,42 @@ class ErrorDetailModel(BaseModel):
 
     class Config:
         use_enum_values = True
+        from_attributes = True # Used for ORM mode (SQLAlchemy to Pydantic)
+
+# --- API Response Schemas ---
+
+class UserResponseSchema(BaseModel):
+    """Pydantic model for user information response."""
+    user_id: Any # Matches 'userId' from token context, can be int or str
+    username: str
+    business_id: int # Parsed integer business_id
+    roles: List[str]
+    company_id_str: Optional[str] = None # The original companyId string from token
+
+    class Config:
+        from_attributes = True
+
+class SessionResponseSchema(BaseModel):
+    """Pydantic model for individual upload session response."""
+    session_id: str # UUID as string
+    business_details_id: int # Renamed from business_id for clarity if it maps to ORM's business_details_id
+    load_type: str
+    original_filename: Optional[str] = None
+    wasabi_path: Optional[str] = None
+    status: str
+    details: Optional[str] = None
+    record_count: Optional[int] = None
+    error_count: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class SessionListResponseSchema(BaseModel):
+    """Pydantic model for a list of upload sessions with total count for pagination."""
+    items: List[SessionResponseSchema]
+    total: int
+
+    class Config:
+        from_attributes = True

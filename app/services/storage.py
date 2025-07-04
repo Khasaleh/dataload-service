@@ -1,42 +1,62 @@
-import boto3
 import os
 import logging
+from typing import Optional
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# --- Wasabi S3 Client Configuration ---
-# The following environment variables are expected to be set for Wasabi S3 client initialization:
-# - WASABI_ENDPOINT_URL: The S3 API endpoint URL for Wasabi.
-# - WASABI_ACCESS_KEY:   The Wasabi access key ID.
-# - WASABI_SECRET_KEY:   The Wasabi secret access key.
-#
-# Additionally, functions in this module or services calling this module might use:
-# - WASABI_BUCKET_NAME:  The name of the Wasabi bucket to interact with.
+# Base directory for local file storage (ensure this exists or is creatable)
+STORAGE_ROOT = getattr(settings, "LOCAL_STORAGE_PATH", "/tmp/uploads")
 
-WASABI_ENDPOINT_URL = os.getenv("WASABI_ENDPOINT_URL")
-WASABI_ACCESS_KEY = os.getenv("WASABI_ACCESS_KEY")
-WASABI_SECRET_KEY = os.getenv("WASABI_SECRET_KEY")
+class LocalStorageClient:
+    def __init__(self, storage_root: str = STORAGE_ROOT):
+        self.storage_root = storage_root
+        os.makedirs(self.storage_root, exist_ok=True)
 
-if not all([WASABI_ENDPOINT_URL, WASABI_ACCESS_KEY, WASABI_SECRET_KEY]):
-    logger.error(
-        "Missing one or more required Wasabi environment variables: "
-        "WASABI_ENDPOINT_URL, WASABI_ACCESS_KEY, WASABI_SECRET_KEY. "
-        "S3 client will not be initialized correctly."
-    )
-    # Depending on desired behavior, could raise an ImportError or allow client init to fail.
-    # For now, allow init to proceed which will likely fail if credentials are None.
-    # A more robust approach would be to raise an exception here if any are missing.
+    def upload_file(self, file_obj, bucket: str, key: str) -> str:
+        """
+        Saves the incoming file-like object to local disk under STORAGE_ROOT/bucket/key.
+        Returns the full file path as a tracking ID.
+        """
+        dest_dir = os.path.join(self.storage_root, bucket)
+        os.makedirs(dest_dir, exist_ok=True)
 
-session = boto3.session.Session()
-client = session.client(
-    service_name='s3',
-    aws_access_key_id=WASABI_ACCESS_KEY,
-    aws_secret_access_key=WASABI_SECRET_KEY,
-    endpoint_url=WASABI_ENDPOINT_URL
-)
+        file_path = os.path.join(dest_dir, key)
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
-def upload_file(bucket, path, file_obj):
-    client.upload_fileobj(file_obj, bucket, path)
+        file_obj.seek(0)
+        with open(file_path, "wb") as f:
+            f.write(file_obj.read())
 
-def delete_file(bucket, path):
-    client.delete_object(Bucket=bucket, Key=path)
+        logger.info("Saved file locally to %s", file_path)
+        return file_path
+
+    def delete_file(self, bucket: str, key: str) -> None:
+        """
+        Deletes the local file at STORAGE_ROOT/bucket/key.
+        """
+        file_path = os.path.join(self.storage_root, bucket, key)
+        try:
+            os.remove(file_path)
+            logger.info("Deleted local file %s", file_path)
+        except FileNotFoundError:
+            logger.warning("Local file %s not found for deletion", file_path)
+        except Exception as e:
+            logger.error("Error deleting local file %s: %s", file_path, e)
+            raise
+
+# Module-level client instance for local storage
+_local_client = LocalStorageClient()
+
+# Exposed functions for importing elsewhere
+
+def upload_file(file_obj, bucket: str, key: str) -> str:
+    return _local_client.upload_file(file_obj, bucket, key)
+
+
+def delete_file(bucket: str, key: str) -> None:
+    return _local_client.delete_file(bucket, key)
+
+# Alias for backward compatibility
+client = _local_client

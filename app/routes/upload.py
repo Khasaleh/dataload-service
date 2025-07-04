@@ -1,51 +1,46 @@
+import logging
+import uuid
+import json
+from datetime import datetime
+from typing import Optional, Union
+from io import BytesIO
+
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
+
+from app.core.config import settings
 from app.dependencies.auth import get_current_user
-# from app.services.validator import validate_csv # Not directly used in route
-from app.services.storage import upload_file as upload_to_wasabi
-from app.models.schemas import UploadSessionModel # Import new model
-from datetime import datetime # For setting timestamps
+from app.db.models import UploadSessionOrm
+from app.db.connection import get_session
+from app.models import ErrorDetailModel, ErrorType
+from app.services.storage import upload_file as local_upload_file, delete_file as local_delete_file
+from app.tasks.load_jobs import (
+    process_brands_file, process_attributes_file,
+    process_return_policies_file, process_products_file,
+    process_product_items_file, process_product_prices_file,
+    process_meta_tags_file
+)
+from pydantic import BaseModel
 
-# Placeholder for DB session - replace with actual dependency
-# from app.db.connection import get_db_session_for_fastapi_dependency_wrapper as get_db_session
-# For now, we'll assume db_session is available if we were to uncomment DB logic below.
-
-import uuid # For generating session_id
-import os # For potential bucket name from env
-
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Define upload sequence dependencies: key is the load_type, value is a list of prerequisite load_types.
 UPLOAD_SEQUENCE_DEPENDENCIES = {
     "products": ["brands", "return_policies"],
     "product_items": ["products"],
     "product_prices": ["products"],
     "meta_tags": ["products"],
-    # "brands", "attributes", "return_policies" have no dependencies
 }
 
-# Define which load_types are considered "parent" types that might restrict re-upload if children exist
-# This is a more advanced check, perhaps for future, not explicitly in this task but good to note.
-# PARENT_LOAD_TYPES = {"brands", "return_policies", "products"}
-
 ROLE_PERMISSIONS = {
-    "admin": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags"},
-    "catalog_editor": {"products", "product_items", "product_prices", "meta_tags"},
+    "ROLE_ADMIN": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags", "categories"},
+    "ROLE_INVENTORY_SPECIALIST": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags", "categories"},
+    "ROLE_IT_TECHNICAL_SUPPORT": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags", "categories"},
+    "ROLE_MARKETING_COORDINATOR": {"product_prices", "meta_tags"},
+    "ROLE_STORE_MANAGER": {"return_policies"},
     "viewer": set(),
 }
 
-# Define a mapping from load_type to the refactored Celery tasks
-# These task names are placeholders; actual task names might change when refactored in load_jobs.py
-# Import the tasks by their actual function names or ensure Celery discovers them by name string.
-# For direct import and clarity:
-from app.tasks.load_jobs import (
-    process_brands_file, process_attributes_file,
-    process_return_policies_file, process_products_file,
-    process_product_items_file, process_product_prices_file, process_meta_tags_file # Add new tasks
-)
-# ... (and eventually all other refactored file-level tasks) ...
-# ... and the old tasks if they are still needed during transition or for other purposes ...
-
-# ...
 CELERY_TASK_MAP = {
     "brands": process_brands_file,
     "attributes": process_attributes_file,
@@ -54,156 +49,136 @@ CELERY_TASK_MAP = {
     "product_items": process_product_items_file,
     "product_prices": process_product_prices_file,
     "meta_tags": process_meta_tags_file,
-
-    # Temporarily point old load types to a generic handler or log a warning
-    # if they are not yet refactored, to avoid errors.
-    # Or, ensure the upload endpoint only allows refactored load_types for now.
-    # For now, the upload.py already checks if load_type is in CELERY_TASK_MAP.
-    # So, only 'brands' and 'attributes' will work after this change if map is updated.
 }
 
-WASABI_BUCKET_NAME = os.getenv("WASABI_BUCKET_NAME", "your-default-bucket-name") # Get bucket name from env
+class UploadResponseModel(BaseModel):
+    message: str
+    session_id: str
+    load_type: str
+    storage_path: str
+    status: str
+    task_id: Optional[str] = None
+    tracking_id: Optional[str] = None
 
-@router.post("/api/v1/business/{business_id}/upload/{load_type}",
-             summary="Upload catalog file to Wasabi and queue for processing",
-             status_code=202, # Accepted
-             responses={
-                 202: {
-                     "description": "File uploaded to Wasabi and accepted for processing",
-                     "content": {
-                         "application/json": {
-                             "example": {
-                                 "message": "File accepted for processing.",
-                                 "session_id": "some-uuid",
-                                 "load_type": "products",
-                                 "wasabi_path": "uploads/business_xyz/some-uuid/products/filename.csv"
-                             }
-                         }
-                     }
-                 },
-                 400: {"description": "Invalid request (e.g., invalid load type, empty file, non-CSV)"},
-                 403: {"description": "Permission denied"},
-                 422: {"description": "Initial validation failed (e.g. if basic checks were done before wasabi upload)"}
-             })
-async def upload_file_to_wasabi_and_queue(
+
+def create_upload_session_in_db_sync(
+    session_id_str: str,
+    user_business_id: int,
+    load_type_str: str,
+    original_filename_str: str,
+    storage_path_str: str
+) -> UploadSessionOrm:
+    db = None
+    try:
+        db = get_session(business_id=user_business_id)
+        new_session_orm = UploadSessionOrm(
+            session_id=session_id_str,
+            business_details_id=user_business_id,
+            load_type=load_type_str,
+            original_filename=original_filename_str,
+            wasabi_path=storage_path_str,
+            status="pending",
+        )
+        db.add(new_session_orm)
+        db.commit()
+        db.refresh(new_session_orm)
+        logger.info(f"Upload session record created for session_id: {session_id_str}")
+        return new_session_orm
+    except Exception as e_db:
+        logger.error("DB Error creating upload session: %s", e_db, exc_info=True)
+        if db:
+            db.rollback()
+        raise HTTPException(status_code=500, detail=str(e_db))
+    finally:
+        if db:
+            db.close()
+
+@router.post(
+    "/api/v1/business/{business_id}/upload/{load_type}",
+    summary="Upload catalog file to local storage, create DB session, and queue processing",
+    status_code=202,
+    response_model=UploadResponseModel
+)
+async def upload_file_and_queue_for_processing(
     business_id: str,
     load_type: str,
     file: UploadFile = File(...),
     user: dict = Depends(get_current_user)
 ):
-    if business_id != user["business_id"]:
-        raise HTTPException(status_code=403, detail="Token does not match business")
+    try:
+        biz_id = int(business_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid business_id; must be integer.")
+    if biz_id != user["business_id"]:
+        raise HTTPException(403, "Unauthorized business_id.")
 
-    role = user.get("role")
+    role = user.get("roles", ["viewer"])[0]
     if role not in ROLE_PERMISSIONS or load_type not in ROLE_PERMISSIONS[role]:
-        raise HTTPException(status_code=403, detail="User does not have permission to upload this type")
-
-    if load_type not in CELERY_TASK_MAP: # Check against our map now
-        raise HTTPException(status_code=400, detail=f"Invalid load type: {load_type}")
-
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="Filename cannot be empty.")
-
+        raise HTTPException(403, "Insufficient permissions.")
+    if load_type not in CELERY_TASK_MAP:
+        raise HTTPException(400, f"Unsupported load_type: {load_type}")
     if not file.filename.lower().endswith('.csv'):
-        raise HTTPException(status_code=400, detail="Invalid file type. Only CSV files are allowed.")
+        raise HTTPException(400, "Only CSV files allowed.")
 
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="Empty CSV file submitted.")
-    await file.seek(0) # Reset file pointer for wasabi upload
+    # Read file into BytesIO for local storage
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(400, "Empty file.")
+    file_stream = BytesIO(file_bytes)
 
     session_id = str(uuid.uuid4())
-    wasabi_path = f"uploads/{business_id}/{session_id}/{load_type}/{file.filename}"
+    storage_key = f"uploads/{biz_id}/{session_id}/{load_type}/{file.filename}"
 
-    # --- Database Session Placeholder ---
-    # db = get_db_session() # Acquire DB session if direct DB interaction was enabled here
-
-    # --- Upload Sequence and Concurrency Checks (Conceptual DB Query) ---
-    # Conceptual: Check for active (pending/processing) uploads of the same load_type for this business_id
-    # Example:
-    # active_sessions = db.query(UploadSessionModel).filter(
-    #     UploadSessionModel.business_id == business_id,
-    #     UploadSessionModel.load_type == load_type,
-    #     UploadSessionModel.status.in_(["pending", "processing"])
-    # ).first()
-    # if active_sessions:
-    #     raise HTTPException(status_code=409, detail=f"An upload for {load_type} is already in progress.")
-
-    # Check for prerequisite load_types
-    prerequisites = UPLOAD_SEQUENCE_DEPENDENCIES.get(load_type, [])
-    for prereq_load_type in prerequisites:
-        # Conceptual: Check if a "completed" session exists for the prerequisite load_type
-        # Example:
-        # completed_prereq = db.query(UploadSessionModel).filter(
-        #     UploadSessionModel.business_id == business_id,
-        #     UploadSessionModel.load_type == prereq_load_type,
-        #     UploadSessionModel.status == "completed"
-        # ).order_by(UploadSessionModel.updated_at.desc()).first() # Get the latest one
-        # if not completed_prereq:
-        #     raise HTTPException(status_code=409,
-        #                         detail=f"Prerequisite load type '{prereq_load_type}' must be successfully uploaded before '{load_type}'.")
-        pass # Placeholder for actual DB query logic
-
-    # --- Create UploadSession Record (Conceptual DB Save) ---
-    new_session_record = UploadSessionModel(
-        session_id=session_id,
-        business_id=business_id,
-        load_type=load_type,
-        original_filename=file.filename,
-        wasabi_path=wasabi_path,
-        status="pending", # Initial status
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow()
+    # Create DB record
+    session_orm = await run_in_threadpool(
+        create_upload_session_in_db_sync,
+        session_id, biz_id, load_type, file.filename, storage_key
     )
-    # Conceptual: Add to DB and commit
-    # try:
-    #     db.add(new_session_record)
-    #     db.commit()
-    #     db.refresh(new_session_record)
-    # except Exception as e:
-    #     db.rollback()
-    #     # Log e
-    #     raise HTTPException(status_code=500, detail="Failed to create upload session record.")
-    # finally:
-    #     db.close()
 
-
-    # --- Upload to Wasabi ---
+    # Upload to local storage
     try:
-        upload_to_wasabi(bucket=WASABI_BUCKET_NAME, path=wasabi_path, file_obj=file.file)
-    except Exception as e:
-        # Log the exception e
-        # Conceptual: Update session status to "failed" if DB record was created
-        # new_session_record.status = "failed"
-        # new_session_record.details = f"Failed to upload to Wasabi: {str(e)}"
-        # new_session_record.updated_at = datetime.utcnow()
-        # db.commit() (after adding and flushing new_session_record earlier)
-        raise HTTPException(status_code=500, detail=f"Failed to upload file to Wasabi: {str(e)}")
+        tracking_id = await run_in_threadpool(
+            local_upload_file,
+            file_stream,
+            str(biz_id),
+            storage_key
+        )
+        logger.info("File saved locally at %s, tracking_id=%s", storage_key, tracking_id)
+    except Exception as e_loc:
+        logger.error("Local storage upload failed: %s", e_loc, exc_info=True)
+        # Mark DB as failed
+        def mark_failed():
+            db2 = get_session(business_id=biz_id)
+            try:
+                sess = db2.query(UploadSessionOrm).filter(UploadSessionOrm.session_id==session_id).first()
+                if sess:
+                    sess.status = "failed_storage_upload"
+                    sess.details = json.dumps([
+                        ErrorDetailModel(error_message=str(e_loc), error_type=ErrorType.TASK_EXCEPTION).model_dump()
+                    ])
+                    sess.updated_at = datetime.utcnow()
+                    db2.commit()
+            finally:
+                db2.close()
+        await run_in_threadpool(mark_failed)
+        raise HTTPException(500, "Failed saving file locally.")
 
-    # Get the appropriate Celery task from the map
-    celery_task = CELERY_TASK_MAP.get(load_type)
-    if not celery_task: # Should have been caught earlier, but as a safeguard
-        raise HTTPException(status_code=500, detail=f"No Celery task configured for load type: {load_type}")
-
-    # Dispatch the Celery task with the Wasabi path and session_id
-    # The Celery task itself will handle downloading from Wasabi, validation, and processing
-    task_instance = celery_task.delay(
-        business_id=business_id,
-        session_id=session_id, # This session_id is from the UploadSessionModel
-        wasabi_file_path=wasabi_path,
-        original_filename=file.filename # Pass original_filename
+    # Dispatch Celery task
+    task = CELERY_TASK_MAP[load_type].delay(
+        business_id=str(biz_id),
+        session_id=session_orm.session_id,
+        wasabi_file_path=session_orm.wasabi_path,
+        original_filename=session_orm.original_filename,
+        user_id=user['user_id']
     )
+    logger.info("Queued Celery task %s for session %s", task.id, session_id)
 
-    return {
-        "message": "File accepted for processing. Session created.",
-        "session_id": new_session_record.session_id,
-        "task_id": task_instance.id,
-        "load_type": new_session_record.load_type,
-        "original_filename": new_session_record.original_filename,
-        "wasabi_path": new_session_record.wasabi_path,
-        "status": new_session_record.status
-    }
-
-# The old upload_file function can be removed or commented out if this new one replaces it.
-# Ensure that the Celery tasks in load_jobs.py are refactored in subsequent steps
-# to accept (business_id, session_id, wasabi_file_path) and handle file-level processing.
+    return UploadResponseModel(
+        message="File accepted.",
+        session_id=session_id,
+        load_type=load_type,
+        storage_path=storage_key,
+        status=session_orm.status,
+        task_id=task.id,
+        tracking_id=tracking_id
+    )
