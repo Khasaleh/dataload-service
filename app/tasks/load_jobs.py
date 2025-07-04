@@ -92,28 +92,23 @@ def process_csv_task(
     db = get_session(business_id=int(business_id))
     _update_session_status(db, session_id, UploadJobStatus.DOWNLOADING_FILE)
 
-    # Construct absolute path
+    # Construct absolute path to uploaded CSV
     abs_path = os.path.join(STORAGE_ROOT, business_id, wasabi_file_path)
-    with open(abs_path, newline='', encoding='utf-8') as f:
+    with open(abs_path, newline="", encoding="utf-8") as f:
         original_records = list(csv.DictReader(f))
-    if not original_records:
-        _update_session_status(
-            db,
-            session_id,
-            UploadJobStatus.COMPLETED_EMPTY_FILE,
-            record_count=0,
-            error_count=0,
-        )
-        return
+        if not original_records:
+            _update_session_status(
+                db,
+                session_id,
+                UploadJobStatus.COMPLETED_EMPTY_FILE,
+                record_count=0,
+                error_count=0,
+            )
+            return
 
+    # Validate schema and business rules
     _update_session_status(db, session_id, UploadJobStatus.VALIDATING_SCHEMA)
-    init_errors, validated = validate_csv(
-        map_type,
-        original_records,
-        session_id,
-        record_key,
-        get_from_id_map(session_id, map_type, redis_client),
-    )
+    init_errors, validated = validate_csv(map_type, original_records, session_id)
     if init_errors:
         _update_session_status(
             db,
@@ -125,6 +120,7 @@ def process_csv_task(
         )
         return
 
+    # Begin DB processing
     _update_session_status(
         db,
         session_id,
@@ -135,25 +131,25 @@ def process_csv_task(
     processed = 0
     errors = []
 
-    if map_type == 'brands':
+    if map_type == "brands":
         summary = load_brand_to_db(db, int(business_id), validated, session_id)
-        processed = summary.get('inserted', 0) + summary.get('updated', 0)
-    elif map_type == 'return_policies':
+        processed = summary.get("inserted", 0) + summary.get("updated", 0)
+    elif map_type == "return_policies":
         summary = load_return_policy_to_db(db, int(business_id), validated, session_id)
-        processed = summary.get('inserted', 0) + summary.get('updated', 0)
-    elif map_type == 'product_prices':
+        processed = summary.get("inserted", 0) + summary.get("updated", 0)
+    elif map_type == "product_prices":
         summary = load_price_to_db(db, int(business_id), validated, session_id)
-        processed = summary.get('inserted', 0) + summary.get('updated', 0)
+        processed = summary.get("inserted", 0) + summary.get("updated", 0)
     else:
         for idx, rec in enumerate(validated, start=2):
             try:
-                if map_type == 'attributes':
+                if map_type == "attributes":
                     load_attribute_to_db(db, int(business_id), rec, session_id)
-                elif map_type == 'products':
+                elif map_type == "products":
                     load_product_record_to_db(db, int(business_id), rec, session_id)
-                elif map_type == 'meta_tags':
+                elif map_type == "meta_tags":
                     load_meta_tags_from_csv(db, int(business_id), rec, session_id)
-                elif map_type == 'categories':
+                elif map_type == "categories":
                     load_category_to_db(db, int(business_id), rec, session_id)
                 processed += 1
             except Exception as e:
@@ -181,6 +177,7 @@ def process_csv_task(
         error_count=len(errors),
     )
 
+    # Cleanup local file
     try:
         os.remove(abs_path)
     except OSError:
@@ -188,9 +185,9 @@ def process_csv_task(
 
     db.close()
     return {
-        'status': final_status.value,
-        'processed': processed,
-        'errors': [e.model_dump() for e in errors],
+        "status": final_status.value,
+        "processed": processed,
+        "errors": [e.model_dump() for e in errors],
     }
 
 # Celery task wrappers
