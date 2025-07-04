@@ -26,7 +26,7 @@ from app.db.models import (
 )
 from datetime import datetime
 from app.dataload.models.price_csv import PriceCsv, PriceTypeEnum as PriceCsvTypeEnum
-from app.utils.slug_utils import generate_slug
+from app.utils.slug import generate_slug
 from app.utils.redis_utils import add_to_id_map, get_from_id_map, DB_PK_MAP_SUFFIX
 from app.exceptions import DataLoaderError
 from app.models.schemas import ErrorType
