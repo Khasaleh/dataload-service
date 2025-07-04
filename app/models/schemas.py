@@ -25,6 +25,9 @@ class UploadSessionModel(BaseModel):
     created_at: datetime
     updated_at: datetime
     
+from pydantic import BaseModel, Field, validator, root_validator, constr
+from typing import Optional
+
 class CategoryCsvModel(BaseModel):
     category_path: constr(strip_whitespace=True, min_length=1)
     name: constr(strip_whitespace=True, min_length=1)
@@ -34,9 +37,7 @@ class CategoryCsvModel(BaseModel):
     long_description: Optional[str] = None
     order_type: Optional[str] = None
     shipping_type: Optional[str] = None
-    active: constr(strip_whitespace=True) = Field(
-        "INACTIVE", description="Either 'ACTIVE' or 'INACTIVE'"
-    )
+    active: constr(strip_whitespace=True) = Field("INACTIVE", description="Either 'ACTIVE' or 'INACTIVE'")
     seo_description: Optional[str] = None
     seo_keywords: Optional[str] = None
     seo_title: Optional[str] = None
@@ -55,21 +56,36 @@ class CategoryCsvModel(BaseModel):
             raise ValueError("category_path must contain at least one non-empty segment")
         return v
 
+    @validator("name")
+    def name_matches_last_path_segment(cls, v, values):
+        path = values.get("category_path", "")
+        last = path.rsplit("/", 1)[-1]
+        if v.strip().lower() != last.strip().lower():
+            raise ValueError(f"name '{v}' must equal last segment of category_path '{last}'")
+        return v
+
+    @validator("position_on_site", pre=True)
+    def empty_position_to_none(cls, v):
+        # blank or whitespace-only → None
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
     @root_validator(pre=True)
     def fill_and_normalize_defaults(cls, values):
-        # → enabled is required; Field(...) ensures it's present
-        # active: normalize to 'ACTIVE'/'INACTIVE'
+        # enabled: default to False if absent
+        if values.get("enabled") is None:
+            values["enabled"] = False
+
+        # active: normalize to 'ACTIVE' or 'INACTIVE'
         raw_active = values.get("active")
-        flag = str(raw_active or "").strip().upper()
+        flag = str(raw_active).strip().upper() if raw_active is not None else ""
         values["active"] = "ACTIVE" if flag in ("TRUE", "1", "ACTIVE") else "INACTIVE"
 
         # url: generate slug from name if missing or blank
         if not values.get("url") and values.get("name"):
-            values["url"] = f"/{generate_slug(values['name'])}"
-
-        # final sanity check: url must now be non-empty
-        if not values.get("url"):
-            raise ValueError("url must be provided or derivable from name")
+            from app.utils.slug import generate_slug
+            values["url"] = generate_slug(values["name"])
 
         return values
 class BrandCsvModel(BaseModel):
