@@ -5,16 +5,16 @@ from datetime import datetime
 from celery import shared_task
 from sqlalchemy.exc import (
     OperationalError as SQLAlchemyOperationalError,
-    TimeoutError as SQLAlchemyTimeoutError
+    TimeoutError as SQLAlchemyTimeoutError,
 )
 from botocore.exceptions import (
     EndpointConnectionError as BotoEndpointConnectionError,
-    ReadTimeoutError as BotoReadTimeoutError
+    ReadTimeoutError as BotoReadTimeoutError,
 )
 from redis.exceptions import (
     ConnectionError as RedisConnectionError,
     TimeoutError as RedisTimeoutError,
-    BusyLoadingError as RedisBusyLoadingError
+    BusyLoadingError as RedisBusyLoadingError,
 )
 
 from app.core.config import settings
@@ -25,8 +25,6 @@ from app.utils.redis_utils import (
     get_from_id_map,
 )
 from app.services.validator import validate_csv
-
-# Import loader functions
 from app.services.db_loaders import (
     load_brand_to_db,
     load_attribute_to_db,
@@ -36,7 +34,6 @@ from app.services.db_loaders import (
 )
 from app.dataload.product_loader import load_product_record_to_db
 from app.dataload.meta_tags_loader import load_meta_tags_from_csv
-
 from app.models import UploadJobStatus, ErrorDetailModel, ErrorType
 import csv
 
@@ -57,19 +54,18 @@ RETRYABLE_EXCEPTIONS = (
 )
 COMMON_RETRY_KWARGS = {"max_retries": 3, "default_retry_delay": 60}
 
+
 def _update_session_status(
     db,
     session_id: str,
     status: UploadJobStatus,
     details=None,
     record_count=None,
-    error_count=None
+    error_count=None,
 ):
-    sess = (
-        db.query(UploadSessionOrm)
-          .filter(UploadSessionOrm.session_id == session_id)
-          .first()
-    )
+    sess = db.query(UploadSessionOrm).filter(
+        UploadSessionOrm.session_id == session_id
+    ).first()
     if not sess:
         logger.error("Session %s not found for status update", session_id)
         return
@@ -83,6 +79,7 @@ def _update_session_status(
         sess.error_count = error_count
     db.commit()
 
+
 def process_csv_task(
     business_id: str,
     session_id: str,
@@ -90,7 +87,7 @@ def process_csv_task(
     original_filename: str,
     record_key: str,
     id_prefix: str,
-    map_type: str
+    map_type: str,
 ):
     db = get_session(business_id=int(business_id))
     _update_session_status(db, session_id, UploadJobStatus.DOWNLOADING_FILE)
@@ -100,10 +97,11 @@ def process_csv_task(
         original_records = list(csv.DictReader(f))
     if not original_records:
         _update_session_status(
-            db, session_id,
+            db,
+            session_id,
             UploadJobStatus.COMPLETED_EMPTY_FILE,
             record_count=0,
-            error_count=0
+            error_count=0,
         )
         return
 
@@ -113,22 +111,24 @@ def process_csv_task(
         original_records,
         session_id,
         record_key,
-        get_from_id_map(session_id, map_type, redis_client)
+        get_from_id_map(session_id, map_type, redis_client),
     )
     if init_errors:
         _update_session_status(
-            db, session_id,
+            db,
+            session_id,
             UploadJobStatus.FAILED_VALIDATION,
             details=init_errors,
             record_count=len(original_records),
-            error_count=len(init_errors)
+            error_count=len(init_errors),
         )
         return
 
     _update_session_status(
-        db, session_id,
+        db,
+        session_id,
         UploadJobStatus.DB_PROCESSING_STARTED,
-        record_count=len(validated)
+        record_count=len(validated),
     )
 
     processed = 0
@@ -160,21 +160,24 @@ def process_csv_task(
                     ErrorDetailModel(
                         row_number=idx,
                         error_message=str(e),
-                        error_type=ErrorType.UNEXPECTED_ROW_ERROR
+                        error_type=ErrorType.UNEXPECTED_ROW_ERROR,
                     )
                 )
 
     db.commit()
 
     final_status = (
-        UploadJobStatus.COMPLETED if not errors else UploadJobStatus.COMPLETED_WITH_ERRORS
+        UploadJobStatus.COMPLETED
+        if not errors
+        else UploadJobStatus.COMPLETED_WITH_ERRORS
     )
     _update_session_status(
-        db, session_id,
+        db,
+        session_id,
         final_status,
         details=errors if errors else None,
         record_count=len(validated),
-        error_count=len(errors)
+        error_count=len(errors),
     )
 
     try:
@@ -186,37 +189,38 @@ def process_csv_task(
     return {
         'status': final_status.value,
         'processed': processed,
-        'errors': [e.model_dump() for e in errors]
+        'errors': [e.model_dump() for e in errors],
     }
 
+# Celery task wrappers
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_brands_file(self, business_id, session_id, storage_path, original_filename):
+def process_brands_file(self, business_id: str, session_id: str, storage_path: str, original_filename: str):
     return process_csv_task(business_id, session_id, storage_path, original_filename, 'name', 'brand', 'brands')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_attributes_file(self, business_id, session_id, storage_path, original_filename):
+def process_attributes_file(self, business_id: str, session_id: str, storage_path: str, original_filename: str):
     return process_csv_task(business_id, session_id, storage_path, original_filename, 'attribute_name', 'attr', 'attributes')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_return_policies_file(self, business_id, session_id, storage_path, original_filename):
+def process_return_policies_file(self, business_id: str, session_id: str, storage_path: str, original_filename: str):
     return process_csv_task(business_id, session_id, storage_path, original_filename, 'policy_name', 'rp', 'return_policies')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_products_file(self, business_id, session_id, storage_path, original_filename):
+def process_products_file(self, business_id: str, session_id: str, storage_path: str, original_filename: str):
     return process_csv_task(business_id, session_id, storage_path, original_filename, 'self_gen_product_id', 'prod', 'products')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_product_items_file(self, business_id, session_id, storage_path, original_filename):
+def process_product_items_file(self, business_id: str, session_id: str, storage_path: str, original_filename: str):
     return process_csv_task(business_id, session_id, storage_path, original_filename, 'variant_sku', 'item', 'product_items')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_product_prices_file(self, business_id, session_id, storage_path, original_filename):
+def process_product_prices_file(self, business_id: str, session_id: str, storage_path: str, original_filename: str):
     return process_csv_task(business_id, session_id, storage_path, original_filename, 'product_id', 'price', 'product_prices')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_meta_tags_file(self, business_id, session_id, storage_path, original_filename):
+def process_meta_tags_file(self, business_id: str, session_id: str, storage_path: str, original_filename: str):
     return process_csv_task(business_id, session_id, storage_path, original_filename, 'meta_tag_key', 'meta', 'meta_tags')
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_categories_file(self, business_id, session_id, storage_path, original_filename):
+def process_categories_file(self, business_id: str, session_id: str, storage_path: str, original_filename: str):
     return process_csv_task(business_id, session_id, storage_path, original_filename, 'category_name', 'cat', 'categories')
