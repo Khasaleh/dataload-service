@@ -13,7 +13,7 @@ import logging
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, DataError # Added DataError
-
+from app.utils.date_utils import ServerDateTime
 from app.db.models import (
     CategoryOrm,
     BrandOrm,
@@ -180,72 +180,91 @@ def load_brand_to_db(
     business_details_id: int,
     records_data: List[Dict[str, Any]],
     session_id: str,
-    db_pk_redis_pipeline: Any
+    db_pk_redis_pipeline: Any = None,
+    user_id: int = None
 ) -> Dict[str, int]:
     if not records_data:
         return {"inserted": 0, "updated": 0, "errors": 0}
 
-    brand_names_from_csv = {record['name'] for record in records_data if record.get('name')}
-    if not brand_names_from_csv:
-        raise DataLoaderError(message="No brand names found in records_data list.", error_type=ErrorType.VALIDATION)
-
     summary = {"inserted": 0, "updated": 0, "errors": 0}
+    ts_now = ServerDateTime.now_epoch_ms()
+
+    # normalize flags and attach business_details_id
+    for rec in records_data:
+        rec["business_details_id"] = business_details_id
+        flag = str(rec.get("active", "")).strip().upper()
+        rec["active"] = "ACTIVE" if flag in ("TRUE", "1", "ACTIVE") else "INACTIVE"
+
+    # fetch existing by name
+    names = [r["name"] for r in records_data if r.get("name")]
+    existing = db_session.query(BrandOrm).filter(
+        BrandOrm.business_details_id == business_details_id,
+        BrandOrm.name.in_(names)
+    ).all()
+    existing_map = {b.name: b for b in existing}
+
+    to_insert, to_update = [], []
+
+    for rec in records_data:
+        name = rec.get("name")
+        if not name:
+            summary["errors"] += 1
+            continue
+
+        if name in existing_map:
+            # update only updated_* fields
+            upd = {
+                "id": existing_map[name].id,
+                "updated_by": user_id,
+                "updated_date": ts_now,
+                # any other columns from CSV to update:
+                "logo": rec.get("logo"),
+                "supplier_id": rec.get("supplier_id"),
+                "active": rec["active"],
+            }
+            to_update.append(upd)
+            summary["updated"] += 1
+        else:
+            # insert with both created_* and updated_*
+            ins = {
+                "business_details_id": business_details_id,
+                "name": name,
+                "logo": rec.get("logo"),
+                "supplier_id": rec.get("supplier_id"),
+                "active": rec["active"],
+                "created_by": user_id,
+                "created_date": ts_now,
+                "updated_by": user_id,
+                "updated_date": ts_now,
+            }
+            to_insert.append(ins)
+            summary["inserted"] += 1
 
     try:
-        existing_brands_query = db_session.query(BrandOrm).filter(
-            BrandOrm.business_details_id == business_details_id,
-            BrandOrm.name.in_(brand_names_from_csv)
-        )
-        existing_brands_map = {brand.name: brand for brand in existing_brands_query.all()}
-
-        new_brands_mappings = []
-        updated_brands_mappings = []
-        processed_brand_names_for_redis = {}
-
-        for record in records_data:
-            brand_name = record.get("name")
-            if not brand_name:
-                logger.warning(f"Skipping record due to missing brand name: {record}")
-                summary["errors"] += 1
-                continue
-            db_brand = existing_brands_map.get(brand_name)
-            if db_brand:
-                update_mapping = record.copy()
-                update_mapping['id'] = db_brand.id
-                updated_brands_mappings.append(update_mapping)
-                processed_brand_names_for_redis[brand_name] = db_brand.id
-                summary["updated"] += 1
-            else:
-                insert_mapping = record.copy()
-                insert_mapping['business_details_id'] = business_details_id
-                new_brands_mappings.append(insert_mapping)
-        if updated_brands_mappings:
-            logger.info(f"Bulk updating {len(updated_brands_mappings)} brands for business {business_details_id}.")
-            db_session.bulk_update_mappings(BrandOrm, updated_brands_mappings)
-        if new_brands_mappings:
-            logger.info(f"Bulk inserting {len(new_brands_mappings)} new brands for business {business_details_id}.")
-            db_session.bulk_insert_mappings(BrandOrm, new_brands_mappings)
-            summary["inserted"] = len(new_brands_mappings)
-            if summary["inserted"] > 0:
-                db_session.flush()
-                for brand_mapping_dict in new_brands_mappings:
-                    if 'id' in brand_mapping_dict and brand_mapping_dict['id'] is not None:
-                         processed_brand_names_for_redis[brand_mapping_dict['name']] = brand_mapping_dict['id']
-                    else:
-                        logger.warning(f"ID not populated after bulk insert for brand: {brand_mapping_dict['name']}. Redis map might be incomplete for this new brand.")
-                        summary["errors"] += 1
-        if processed_brand_names_for_redis:
-            redis_pipe_to_use = db_pk_redis_pipeline if db_pk_redis_pipeline else db_session.get_bind().pool._redis_client.pipeline() if hasattr(db_session.get_bind().pool, '_redis_client') else None # Simplified
-            for brand_name, brand_id in processed_brand_names_for_redis.items():
-                add_to_id_map(session_id, f"brands{DB_PK_MAP_SUFFIX}", brand_name, brand_id, pipeline=redis_pipe_to_use)
-            if redis_pipe_to_use and not db_pk_redis_pipeline : redis_pipe_to_use.execute()
-        return summary
+        if to_update:
+            db_session.bulk_update_mappings(BrandOrm, to_update)
+        if to_insert:
+            db_session.bulk_insert_mappings(BrandOrm, to_insert)
+            db_session.flush()
+            # register new IDs in Redis
+            for ins in to_insert:
+                bid = ins.get("id")
+                if bid:
+                    add_to_id_map(
+                        session_id,
+                        f"brands{DB_PK_MAP_SUFFIX}",
+                        ins["name"],
+                        bid,
+                        pipeline=db_pk_redis_pipeline
+                    )
     except IntegrityError as e:
-        logger.error(f"Bulk database integrity error processing brands for business {business_details_id}: {e.orig}", exc_info=False)
-        raise DataLoaderError(message=f"Bulk database integrity error for brands: {str(e.orig)}",error_type=ErrorType.DATABASE,original_exception=e)
-    except Exception as e:
-        logger.error(f"Unexpected error during bulk processing of brands for business {business_details_id}: {e}", exc_info=True)
-        raise DataLoaderError(message=f"Unexpected error during bulk brand processing: {str(e)}", error_type=ErrorType.UNEXPECTED_ROW_ERROR, original_exception=e)
+        raise DataLoaderError(
+            message=f"Database integrity error for brands: {e.orig}",
+            error_type=ErrorType.DATABASE,
+            original_exception=e
+        )
+
+    return summary
 
 def load_attribute_to_db(
     db_session: Session,

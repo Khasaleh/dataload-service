@@ -96,6 +96,7 @@ def process_csv_task(
     record_key: str,
     id_prefix: str,
     map_type: str,
+    user_id: int
 ):
     db = get_session(business_id=int(business_id))
     _update_session_status(db, session_id, UploadJobStatus.DOWNLOADING_FILE)
@@ -138,7 +139,7 @@ def process_csv_task(
 
     # bulk-type loaders expect a pipeline argument (pass None)
     if map_type == "brands":
-        summary = load_brand_to_db(db, int(business_id), validated, session_id, None)
+        summary = load_brand_to_db(db, int(business_id), validated, session_id, None, user_id)
         processed = summary.get("inserted", 0) + summary.get("updated", 0)
     elif map_type == "return_policies":
         summary = load_return_policy_to_db(db, int(business_id), validated, session_id, None)
@@ -197,8 +198,8 @@ def process_csv_task(
 
 # Celery task wrappers
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_brands_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'name', 'brand', 'brands')
+def process_brands_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str, user_id: int):
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'name', 'brand', 'brands', user_id)
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 def process_attributes_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str):
