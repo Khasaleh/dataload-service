@@ -9,6 +9,7 @@ from app.models.schemas import (
     CategoryCsvModel
 )
 from typing import List, Dict, Optional
+from app.utils.redis_utils import get_from_id_map
 
 MODEL_MAP = {
     "brands":           BrandCsvModel,
@@ -34,36 +35,47 @@ def check_category_hierarchy(
     session_id: str
 ) -> List[Dict]:
     """
-    Ensure no sub-category is added under an existing product-holding category.
-    Also ensure that all parent categories appear in the file.
+    Ensure no sub‐category is added under an existing product‐holding category,
+    and that every parent in the hierarchy is either already in the DB or
+    is present in this batch of CSV records.
     """
-    errors = []
-    seen_paths = {r['category_path'] for r in records}
-    for i, rec in enumerate(records):
-        path = rec.get('category_path', '')
-        segments = path.split('/')
-        # check parent existence
-        for level in range(1, len(segments)):
-            parent_path = "/".join(segments[:level])
-            if parent_path not in seen_paths:
-                errors.append({
-                    'row': i+1,
-                    'field': 'category_path',
-                    'error': f"Parent category '{parent_path}' missing for '{path}'",
-                    'value': path
-                })
-            # check products under parent
-            if get_from_id_map(session_id, 'products', parent_path):
-                errors.append({
-                    'row': i+1,
-                    'field': 'category_path',
-                    'error': (
-                        f"Cannot create '{path}' under '{parent_path}': existing products found."
-                    ),
-                    'value': path
-                })
-    return errors
+    errors: List[Dict] = []
+    # all the new paths in this upload
+    seen_paths = {rec["category_path"] for rec in records}
 
+    for idx, rec in enumerate(records, start=1):
+        path = rec.get("category_path", "")
+        segments = [seg for seg in path.split("/") if seg]
+        # for each prefix (excluding the full path), check:
+        for level in range(1, len(segments)):
+            parent = "/".join(segments[:level])
+
+            # 1) disallow if parent already has products in DB
+            if get_from_id_map(session_id, "products", parent):
+                errors.append({
+                    "row": idx,
+                    "field": "category_path",
+                    "error": (
+                        f"Cannot create '{path}' under '{parent}': "
+                        "existing products found in that category."
+                    ),
+                    "value": path
+                })
+                # no need to check further up for this row
+                break
+
+            # 2) disallow if parent is neither in DB nor in this CSV
+            if not get_from_id_map(session_id, "categories", parent) \
+               and parent not in seen_paths:
+                errors.append({
+                    "row": idx,
+                    "field": "category_path",
+                    "error": f"Parent category '{parent}' missing for '{path}'",
+                    "value": path
+                })
+                break
+
+    return errors
 
 def validate_csv(load_type: str, records: List[Dict], session_id: str) -> (List[Dict], List[Dict]):
     errors: List[Dict] = []
