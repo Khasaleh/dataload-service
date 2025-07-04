@@ -227,7 +227,7 @@ def process_product_prices_file(self, business_id: str, session_id: str, wasabi_
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 def process_meta_tags_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str, user_id: int):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'meta_tag_key', 'meta', 'meta_tags', user_id)
+    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'category_name', 'cat', 'categories', user_id)
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 def process_categories_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str, user_id: int):

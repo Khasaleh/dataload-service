@@ -169,12 +169,4 @@ async def upload_file_and_queue_for_processing(
         status=session_orm.status,
         task_id=task.id,
         tracking_id=tracking_id
-    )(
-        message="File accepted.",
-        session_id=session_id,
-        load_type=load_type,
-        storage_path=storage_key,
-        status=session_orm.status,
-        task_id=task.id,
-        tracking_id=tracking_id
     )
