@@ -44,7 +44,7 @@ def load_category_to_db(
 ) -> int:
     """
     Upsert a hierarchical category path (e.g. "Electronics/Computers/Laptops").
-    - New rows: set created_by/created_date, updated_by/updated_date, business_details_id, active, enabled, url slug.
+    - New rows: set created_by/created_date, updated_by/updated_date, business_details_id, enabled, active, url slug.
     - Existing leaf: update only mutable fields + updated_by/updated_date.
     Returns the final category ID.
     """
@@ -56,12 +56,13 @@ def load_category_to_db(
             field_name="category_path"
         )
 
-    # normalize values
-    def _bool(val):
+    # Boolean and active flag helpers
+    def _bool(val: Any) -> bool:
         return str(val or "").strip().lower() in ("true", "1", "yes")
-    def _active(val):
+    def _active(val: Any) -> str:
         return "ACTIVE" if _bool(val) else "INACTIVE"
 
+    # Extract CSV fields or defaults
     description      = record_data.get("description")
     enabled          = _bool(record_data.get("enabled", True))
     image_name       = record_data.get("image_name")
@@ -75,32 +76,35 @@ def load_category_to_db(
     url              = record_data.get("url")
     position         = record_data.get("position_on_site")
 
-    # auto-generate slug
+    # Auto-generate slug if missing
     if not url:
-        from app.routes.upload import generate_slug
-        url = '/' + generate_slug(record_data.get('name',''))
+        from app.utils.slug import generate_slug
+        name = record_data.get("name", "").strip()
+        slug = generate_slug(name)
+        url = f"/{slug}"
 
     segments = [seg.strip() for seg in path.split("/") if seg.strip()]
     parent_id: Optional[int] = None
     full_path = ""
-    final_id = None
+    final_id: Optional[int] = None
 
     try:
         for idx, seg in enumerate(segments):
             full_path = f"{full_path}/{seg}" if full_path else seg
             is_leaf  = (idx == len(segments) - 1)
 
-            # lookup existing
+            # Lookup existing category
             cat = (
                 db_session.query(CategoryOrm)
                           .filter_by(
                               business_details_id=business_details_id,
                               parent_id=parent_id,
                               name=seg
-                          ).first()
+                          )
+                          .first()
             )
             if cat:
-                # update leaf
+                # Update only on leaf
                 if is_leaf:
                     logger.info(f"Updating category '{full_path}' (ID={cat.id})")
                     cat.description      = description      or cat.description
@@ -119,9 +123,9 @@ def load_category_to_db(
                     cat.updated_date     = ServerDateTime.now_epoch_ms()
                 final_id = cat.id
             else:
-                # create new
+                # Create new category
                 now = ServerDateTime.now_epoch_ms()
-                payload = {
+                payload: Dict[str, Any] = {
                     'business_details_id': business_details_id,
                     'parent_id': parent_id,
                     'name': seg,
@@ -129,22 +133,21 @@ def load_category_to_db(
                     'created_date': now,
                     'updated_by': user_id,
                     'updated_date': now,
-                    # defaults for non-leaf
-                    'enabled': True if not is_leaf else enabled,
+                    'enabled': enabled if is_leaf else True,
                     'active': active_flag if is_leaf else 'INACTIVE',
-                    'description': seg if not is_leaf else description,
+                    'description': description if is_leaf else seg,
                 }
                 if is_leaf:
                     payload.update({
-                        'image_name': image_name,
+                        'image_name':       image_name,
                         'long_description': long_description,
-                        'order_type': order_type,
-                        'shipping_type': shipping_type,
-                        'seo_description': seo_description,
-                        'seo_keywords': seo_keywords,
-                        'seo_title': seo_title,
-                        'url': url,
-                        'position_on_site': position
+                        'order_type':       order_type,
+                        'shipping_type':    shipping_type,
+                        'seo_description':  seo_description,
+                        'seo_keywords':     seo_keywords,
+                        'seo_title':        seo_title,
+                        'url':              url,
+                        'position_on_site': position,
                     })
                 new_cat = CategoryOrm(**payload)
                 db_session.add(new_cat)
@@ -152,7 +155,7 @@ def load_category_to_db(
                 final_id = new_cat.id
                 logger.info(f"Created category '{full_path}' (ID={final_id})")
 
-            # cache in redis
+            # Cache in Redis
             add_to_id_map(
                 session_id,
                 f"categories{DB_PK_MAP_SUFFIX}",
@@ -163,7 +166,7 @@ def load_category_to_db(
 
             parent_id = final_id
 
-        return final_id
+        return final_id  # type: ignore
 
     except IntegrityError as e:
         logger.error(f"DB integrity error for '{path}': {e.orig}")
