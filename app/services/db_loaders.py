@@ -56,13 +56,13 @@ def load_category_to_db(
             field_name="category_path"
         )
 
-    # Boolean and active flag helpers
+    # Helpers
     def _bool(val: Any) -> bool:
         return str(val or "").strip().lower() in ("true", "1", "yes")
     def _active(val: Any) -> str:
         return "ACTIVE" if _bool(val) else "INACTIVE"
 
-    # Extract CSV fields or defaults
+    # Extract CSV values or defaults
     description      = record_data.get("description")
     enabled          = _bool(record_data.get("enabled", True))
     image_name       = record_data.get("image_name")
@@ -75,10 +75,10 @@ def load_category_to_db(
     seo_title        = record_data.get("seo_title")
     url              = record_data.get("url")
     position         = record_data.get("position_on_site")
+    name             = record_data.get("name", "").strip()
 
-    # Auto-generate slug if missing
+    # Ensure URL: slug from name if missing
     if not url:
-        name = record_data.get("name", "").strip()
         slug = generate_slug(name)
         url = f"/{slug}"
 
@@ -92,18 +92,30 @@ def load_category_to_db(
             full_path = f"{full_path}/{seg}" if full_path else seg
             is_leaf  = (idx == len(segments) - 1)
 
-            # Lookup existing category
-            cat = (
-                db_session.query(CategoryOrm)
-                          .filter_by(
-                              business_details_id=business_details_id,
-                              parent_id=parent_id,
-                              name=seg
-                          )
-                          .first()
-            )
+            # Lookup existing category by path or name
+            if is_leaf:
+                cat = (
+                    db_session.query(CategoryOrm)
+                              .filter_by(
+                                  business_details_id=business_details_id,
+                                  parent_id=parent_id,
+                                  name=name
+                              )
+                              .first()
+                )
+            else:
+                cat = (
+                    db_session.query(CategoryOrm)
+                              .filter_by(
+                                  business_details_id=business_details_id,
+                                  parent_id=parent_id,
+                                  name=seg
+                              )
+                              .first()
+                )
+
             if cat:
-                # Update only on leaf
+                # Update leaf only
                 if is_leaf:
                     logger.info(f"Updating category '{full_path}' (ID={cat.id})")
                     cat.description      = description      or cat.description
@@ -122,12 +134,12 @@ def load_category_to_db(
                     cat.updated_date     = ServerDateTime.now_epoch_ms()
                 final_id = cat.id
             else:
-                # Create new category
+                # Create new
                 now = ServerDateTime.now_epoch_ms()
                 payload: Dict[str, Any] = {
                     'business_details_id': business_details_id,
                     'parent_id': parent_id,
-                    'name': seg,
+                    'name': name if is_leaf else seg,
                     'created_by': user_id,
                     'created_date': now,
                     'updated_by': user_id,
@@ -163,7 +175,7 @@ def load_category_to_db(
                 pipeline=db_pk_redis_pipeline
             )
 
-            parent_id = final_id
+            parent_id = final_id  # type: ignore
 
         return final_id  # type: ignore
 
@@ -188,13 +200,13 @@ def load_category_to_db(
     except Exception as e:
         logger.exception(f"Unexpected error for '{path}'")
         raise DataLoaderError(
-            message=f"Unexpected error for '{path}': {str(e)}",
+            message=f"Unexpected error for category path '{path}': {str(e)}",
             error_type=ErrorType.UNEXPECTED_ROW_ERROR,
             field_name="category_path",
             offending_value=path,
             original_exception=e
         )
-
+        
 def load_brand_to_db(
     db_session: Session,
     business_details_id: int,
