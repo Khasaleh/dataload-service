@@ -63,6 +63,13 @@ class BrandCsvModel(BaseModel):
     class Config:
         anystr_strip_whitespace = True
 
+    @validator('supplier_id', 'created_by', 'created_date', 'updated_by', 'updated_date', pre=True)
+    def empty_str_to_none(cls, v):
+        # convert blanks or pure whitespace to None so Pydantic won’t try int("") 
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        return v
+
 class AttributeCsvModel(BaseModel):
     """Pydantic model for validating a row from an Attributes CSV file."""
     attribute_name: constr(strip_whitespace=True, min_length=1)
