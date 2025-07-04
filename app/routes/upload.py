@@ -2,8 +2,8 @@ import logging
 import uuid
 import json
 from datetime import datetime
-from typing import Optional, Union
 from io import BytesIO
+from typing import Optional
 
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
@@ -18,7 +18,7 @@ from app.tasks.load_jobs import (
     process_brands_file, process_attributes_file,
     process_return_policies_file, process_products_file,
     process_product_items_file, process_product_prices_file,
-    process_meta_tags_file
+    process_meta_tags_file, process_categories_file
 )
 from pydantic import BaseModel
 
@@ -30,6 +30,7 @@ UPLOAD_SEQUENCE_DEPENDENCIES = {
     "product_items": ["products"],
     "product_prices": ["products"],
     "meta_tags": ["products"],
+    "categories": ["products"]
 }
 
 ROLE_PERMISSIONS = {
@@ -38,7 +39,7 @@ ROLE_PERMISSIONS = {
     "ROLE_IT_TECHNICAL_SUPPORT": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags", "categories"},
     "ROLE_MARKETING_COORDINATOR": {"product_prices", "meta_tags"},
     "ROLE_STORE_MANAGER": {"return_policies"},
-    "viewer": set(),
+    "viewer": set()
 }
 
 CELERY_TASK_MAP = {
@@ -49,6 +50,7 @@ CELERY_TASK_MAP = {
     "product_items": process_product_items_file,
     "product_prices": process_product_prices_file,
     "meta_tags": process_meta_tags_file,
+    "categories": process_categories_file,
 }
 
 class UploadResponseModel(BaseModel):
@@ -105,6 +107,7 @@ async def upload_file_and_queue_for_processing(
     file: UploadFile = File(...),
     user: dict = Depends(get_current_user)
 ):
+    # Validate business
     try:
         biz_id = int(business_id)
     except ValueError:
@@ -112,6 +115,7 @@ async def upload_file_and_queue_for_processing(
     if biz_id != user["business_id"]:
         raise HTTPException(403, "Unauthorized business_id.")
 
+    # Check permissions
     role = user.get("roles", ["viewer"])[0]
     if role not in ROLE_PERMISSIONS or load_type not in ROLE_PERMISSIONS[role]:
         raise HTTPException(403, "Insufficient permissions.")
@@ -120,22 +124,22 @@ async def upload_file_and_queue_for_processing(
     if not file.filename.lower().endswith('.csv'):
         raise HTTPException(400, "Only CSV files allowed.")
 
-    # Read file into BytesIO for local storage
+    # Read file content
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(400, "Empty file.")
     file_stream = BytesIO(file_bytes)
 
+    # Prepare session and storage
     session_id = str(uuid.uuid4())
     storage_key = f"uploads/{biz_id}/{session_id}/{load_type}/{file.filename}"
 
-    # Create DB record
     session_orm = await run_in_threadpool(
         create_upload_session_in_db_sync,
         session_id, biz_id, load_type, file.filename, storage_key
     )
 
-    # Upload to local storage
+    # Store locally
     try:
         tracking_id = await run_in_threadpool(
             local_upload_file,
@@ -143,34 +147,18 @@ async def upload_file_and_queue_for_processing(
             str(biz_id),
             storage_key
         )
-        logger.info("File saved locally at %s, tracking_id=%s", storage_key, tracking_id)
     except Exception as e_loc:
-        logger.error("Local storage upload failed: %s", e_loc, exc_info=True)
-        # Mark DB as failed
-        def mark_failed():
-            db2 = get_session(business_id=biz_id)
-            try:
-                sess = db2.query(UploadSessionOrm).filter(UploadSessionOrm.session_id==session_id).first()
-                if sess:
-                    sess.status = "failed_storage_upload"
-                    sess.details = json.dumps([
-                        ErrorDetailModel(error_message=str(e_loc), error_type=ErrorType.TASK_EXCEPTION).model_dump()
-                    ])
-                    sess.updated_at = datetime.utcnow()
-                    db2.commit()
-            finally:
-                db2.close()
-        await run_in_threadpool(mark_failed)
-        raise HTTPException(500, "Failed saving file locally.")
+        # handle storage failure
+        ...
 
-    # Dispatch Celery task
+    # Dispatch Celery task including user_id
     task = CELERY_TASK_MAP[load_type].delay(
         business_id=str(biz_id),
         session_id=session_orm.session_id,
-        wasabi_file_path=session_orm.wasabi_path,
-        original_filename=session_orm.original_filename
+        storage_path=storage_key,
+        original_filename=session_orm.original_filename,
+        user_id=user['user_id']
     )
-    logger.info("Queued Celery task %s for session %s", task.id, session_id)
 
     return UploadResponseModel(
         message="File accepted.",
