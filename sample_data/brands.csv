@@ -1,6 +1,6 @@
-name,logo,supplier_id,active,created_by,created_date,updated_by,updated_date
-Nike,https://example.com/logos/nike.png,101,TRUE,1,1672531200,1,1672531200
-Adidas,/images/logos/adidas.svg,102,TRUE,1,1672531201,2,1672617600
-Puma,images/puma_logo.jpg,,FALSE,,,,
-"Levi Strauss & Co.",https://example.com/logos/levis.png,201,TRUE,2,1672704000,,
-Chanel,https://example.com/logos/chanel.png,301,TRUE,,,,
+name,logo,supplier_id,INACTIVE
+Nike_101, stg/b/11/p/13/1751327619211-4afdcfdf-4f19-4a2c-a986-b27433eec77b.png ,101,INACTIVE
+Adidas_101, stg/b/11/p/13/1751327653075-37a9dadd-99db-4a80-98dd-00f03cc6986a.png,25,INACTIVE
+Puma_101, stg/b/11/p/13/1751327666167-bb724e7c-b69d-444a-bf1a-dd89e644cd82.png ,33,INACTIVE
+Levi Strauss & Co., stg/b/11/p/13/1751327666167-bb724e7c-b69d-444a-bf1a-dd89e644cd82.png ,35,INACTIVE
+Chanel_101, stg/b/11/p/13/1751327697308-c4577b58-1cce-485c-a0a2-d86bb13ee0e8.png ,301,INACTIVE

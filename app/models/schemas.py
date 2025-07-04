@@ -2,6 +2,14 @@ from pydantic import BaseModel, Field, validator, constr, root_validator
 from typing import Optional, List, Any
 from datetime import datetime
 from enum import Enum
+import re
+
+def generate_slug(input_string: str) -> str:
+    slug = input_string.lower().strip()
+    slug = slug.replace(' ', '-')
+    slug = re.sub(r'[^a-z0-9\-]', '', slug)
+    return slug.strip('-')
+
 class UploadSessionModel(BaseModel):
     session_id: str
     business_details_id: int
@@ -19,12 +27,12 @@ class CategoryCsvModel(BaseModel):
     category_path: constr(strip_whitespace=True, min_length=1)
     name: constr(strip_whitespace=True, min_length=1)
     description: Optional[str] = None
-    enabled: bool = True
+    enabled: bool = Field(..., description="Must be true or false")
     image_name: Optional[str] = None
     long_description: Optional[str] = None
     order_type: Optional[str] = None
     shipping_type: Optional[str] = None
-    active: Optional[bool] = True
+    active: constr(strip_whitespace=True) = Field("INACTIVE", description="Either 'ACTIVE' or 'INACTIVE'")
     seo_description: Optional[str] = None
     seo_keywords: Optional[str] = None
     seo_title: Optional[str] = None
@@ -32,23 +40,41 @@ class CategoryCsvModel(BaseModel):
     position_on_site: Optional[int] = None
 
     class Config:
-        anystr_strip_whitespace = True
+        str_strip_whitespace = True
+        anystr_lower = False
+        extra = "forbid"
 
     @validator("category_path")
     def must_be_slash_separated(cls, v):
         segments = [seg for seg in v.split("/") if seg]
         if not segments:
-            raise ValueError("category_path must contain at least one segment")
+            raise ValueError("category_path must contain at least one non-empty segment")
         return v
 
     @validator("name")
-    def name_must_match_last_path_segment(cls, v, values):
-        path = values.get("category_path")
-        if path:
-            last = path.split("/")[-1]
-            if v.strip().lower() != last.strip().lower():
-                raise ValueError(f"name '{v}' must equal last segment of category_path '{last}'")
+    def name_matches_last_path_segment(cls, v, values):
+        path = values.get("category_path", "")
+        last = path.rsplit("/", 1)[-1]
+        if v.strip().lower() != last.strip().lower():
+            raise ValueError(f"name '{v}' must equal last segment of category_path '{last}'")
         return v
+
+    @root_validator(pre=True)
+    def fill_and_normalize_defaults(cls, values):
+        # enabled: required, default to False if absent
+        if "enabled" not in values or values["enabled"] is None:
+            values["enabled"] = False
+
+        # active: normalize to 'ACTIVE' or 'INACTIVE'
+        raw_active = values.get("active")
+        flag = str(raw_active).strip().upper() if raw_active is not None else ""
+        values["active"] = "ACTIVE" if flag in ("TRUE", "1", "ACTIVE") else "INACTIVE"
+
+        # url: generate slug from name if missing or blank
+        if not values.get("url") and values.get("name"):
+            values["url"] = generate_slug(values["name"])
+
+        return values
 class BrandCsvModel(BaseModel):
     """Pydantic model for validating a row from a Brand CSV file."""
     name: constr(strip_whitespace=True, min_length=1)
