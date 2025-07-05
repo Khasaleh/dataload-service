@@ -45,7 +45,7 @@ def load_category_to_db(
     """
     Upsert a hierarchical category path (e.g. "Electronics/Computers/Laptops").
     - New rows: set created_by/created_date, updated_by/updated_date, business_details_id, enabled, active, url slug.
-    - If CSV explicitly provides order_type or shipping_type (even blank), use that value; if omitted, leave NULL.
+    - If CSV explicitly provides order_type or shipping_type (even blank), convert empty to NULL; if omitted, leave NULL.
     - Existing leaf: update only mutable fields + updated_by/updated_date (including explicit nulls for order_type/shipping_type).
     Returns the final category ID.
     """
@@ -68,8 +68,11 @@ def load_category_to_db(
     enabled          = _bool(record_data.get("enabled", True))
     image_name       = record_data.get("image_name")
     long_description = record_data.get("long_description")
-    order_type       = record_data.get("order_type") if "order_type" in record_data else None
-    shipping_type    = record_data.get("shipping_type") if "shipping_type" in record_data else None
+    # Treat blank string as None for nullable fields
+    raw_order        = record_data.get("order_type") if "order_type" in record_data else None
+    order_type       = raw_order.strip() if raw_order and raw_order.strip() != "" else None
+    raw_shipping     = record_data.get("shipping_type") if "shipping_type" in record_data else None
+    shipping_type    = raw_shipping.strip() if raw_shipping and raw_shipping.strip() != "" else None
     active_flag      = _active(record_data.get("active", False))
     seo_description  = record_data.get("seo_description")
     seo_keywords     = record_data.get("seo_keywords")
@@ -93,27 +96,16 @@ def load_category_to_db(
             full_path = f"{full_path}/{seg}" if full_path else seg
             is_leaf  = (idx == len(segments) - 1)
 
-            # Lookup existing category by path or name
-            if is_leaf:
-                cat = (
-                    db_session.query(CategoryOrm)
-                              .filter_by(
-                                  business_details_id=business_details_id,
-                                  parent_id=parent_id,
-                                  name=name
-                              )
-                              .first()
-                )
-            else:
-                cat = (
-                    db_session.query(CategoryOrm)
-                              .filter_by(
-                                  business_details_id=business_details_id,
-                                  parent_id=parent_id,
-                                  name=seg
-                              )
-                              .first()
-                )
+            # Lookup existing category
+            cat = (
+                db_session.query(CategoryOrm)
+                          .filter_by(
+                              business_details_id=business_details_id,
+                              parent_id=parent_id,
+                              name=name if is_leaf else seg
+                          )
+                          .first()
+            )
 
             if cat:
                 # Update leaf only
@@ -123,7 +115,7 @@ def load_category_to_db(
                     cat.enabled          = enabled
                     cat.image_name       = image_name       or cat.image_name
                     cat.long_description = long_description or cat.long_description
-                    # Respect explicit CSV presence for order_type/shipping_type
+                    # Respect CSV (blank→NULL)
                     if "order_type" in record_data:
                         cat.order_type    = order_type
                     if "shipping_type" in record_data:
@@ -156,7 +148,6 @@ def load_category_to_db(
                     payload.update({
                         'image_name':       image_name,
                         'long_description': long_description,
-                        # Include even None for CSV fields
                         'order_type':       order_type,
                         'shipping_type':    shipping_type,
                         'seo_description':  seo_description,
