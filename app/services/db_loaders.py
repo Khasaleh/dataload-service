@@ -44,8 +44,8 @@ def load_category_to_db(
     """
     Upsert a hierarchical category path (e.g. "Electronics/Computers/Laptops").
     - New rows: set created_by/created_date, updated_by/updated_date, business_details_id, enabled, active, url slug.
-    - Explicit CSV blanks for order_type or shipping_type become NULL; omitted keys also NULL.
-    - Existing leaf: update only mutable fields + updated_by/updated_date (including explicit NULLs for order_type/shipping_type).
+    - If CSV explicitly provides order_type or shipping_type (even blank), convert blank→NULL; if omitted, leave None.
+    - Existing leaf: update only mutable fields + updated_by/updated_date.
     Returns the final category ID.
     """
     path = record_data.get("category_path", "").strip()
@@ -56,37 +56,28 @@ def load_category_to_db(
             field_name="category_path"
         )
 
+    # helpers
     def _bool(val: Any) -> bool:
         return str(val or "").strip().lower() in ("true", "1", "yes")
     def _active(val: Any) -> str:
-       """
-        - If the CSV value (string) equals 'INACTIVE' (case-insensitive), return 'INACTIVE'.
-        - Otherwise (including 'ACTIVE', '', None, '1', True, 'foo'), return 'ACTIVE'.
-        """
-    if isinstance(val, str) and val.strip().lower() == "inactive":
-        return "INACTIVE"
-    return "ACTIVE"
+        return "INACTIVE" if isinstance(val, str) and val.strip().lower()=="inactive" else "ACTIVE"
 
-    name             = record_data.get("name", "").strip()
+    # extract & normalize CSV fields
+    name             = record_data["name"].strip()
     description      = record_data.get("description")
     enabled          = _bool(record_data.get("enabled", True))
     image_name       = record_data.get("image_name")
     long_description = record_data.get("long_description")
-    raw_order        = record_data.get("order_type") if "order_type" in record_data else None
-    order_type       = raw_order.strip() if raw_order and raw_order.strip() != "" else None
-    raw_shipping     = record_data.get("shipping_type") if "shipping_type" in record_data else None
-    shipping_type    = raw_shipping.strip() if raw_shipping and raw_shipping.strip() != "" else None
-    active_flag = _active(record_data.get("active"))
+    order_type_raw   = record_data.get("order_type")   # may be absent
+    order_type       = order_type_raw.strip() if order_type_raw is not None and order_type_raw.strip() else None
+    shipping_raw     = record_data.get("shipping_type")
+    shipping_type    = shipping_raw.strip() if shipping_raw is not None and shipping_raw.strip() else None
+    active_flag      = _active(record_data.get("active"))
     seo_description  = record_data.get("seo_description")
     seo_keywords     = record_data.get("seo_keywords")
     seo_title        = record_data.get("seo_title")
     position         = record_data.get("position_on_site")
-
-    raw_url = record_data.get("url", "")
-    url = raw_url.strip().lower() if raw_url and raw_url.strip() else None
-    if not url:
-        slug = generate_slug(name)
-        url = f"/{slug}"
+    url              = record_data.get("url") or f"/{ServerDateTime.now_epoch_ms()}"  # fallback, but CSV-model should fill
 
     segments = [seg.strip() for seg in path.split("/") if seg.strip()]
     parent_id: Optional[int] = None
@@ -96,20 +87,22 @@ def load_category_to_db(
     try:
         for idx, seg in enumerate(segments):
             full_path = f"{full_path}/{seg}" if full_path else seg
-            is_leaf  = (idx == len(segments) - 1)
+            is_leaf = (idx == len(segments)-1)
 
-            # lookup existing node
+            # lookup existing at this level
+            orm_name = name if is_leaf else seg
             cat = (
                 db_session.query(CategoryOrm)
                           .filter_by(
                               business_details_id=business_details_id,
                               parent_id=parent_id,
-                              name=name if is_leaf else seg
+                              name=orm_name
                           )
                           .first()
             )
 
             if cat:
+                # update only leaf‐level metadata
                 if is_leaf:
                     logger.info(f"Updating category '{full_path}' (ID={cat.id})")
                     cat.description      = description      or cat.description
@@ -129,31 +122,33 @@ def load_category_to_db(
                     cat.updated_by       = user_id
                     cat.updated_date     = ServerDateTime.now_epoch_ms()
                 final_id = cat.id
+
             else:
+                # create new
                 now = ServerDateTime.now_epoch_ms()
                 payload: Dict[str, Any] = {
-                    'business_details_id': business_details_id,
-                    'parent_id': parent_id,
-                    'name': name if is_leaf else seg,
-                    'created_by': user_id,
-                    'created_date': now,
-                    'updated_by': user_id,
-                    'updated_date': now,
-                    'enabled': enabled if is_leaf else True,
-                    'active': active_flag,
-                    'description': description if is_leaf else seg,
+                    "business_details_id": business_details_id,
+                    "parent_id": parent_id,
+                    "name": orm_name,
+                    "created_by": user_id,
+                    "created_date": now,
+                    "updated_by": user_id,
+                    "updated_date": now,
+                    "enabled": enabled if is_leaf else True,
+                    "active": active_flag,
+                    "description": description if is_leaf else seg,
+                    "url": url,
                 }
                 if is_leaf:
                     payload.update({
-                        'image_name':       image_name,
-                        'long_description': long_description,
-                        'order_type':       order_type,
-                        'shipping_type':    shipping_type,
-                        'seo_description':  seo_description,
-                        'seo_keywords':     seo_keywords,
-                        'seo_title':        seo_title,
-                        'url':              url,
-                        'position_on_site': position,
+                        "image_name":       image_name,
+                        "long_description": long_description,
+                        "order_type":       order_type,
+                        "shipping_type":    shipping_type,
+                        "seo_description":  seo_description,
+                        "seo_keywords":     seo_keywords,
+                        "seo_title":        seo_title,
+                        "position_on_site": position,
                     })
                 new_cat = CategoryOrm(**payload)
                 db_session.add(new_cat)
@@ -161,6 +156,7 @@ def load_category_to_db(
                 final_id = new_cat.id
                 logger.info(f"Created category '{full_path}' (ID={final_id})")
 
+            # cache in Redis
             add_to_id_map(
                 session_id,
                 f"categories{DB_PK_MAP_SUFFIX}",
@@ -168,9 +164,10 @@ def load_category_to_db(
                 final_id,
                 pipeline=db_pk_redis_pipeline
             )
+
             parent_id = final_id  # type: ignore
 
-        return final_id
+        return final_id  # type: ignore
 
     except IntegrityError as e:
         logger.error(f"DB integrity error for '{path}': {e.orig}")
@@ -199,7 +196,7 @@ def load_category_to_db(
             offending_value=path,
             original_exception=e
         )
-        
+             
 def load_brand_to_db(
     db_session: Session,
     business_details_id: int,
