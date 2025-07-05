@@ -37,7 +37,10 @@ class CategoryCsvModel(BaseModel):
     long_description: Optional[str] = None
     order_type: Optional[str] = None
     shipping_type: Optional[str] = None
-    active: constr(strip_whitespace=True) = Field("INACTIVE", description="Either 'ACTIVE' or 'INACTIVE'")
+    active: Optional[str] = Field(
+        None,
+        description="Either 'ACTIVE' or 'INACTIVE'; any other/missing ⇒ ACTIVE"
+    )
     seo_description: Optional[str] = None
     seo_keywords: Optional[str] = None
     seo_title: Optional[str] = None
@@ -46,38 +49,48 @@ class CategoryCsvModel(BaseModel):
 
     class Config:
         str_strip_whitespace = True
-        anystr_lower = False
         extra = "forbid"
 
-    @validator("category_path")
-    def must_be_slash_separated(cls, v):
-        segments = [seg for seg in v.split("/") if seg]
-        if not segments:
-            raise ValueError("category_path must contain at least one non-empty segment")
-        return v
+    @validator("category_path", pre=True)
+    def strip_path_whitespace(cls, v):
+        return "/".join(seg.strip() for seg in v.split("/") if seg.strip())
 
-    @validator("position_on_site", pre=True)
-    def empty_position_to_none(cls, v):
-        # blank or whitespace-only → None
-        if isinstance(v, str) and not v.strip():
-            return None
+    @validator("name", pre=True)
+    def strip_name_whitespace(cls, v):
+        return v.strip()
+
+    @validator("name")
+    def name_matches_last_path_segment(cls, v, values):
+        path = values.get("category_path", "")
+        last = path.rsplit("/", 1)[-1]
+        if v.strip().lower() != last.strip().lower():
+            raise ValueError(f"name '{v}' must equal last segment of category_path '{last}'")
         return v
 
     @root_validator(pre=True)
     def fill_and_normalize_defaults(cls, values):
-        # enabled: default to False if absent
-        if values.get("enabled") is None:
+        # ensure enabled is boolean
+        if "enabled" not in values or values["enabled"] is None:
             values["enabled"] = False
 
-        # active: normalize to 'ACTIVE' or 'INACTIVE'
-        raw_active = values.get("active")
-        flag = str(raw_active).strip().upper() if raw_active is not None else ""
-        values["active"] = "ACTIVE" if flag in ("TRUE", "1", "ACTIVE") else "INACTIVE"
+        # normalize active:
+        raw = values.get("active")
+        if isinstance(raw, str) and raw.strip().lower() == "inactive":
+            values["active"] = "INACTIVE"
+        else:
+            # everything else (including Active, ACTIVE, null, '', '1', True, False, 'foo') → ACTIVE
+            values["active"] = "ACTIVE"
 
-        # url: generate slug from name if missing or blank
+        # auto‐generate url slug if missing
         if not values.get("url") and values.get("name"):
-            from app.utils.slug import generate_slug
-            values["url"] = generate_slug(values["name"])
+            slug = (
+                values["name"]
+                .strip()
+                .lower()
+                .replace(" ", "-")
+            )
+            slug = re.sub(r"[^a-z0-9-]", "", slug).strip("-")
+            values["url"] = slug
 
         return values
 class BrandCsvModel(BaseModel):
