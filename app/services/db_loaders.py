@@ -45,7 +45,8 @@ def load_category_to_db(
     """
     Upsert a hierarchical category path (e.g. "Electronics/Computers/Laptops").
     - New rows: set created_by/created_date, updated_by/updated_date, business_details_id, enabled, active, url slug.
-    - Existing leaf: update only mutable fields + updated_by/updated_date.
+    - If CSV explicitly provides order_type or shipping_type (even blank), use that value; if omitted, leave NULL.
+    - Existing leaf: update only mutable fields + updated_by/updated_date (including explicit nulls for order_type/shipping_type).
     Returns the final category ID.
     """
     path = record_data.get("category_path", "").strip()
@@ -67,8 +68,8 @@ def load_category_to_db(
     enabled          = _bool(record_data.get("enabled", True))
     image_name       = record_data.get("image_name")
     long_description = record_data.get("long_description")
-    order_type       = record_data.get("order_type")
-    shipping_type    = record_data.get("shipping_type")
+    order_type       = record_data.get("order_type") if "order_type" in record_data else None
+    shipping_type    = record_data.get("shipping_type") if "shipping_type" in record_data else None
     active_flag      = _active(record_data.get("active", False))
     seo_description  = record_data.get("seo_description")
     seo_keywords     = record_data.get("seo_keywords")
@@ -122,8 +123,11 @@ def load_category_to_db(
                     cat.enabled          = enabled
                     cat.image_name       = image_name       or cat.image_name
                     cat.long_description = long_description or cat.long_description
-                    cat.order_type       = order_type       or cat.order_type
-                    cat.shipping_type    = shipping_type    or cat.shipping_type
+                    # Respect explicit CSV presence for order_type/shipping_type
+                    if "order_type" in record_data:
+                        cat.order_type    = order_type
+                    if "shipping_type" in record_data:
+                        cat.shipping_type = shipping_type
                     cat.active           = active_flag
                     cat.seo_description  = seo_description  or cat.seo_description
                     cat.seo_keywords     = seo_keywords     or cat.seo_keywords
@@ -152,6 +156,7 @@ def load_category_to_db(
                     payload.update({
                         'image_name':       image_name,
                         'long_description': long_description,
+                        # Include even None for CSV fields
                         'order_type':       order_type,
                         'shipping_type':    shipping_type,
                         'seo_description':  seo_description,
@@ -206,7 +211,7 @@ def load_category_to_db(
             offending_value=path,
             original_exception=e
         )
-        
+
 def load_brand_to_db(
     db_session: Session,
     business_details_id: int,
