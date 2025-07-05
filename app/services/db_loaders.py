@@ -77,7 +77,16 @@ def load_category_to_db(
     seo_description  = record_data.get("seo_description")
     seo_keywords     = record_data.get("seo_keywords")
     seo_title        = record_data.get("seo_title")
-    url              = record_data.get("url")
+    # Raw URL from CSV (may include whitespace)
+raw_url = record_data.get("url", "")
+raw_url_stripped = raw_url.strip()  # remove leading/trailing spaces
+# Use provided URL if non-empty, otherwise generate slug from name
+if raw_url_stripped:
+    url = raw_url_stripped.lower()
+else:
+    # auto-generate url slug from name
+    slug = generate_slug(name)
+    url = slug
     position         = record_data.get("position_on_site")
     name             = record_data.get("name", "").strip()
 
