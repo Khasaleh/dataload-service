@@ -52,15 +52,16 @@ class CategoryCsvModel(BaseModel):
         extra = "forbid"
 
     @validator("category_path", pre=True)
-    def strip_path_whitespace(cls, v):
+    def strip_path_whitespace(cls, v: str) -> str:
+        # collapse and trim each segment
         return "/".join(seg.strip() for seg in v.split("/") if seg.strip())
 
     @validator("name", pre=True)
-    def strip_name_whitespace(cls, v):
+    def strip_name_whitespace(cls, v: str) -> str:
         return v.strip()
 
     @validator("name")
-    def name_matches_last_path_segment(cls, v, values):
+    def name_matches_last_path_segment(cls, v: str, values):
         path = values.get("category_path", "")
         last = path.rsplit("/", 1)[-1]
         if v.strip().lower() != last.strip().lower():
@@ -69,26 +70,21 @@ class CategoryCsvModel(BaseModel):
 
     @root_validator(pre=True)
     def fill_and_normalize_defaults(cls, values):
-        # ensure enabled is boolean
-        if "enabled" not in values or values["enabled"] is None:
+        # enabled: default False if absent
+        if values.get("enabled") is None:
             values["enabled"] = False
 
-        # normalize active:
+        # active: only exact "inactive" (any case) → INACTIVE; else → ACTIVE
         raw = values.get("active")
         if isinstance(raw, str) and raw.strip().lower() == "inactive":
             values["active"] = "INACTIVE"
         else:
-            # everything else (including Active, ACTIVE, null, '', '1', True, False, 'foo') → ACTIVE
             values["active"] = "ACTIVE"
 
-        # auto‐generate url slug if missing
-        if not values.get("url") and values.get("name"):
-            slug = (
-                values["name"]
-                .strip()
-                .lower()
-                .replace(" ", "-")
-            )
+        # url: slugify `name` if missing or blank
+        name = values.get("name", "")
+        if not values.get("url") and name:
+            slug = name.strip().lower().replace(" ", "-")
             slug = re.sub(r"[^a-z0-9-]", "", slug).strip("-")
             values["url"] = slug
 

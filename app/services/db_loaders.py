@@ -33,9 +33,8 @@ from app.models.schemas import ErrorType
 
 logger = logging.getLogger(__name__)
 
-
 def load_category_to_db(
-    db_session: Session,
+    db_session,
     business_details_id: int,
     record_data: Dict[str, Any],
     session_id: str,
@@ -45,8 +44,8 @@ def load_category_to_db(
     """
     Upsert a hierarchical category path (e.g. "Electronics/Computers/Laptops").
     - New rows: set created_by/created_date, updated_by/updated_date, business_details_id, enabled, active, url slug.
-    - If CSV explicitly provides order_type or shipping_type (even blank), convert empty to NULL; if omitted, leave NULL.
-    - Existing leaf: update only mutable fields + updated_by/updated_date (including explicit nulls for order_type/shipping_type).
+    - Explicit CSV blanks for order_type or shipping_type become NULL; omitted keys also NULL.
+    - Existing leaf: update only mutable fields + updated_by/updated_date (including explicit NULLs for order_type/shipping_type).
     Returns the final category ID.
     """
     path = record_data.get("category_path", "").strip()
@@ -57,13 +56,11 @@ def load_category_to_db(
             field_name="category_path"
         )
 
-    # Helpers
     def _bool(val: Any) -> bool:
         return str(val or "").strip().lower() in ("true", "1", "yes")
     def _active(val: Any) -> str:
         return "ACTIVE" if _bool(val) else "INACTIVE"
 
-    # Extract CSV values or defaults
     name             = record_data.get("name", "").strip()
     description      = record_data.get("description")
     enabled          = _bool(record_data.get("enabled", True))
@@ -95,7 +92,7 @@ def load_category_to_db(
             full_path = f"{full_path}/{seg}" if full_path else seg
             is_leaf  = (idx == len(segments) - 1)
 
-            # Lookup existing
+            # lookup existing node
             cat = (
                 db_session.query(CategoryOrm)
                           .filter_by(
@@ -167,7 +164,7 @@ def load_category_to_db(
             )
             parent_id = final_id  # type: ignore
 
-        return final_id  # end of function
+        return final_id
 
     except IntegrityError as e:
         logger.error(f"DB integrity error for '{path}': {e.orig}")
