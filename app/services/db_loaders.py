@@ -64,11 +64,11 @@ def load_category_to_db(
         return "ACTIVE" if _bool(val) else "INACTIVE"
 
     # Extract CSV values or defaults
+    name             = record_data.get("name", "").strip()
     description      = record_data.get("description")
     enabled          = _bool(record_data.get("enabled", True))
     image_name       = record_data.get("image_name")
     long_description = record_data.get("long_description")
-    # Treat blank string as None for nullable fields
     raw_order        = record_data.get("order_type") if "order_type" in record_data else None
     order_type       = raw_order.strip() if raw_order and raw_order.strip() != "" else None
     raw_shipping     = record_data.get("shipping_type") if "shipping_type" in record_data else None
@@ -77,20 +77,10 @@ def load_category_to_db(
     seo_description  = record_data.get("seo_description")
     seo_keywords     = record_data.get("seo_keywords")
     seo_title        = record_data.get("seo_title")
-    # Raw URL from CSV (may include whitespace)
-raw_url = record_data.get("url", "")
-raw_url_stripped = raw_url.strip()  # remove leading/trailing spaces
-# Use provided URL if non-empty, otherwise generate slug from name
-if raw_url_stripped:
-    url = raw_url_stripped.lower()
-else:
-    # auto-generate url slug from name
-    slug = generate_slug(name)
-    url = slug
     position         = record_data.get("position_on_site")
-    name             = record_data.get("name", "").strip()
 
-    # Ensure URL: slug from name if missing
+    raw_url = record_data.get("url", "")
+    url = raw_url.strip().lower() if raw_url and raw_url.strip() else None
     if not url:
         slug = generate_slug(name)
         url = f"/{slug}"
@@ -105,7 +95,7 @@ else:
             full_path = f"{full_path}/{seg}" if full_path else seg
             is_leaf  = (idx == len(segments) - 1)
 
-            # Lookup existing category
+            # Lookup existing
             cat = (
                 db_session.query(CategoryOrm)
                           .filter_by(
@@ -117,14 +107,12 @@ else:
             )
 
             if cat:
-                # Update leaf only
                 if is_leaf:
                     logger.info(f"Updating category '{full_path}' (ID={cat.id})")
                     cat.description      = description      or cat.description
                     cat.enabled          = enabled
                     cat.image_name       = image_name       or cat.image_name
                     cat.long_description = long_description or cat.long_description
-                    # Respect CSV (blank→NULL)
                     if "order_type" in record_data:
                         cat.order_type    = order_type
                     if "shipping_type" in record_data:
@@ -134,12 +122,11 @@ else:
                     cat.seo_keywords     = seo_keywords     or cat.seo_keywords
                     cat.seo_title        = seo_title        or cat.seo_title
                     cat.url              = url              or cat.url
-                    cat.position_on_site = position         or cat.position_on_site
+                    cat.position_on_site = position or cat.position_on_site
                     cat.updated_by       = user_id
                     cat.updated_date     = ServerDateTime.now_epoch_ms()
                 final_id = cat.id
             else:
-                # Create new
                 now = ServerDateTime.now_epoch_ms()
                 payload: Dict[str, Any] = {
                     'business_details_id': business_details_id,
@@ -171,7 +158,6 @@ else:
                 final_id = new_cat.id
                 logger.info(f"Created category '{full_path}' (ID={final_id})")
 
-            # Cache in Redis
             add_to_id_map(
                 session_id,
                 f"categories{DB_PK_MAP_SUFFIX}",
@@ -179,10 +165,9 @@ else:
                 final_id,
                 pipeline=db_pk_redis_pipeline
             )
-
             parent_id = final_id  # type: ignore
 
-        return final_id  # type: ignore
+        return final_id  # end of function
 
     except IntegrityError as e:
         logger.error(f"DB integrity error for '{path}': {e.orig}")
@@ -211,7 +196,6 @@ else:
             offending_value=path,
             original_exception=e
         )
-
 def load_brand_to_db(
     db_session: Session,
     business_details_id: int,
