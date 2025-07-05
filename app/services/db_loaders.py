@@ -59,7 +59,13 @@ def load_category_to_db(
     def _bool(val: Any) -> bool:
         return str(val or "").strip().lower() in ("true", "1", "yes")
     def _active(val: Any) -> str:
-        return "ACTIVE" if _bool(val) else "INACTIVE"
+       """
+        - If the CSV value (string) equals 'INACTIVE' (case-insensitive), return 'INACTIVE'.
+        - Otherwise (including 'ACTIVE', '', None, '1', True, 'foo'), return 'ACTIVE'.
+        """
+    if isinstance(val, str) and val.strip().lower() == "inactive":
+        return "INACTIVE"
+    return "ACTIVE"
 
     name             = record_data.get("name", "").strip()
     description      = record_data.get("description")
@@ -70,7 +76,7 @@ def load_category_to_db(
     order_type       = raw_order.strip() if raw_order and raw_order.strip() != "" else None
     raw_shipping     = record_data.get("shipping_type") if "shipping_type" in record_data else None
     shipping_type    = raw_shipping.strip() if raw_shipping and raw_shipping.strip() != "" else None
-    active_flag      = _active(record_data.get("active", False))
+    active_flag = _active(record_data.get("active"))
     seo_description  = record_data.get("seo_description")
     seo_keywords     = record_data.get("seo_keywords")
     seo_title        = record_data.get("seo_title")
