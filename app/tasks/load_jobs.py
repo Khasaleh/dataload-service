@@ -3,6 +3,7 @@ import logging
 import json
 from datetime import datetime
 from celery import shared_task
+from sqlalchemy import text
 from sqlalchemy.exc import (
     OperationalError as SQLAlchemyOperationalError,
     TimeoutError as SQLAlchemyTimeoutError,
@@ -20,10 +21,7 @@ from redis.exceptions import (
 from app.core.config import settings
 from app.db.connection import get_session
 from app.db.models import UploadSessionOrm
-from app.utils.redis_utils import (
-    redis_client_instance as redis_client,
-    get_from_id_map,
-)
+from app.utils.redis_utils import get_from_id_map, redis_client_instance
 from app.services.validator import validate_csv
 from app.services.db_loaders import (
     load_brand_to_db,
@@ -38,11 +36,8 @@ from app.models import UploadJobStatus, ErrorDetailModel, ErrorType
 import csv
 
 logger = logging.getLogger(__name__)
-
-# Base directory for uploaded files (mounted via PVC)
 STORAGE_ROOT = settings.LOCAL_STORAGE_PATH
 
-# Exceptions that trigger a retry
 RETRYABLE_EXCEPTIONS = (
     SQLAlchemyOperationalError,
     SQLAlchemyTimeoutError,
@@ -63,9 +58,7 @@ def _update_session_status(
     record_count=None,
     error_count=None,
 ):
-    sess = db.query(UploadSessionOrm).filter(
-        UploadSessionOrm.session_id == session_id
-    ).first()
+    sess = db.query(UploadSessionOrm).filter_by(session_id=session_id).first()
     if not sess:
         logger.error("Session %s not found for status update", session_id)
         return
@@ -73,19 +66,16 @@ def _update_session_status(
     sess.updated_at = datetime.utcnow()
 
     if details is not None:
-        # normalize Pydantic or dict errors
         normalized = []
         for d in details:
-            if hasattr(d, 'model_dump'):
-                normalized.append(d.model_dump())
-            else:
-                normalized.append(d)
+            normalized.append(d.model_dump() if hasattr(d, "model_dump") else d)
         sess.details = json.dumps(normalized)
 
     if record_count is not None:
         sess.record_count = record_count
     if error_count is not None:
         sess.error_count = error_count
+
     db.commit()
 
 
@@ -97,9 +87,16 @@ def process_csv_task(
     record_key: str,
     id_prefix: str,
     map_type: str,
-    user_id: int
+    user_id: int,
+    db_key: str | None = None,
 ):
-    db = get_session(business_id=int(business_id))
+    """
+    Generic CSV processing pipeline.
+    If db_key is provided, get_session will pick the alternate DB URL.
+    """
+    # pick up the correct DB connection (uses db_key if non‐None)
+    db = get_session(business_id=int(business_id), db_key=db_key)
+
     _update_session_status(db, session_id, UploadJobStatus.DOWNLOADING_FILE)
 
     abs_path = os.path.join(STORAGE_ROOT, business_id, wasabi_file_path)
@@ -115,7 +112,6 @@ def process_csv_task(
         )
         return
 
-    # Validate schema and business rules
     _update_session_status(db, session_id, UploadJobStatus.VALIDATING_SCHEMA)
     init_errors, validated = validate_csv(map_type, original_records, session_id)
     if init_errors:
@@ -139,18 +135,19 @@ def process_csv_task(
     processed = 0
     errors = []
 
-    # Dispatch to loaders
+    # route to the correct loader
     if map_type == "brands":
-        summary = load_brand_to_db(
-            db, int(business_id), validated, session_id, None, user_id
-        )
+        summary = load_brand_to_db(db, int(business_id), validated, session_id, None, user_id)
         processed = summary.get("inserted", 0) + summary.get("updated", 0)
+
     elif map_type == "return_policies":
         summary = load_return_policy_to_db(db, int(business_id), validated, session_id, None)
         processed = summary.get("inserted", 0) + summary.get("updated", 0)
+
     elif map_type == "product_prices":
         summary = load_price_to_db(db, int(business_id), validated, session_id, None)
         processed = summary.get("inserted", 0) + summary.get("updated", 0)
+
     else:
         for idx, rec in enumerate(validated, start=2):
             try:
@@ -200,35 +197,112 @@ def process_csv_task(
         "errors": [e.model_dump() for e in errors],
     }
 
-# Celery task wrappers
+
+# -- Celery task wrappers -- #
+# Only `return_policies` picks up the alternate DB; others use the default.
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_brands_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str, user_id: int):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'name', 'brand', 'brands', user_id)
+def process_brands_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
+    return process_csv_task(
+        business_id,
+        session_id,
+        wasabi_file_path,
+        original_filename,
+        "name",
+        "brand",
+        "brands",
+        user_id,
+    )
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_attributes_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str, user_id: int):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'attribute_name', 'attr', 'attributes', user_id)
+def process_attributes_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
+    return process_csv_task(
+        business_id,
+        session_id,
+        wasabi_file_path,
+        original_filename,
+        "attribute_name",
+        "attr",
+        "attributes",
+        user_id,
+    )
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_return_policies_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str, user_id: int):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'policy_name', 'rp', 'return_policies', user_id)
+def process_return_policies_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
+    # This one uses the alternate DB as configured in settings.LOADTYPE_DB_MAP
+    db_key = settings.LOADTYPE_DB_MAP.get("return_policies")
+    return process_csv_task(
+        business_id,
+        session_id,
+        wasabi_file_path,
+        original_filename,
+        "policy_name",
+        "rp",
+        "return_policies",
+        user_id,
+        db_key=db_key,
+    )
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_products_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str, user_id: int):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'self_gen_product_id', 'prod', 'products', user_id)
+def process_products_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
+    return process_csv_task(
+        business_id,
+        session_id,
+        wasabi_file_path,
+        original_filename,
+        "self_gen_product_id",
+        "prod",
+        "products",
+        user_id,
+    )
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_product_items_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str, user_id: int):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'variant_sku', 'item', 'product_items', user_id)
+def process_product_items_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
+    return process_csv_task(
+        business_id,
+        session_id,
+        wasabi_file_path,
+        original_filename,
+        "variant_sku",
+        "item",
+        "product_items",
+        user_id,
+    )
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_product_prices_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str, user_id: int):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'product_id', 'price', 'product_prices', user_id)
+def process_product_prices_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
+    return process_csv_task(
+        business_id,
+        session_id,
+        wasabi_file_path,
+        original_filename,
+        "product_id",
+        "price",
+        "product_prices",
+        user_id,
+    )
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_meta_tags_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str, user_id: int):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'category_name', 'cat', 'categories', user_id)
+def process_meta_tags_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
+    return process_csv_task(
+        business_id,
+        session_id,
+        wasabi_file_path,
+        original_filename,
+        "meta_tag_key",
+        "meta",
+        "meta_tags",
+        user_id,
+    )
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_categories_file(self, business_id: str, session_id: str, wasabi_file_path: str, original_filename: str, user_id: int):
-    return process_csv_task(business_id, session_id, wasabi_file_path, original_filename, 'category_name', 'cat', 'categories', user_id)
+def process_categories_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
+    return process_csv_task(
+        business_id,
+        session_id,
+        wasabi_file_path,
+        original_filename,
+        "category_path",
+        "cat",
+        "categories",
+        user_id,
+    )

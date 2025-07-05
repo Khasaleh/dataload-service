@@ -1,12 +1,12 @@
-category_path,name,description,enabled,image_name,long_description,order_type,shipping_type,active,seo_description,seo_keywords,seo_title,url,position_on_site
-Electronics,,All kinds of electronic gadgets,TRUE,,,,,,Electronics Gadgets,electronics,gadgets,Electronics,/electronics,1
-Electronics/Computers,Computers,"Desktops, Laptops, and Components",TRUE,,,,,,Computers and Laptops,computers,laptops,Computer Hardware,/electronics/computers,1
-Electronics/Computers/Laptops,Laptops,"Portable computing devices",TRUE,laptop_generic.jpg,"A wide variety of laptops for all needs.",DEFAULT,STANDARD,TRUE,"Best laptops for sale","laptops, notebooks, ultrabooks","Laptops | Portable Computers","/electronics/computers/laptops",1
-Electronics/Computers/Desktops,Desktops,"Powerful desktop computers",TRUE,desktop_generic.jpg,,,,TRUE,"Powerful Desktops","desktops,workstations","Desktops | Workstations","/electronics/computers/desktops",2
-Electronics/Mobile Phones,Mobile Phones,"Smartphones and accessories",TRUE,,,,,,Mobile Phones,smartphones,cellphones,Mobile Phones,"/electronics/mobile-phones",2
-Apparel,,"Clothing and Fashion",TRUE,,,,,,Clothing,apparel,fashion,Apparel,"/apparel",2
-Apparel/Mens,Mens Apparel,"Clothing for Men",TRUE,,,,,,Mens Clothing,mens apparel,mens fashion,Mens Apparel,"/apparel/mens",1
-Apparel/Mens/Shirts,Mens Shirts,"Casual and Formal Shirts for Men",TRUE,mens_shirt.jpg,,,,TRUE,"Buy Mens Shirts Online","mens shirts, formal shirts, casual shirts","Mens Shirts Online","/apparel/mens/shirts",1
-Books,,"Fiction and Non-fiction books",FALSE,,,,,,Books Catalog,books,reading,Books,"/books",3
-Home Goods,,Products for your home,TRUE,,,,HOME_DELIVERY,STANDARD,TRUE,Home Essentials,home, decor,Home Goods,"/home-goods",4
-Home Goods/Kitchen,Kitchenware,"Cookware, bakeware, and kitchen gadgets.",TRUE,kitchen.jpg,"Everything for your kitchen.",,,TRUE,Kitchen Supplies,kitchen,cookware,Kitchenware,"/home-goods/kitchen",1
+category_path,name,description,enabled,image_name,long_description,active,seo_description,seo_keywords,seo_title
+Electronics,Electronics,All kinds of electronic gadgets,TRUE,stg/b/11/p/27/1751661863875-996acfc4-1738-4d0a-9c51-73eb5dc58856.jpeg,Everything,,Electronics Gadgets,electronics,gadgets
+Electronics/Computers,Computers,"Desktops, Laptops, and Components",TRUE,stg/b/11/p/27/1751661804751-dc984e8e-4e5e-4f46-9b00-74c094845a2d.jpeg,Everything,INACTIVE,Computers and Laptops,computers,laptops
+Electronics/Computers/Laptops,Laptops,Portable computing devices,TRUE,stg/b/11/p/27/1751661954082-f54a3239-474a-4a27-8a41-e12f5b348ff7.jpeg,A wide variety of laptops for all needs.,,Best laptops for sale,"laptops, notebooks, ultrabooks",Laptops | Portable Computers
+Electronics/Computers/Desktops,Desktops,Powerful desktop computers,TRUE,stg/b/11/p/27/1751661997821-266fe7f6-5a9c-489a-9f8f-758fe2ffe914.jpeg,Everything,,Powerful Desktops,"desktops,workstations",Desktops | Workstations
+Electronics/Mobile Phones,Mobile Phones,Smartphones and accessories,TRUE,stg/b/11/p/27/1751662035551-7aae34aa-35c8-4016-95c6-171634c3398a.jpeg,Everything,,Mobile Phones,smartphones,cellphones
+Apparel,Apparel,Clothing and Fashion,TRUE,stg/b/11/p/27/1751662116618-e3ac4a86-bd78-4947-b93b-42b302d04169.jpeg,Everything,,Clothing,apparel,fashion
+Apparel/Mens Apparel,Mens Apparel,Clothing for Men,TRUE,stg/b/11/p/27/1751662171547-39d35a96-b080-4946-84de-7b6a5b91e268.jpeg,Everything,,Mens Clothing,mens apparel,mens fashion
+Apparel/Mens Apparel/Shirts, Shirts,Casual and Formal Shirts for Men,TRUE,stg/b/11/p/27/1751662210767-bd1df01a-552f-47ac-9720-55a3c16969df.jpeg,Everything,,Buy Mens Shirts Online,"mens shirts, formal shirts, casual shirts",Mens Shirts Online
+Books,Books,Fiction and Non-fiction books,FALSE,stg/b/11/p/27/1751662252332-4f69ac10-991f-48da-a745-62e8b1ab8ec1.jpeg,Everything,,Books Catalog,books,reading
+Home Goods,Home Goods,Products for your home,TRUE,stg/b/11/p/27/1751662294141-76518b5a-85d6-45a6-8157-754f375360ed.jpeg,Everything,,Everything,Home Essentials,home
+Home Goods/Kitchen,Kitchen,"Cookware, bakeware, and kitchen gadgets.",TRUE,stg/b/11/p/27/1751662390928-9e3d537e-d359-41ab-a52a-5111b31110f7.jpeg,Everything for your kitchen.,,Kitchen Supplies,kitchen,cookware
