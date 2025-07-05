@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     DB_PORT: int = 5432
     DB_NAME: str
     DATABASE_URL: Optional[PostgresDsn] = None
-
+    REDIS_SESSION_TTL_SECONDS = settings.REDIS_SESSION_TTL_SECONDS
     # Secondary Database Configuration (for return_policies)
     DB_NAME2: Optional[str] = None
     DATABASE_URL_DB2: Optional[PostgresDsn] = None
