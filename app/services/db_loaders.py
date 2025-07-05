@@ -26,155 +26,177 @@ from app.db.models import (
 )
 from datetime import datetime
 from app.dataload.models.price_csv import PriceCsv, PriceTypeEnum as PriceCsvTypeEnum
-
+from app.utils.slug import generate_slug
 from app.utils.redis_utils import add_to_id_map, get_from_id_map, DB_PK_MAP_SUFFIX
 from app.exceptions import DataLoaderError
 from app.models.schemas import ErrorType
 
 logger = logging.getLogger(__name__)
 
-
 def load_category_to_db(
-    db_session: Session,
+    db_session,
     business_details_id: int,
     record_data: Dict[str, Any],
     session_id: str,
-    db_pk_redis_pipeline: Any
-) -> Optional[int]:
-    category_path_str = record_data.get("category_path")
-    if not category_path_str:
-        msg = "Missing 'category_path' in record_data."
-        logger.error(f"{msg} Business: {business_details_id}, Session: {session_id}, Record: {record_data}")
-        raise DataLoaderError(message=msg, error_type=ErrorType.VALIDATION, field_name="category_path")
+    db_pk_redis_pipeline: Any = None,
+    user_id: int = None
+) -> int:
+    """
+    Upsert a hierarchical category path (e.g. "Electronics/Computers/Laptops").
+    - New rows: set created_by/created_date, updated_by/updated_date, business_details_id, enabled, active, url slug.
+    - If CSV explicitly provides order_type or shipping_type (even blank), convert blank→NULL; if omitted, leave None.
+    - Existing leaf: update only mutable fields + updated_by/updated_date.
+    Returns the final category ID.
+    """
+    path = record_data.get("category_path", "").strip()
+    if not path:
+        raise DataLoaderError(
+            message="Missing or empty 'category_path'",
+            error_type=ErrorType.VALIDATION,
+            field_name="category_path"
+        )
 
-    path_levels = [level.strip() for level in category_path_str.split('/') if level.strip()]
-    if not path_levels:
-        msg = f"Empty or invalid 'category_path' after splitting: '{category_path_str}'."
-        logger.error(f"{msg} Record: {record_data}")
-        raise DataLoaderError(message=msg, error_type=ErrorType.VALIDATION, field_name="category_path", offending_value=category_path_str)
+    # helpers
+    def _bool(val: Any) -> bool:
+        return str(val or "").strip().lower() in ("true", "1", "yes")
+    def _active(val: Any) -> str:
+        return "INACTIVE" if isinstance(val, str) and val.strip().lower()=="inactive" else "ACTIVE"
 
-    current_parent_db_id: Optional[int] = None
-    current_full_path_processed = ""
-    final_category_db_id: Optional[int] = None
+    # extract & normalize CSV fields
+    name             = record_data["name"].strip()
+    description      = record_data.get("description")
+    enabled          = _bool(record_data.get("enabled", True))
+    image_name       = record_data.get("image_name")
+    long_description = record_data.get("long_description")
+    order_type_raw   = record_data.get("order_type")   # may be absent
+    order_type       = order_type_raw.strip() if order_type_raw is not None and order_type_raw.strip() else None
+    shipping_raw     = record_data.get("shipping_type")
+    shipping_type    = shipping_raw.strip() if shipping_raw is not None and shipping_raw.strip() else None
+    active_flag      = _active(record_data.get("active"))
+    seo_description  = record_data.get("seo_description")
+    seo_keywords     = record_data.get("seo_keywords")
+    seo_title        = record_data.get("seo_title")
+    position         = record_data.get("position_on_site")
+    url              = record_data.get("url") or f"/{ServerDateTime.now_epoch_ms()}"  # fallback, but CSV-model should fill
+
+    segments = [seg.strip() for seg in path.split("/") if seg.strip()]
+    parent_id: Optional[int] = None
+    full_path = ""
+    final_id: Optional[int] = None
 
     try:
-        for i, level_name_from_path in enumerate(path_levels):
-            current_level_full_path = f"{current_full_path_processed}/{level_name_from_path}" if current_full_path_processed else level_name_from_path
-            is_last_level = (i == len(path_levels) - 1)
-            current_level_name = record_data.get("name") if is_last_level and record_data.get("name") else level_name_from_path
-            category_db_id: Optional[int] = None
+        for idx, seg in enumerate(segments):
+            full_path = f"{full_path}/{seg}" if full_path else seg
+            is_leaf = (idx == len(segments)-1)
 
-            category_db_id_from_redis_str = get_from_id_map(session_id, f"categories{DB_PK_MAP_SUFFIX}", current_level_full_path)
+            # lookup existing at this level
+            orm_name = name if is_leaf else seg
+            cat = (
+                db_session.query(CategoryOrm)
+                          .filter_by(
+                              business_details_id=business_details_id,
+                              parent_id=parent_id,
+                              name=orm_name
+                          )
+                          .first()
+            )
 
-            if category_db_id_from_redis_str is not None:
-                category_db_id = int(category_db_id_from_redis_str)
-                logger.debug(f"Redis cache hit for category path '{current_level_full_path}' -> DB ID {category_db_id}")
-                if is_last_level:
-                    existing_category_orm = db_session.query(CategoryOrm).filter_by(id=category_db_id, business_details_id=business_details_id).first()
-                    if existing_category_orm:
-                        logger.info(f"Updating metadata for existing category: '{current_level_full_path}' (ID: {category_db_id})")
-                        existing_category_orm.description = record_data.get("description", existing_category_orm.description)
-                        existing_category_orm.enabled = record_data.get("enabled", existing_category_orm.enabled)
-                        existing_category_orm.image_name = record_data.get("image_name", existing_category_orm.image_name)
-                        existing_category_orm.long_description = record_data.get("long_description", existing_category_orm.long_description)
-                        existing_category_orm.order_type = record_data.get("order_type", existing_category_orm.order_type)
-                        existing_category_orm.shipping_type = record_data.get("shipping_type", existing_category_orm.shipping_type)
-                        existing_category_orm.active = record_data.get("active", existing_category_orm.active)
-                        existing_category_orm.seo_description = record_data.get("seo_description", existing_category_orm.seo_description)
-                        existing_category_orm.seo_keywords = record_data.get("seo_keywords", existing_category_orm.seo_keywords)
-                        existing_category_orm.seo_title = record_data.get("seo_title", existing_category_orm.seo_title)
-                        existing_category_orm.url = record_data.get("url", existing_category_orm.url)
-                        existing_category_orm.position_on_site = record_data.get("position_on_site", existing_category_orm.position_on_site)
-                    else:
-                        msg = f"Category ID {category_db_id} for path '{current_level_full_path}' found in Redis but not in DB or for wrong business {business_details_id}."
-                        logger.error(msg)
-                        raise DataLoaderError(message=msg, error_type=ErrorType.LOOKUP, field_name="category_path", offending_value=current_level_full_path)
+            if cat:
+                # update only leaf‐level metadata
+                if is_leaf:
+                    logger.info(f"Updating category '{full_path}' (ID={cat.id})")
+                    cat.description      = description      or cat.description
+                    cat.enabled          = enabled
+                    cat.image_name       = image_name       or cat.image_name
+                    cat.long_description = long_description or cat.long_description
+                    if "order_type" in record_data:
+                        cat.order_type    = order_type
+                    if "shipping_type" in record_data:
+                        cat.shipping_type = shipping_type
+                    cat.active           = active_flag
+                    cat.seo_description  = seo_description  or cat.seo_description
+                    cat.seo_keywords     = seo_keywords     or cat.seo_keywords
+                    cat.seo_title        = seo_title        or cat.seo_title
+                    cat.url              = url              or cat.url
+                    cat.position_on_site = position or cat.position_on_site
+                    cat.updated_by       = user_id
+                    cat.updated_date     = ServerDateTime.now_epoch_ms()
+                final_id = cat.id
+
             else:
-                db_category = db_session.query(CategoryOrm).filter_by(business_details_id=business_details_id, name=current_level_name, parent_id=current_parent_db_id).first()
-                if db_category:
-                    category_db_id = db_category.id
-                    logger.debug(f"DB hit for category: '{current_level_name}' (Parent ID: {current_parent_db_id}) -> DB ID {category_db_id}")
-                    if is_last_level:
-                        logger.info(f"Updating metadata for existing category (DB query): '{current_level_full_path}' (ID: {category_db_id})")
-                        db_category.description = record_data.get("description", db_category.description)
-                        db_category.enabled = record_data.get("enabled", db_category.enabled)
-                        db_category.image_name = record_data.get("image_name", db_category.image_name)
-                        db_category.long_description = record_data.get("long_description", db_category.long_description)
-                        db_category.order_type = record_data.get("order_type", db_category.order_type)
-                        db_category.shipping_type = record_data.get("shipping_type", db_category.shipping_type)
-                        db_category.active = record_data.get("active", db_category.active)
-                        db_category.seo_description = record_data.get("seo_description", db_category.seo_description)
-                        db_category.seo_keywords = record_data.get("seo_keywords", db_category.seo_keywords)
-                        db_category.seo_title = record_data.get("seo_title", db_category.seo_title)
-                        db_category.url = record_data.get("url", db_category.url)
-                        db_category.position_on_site = record_data.get("position_on_site", db_category.position_on_site)
-                else:
-                    logger.info(f"Creating new category level: Name='{current_level_name}', Parent DB ID='{current_parent_db_id}'")
-                    orm_fields = {
-                        "name": current_level_name, "parent_id": current_parent_db_id, "business_details_id": business_details_id,
-                        "description": f"Category: {current_level_name}", "enabled": True,
-                    }
-                    if is_last_level:
-                        orm_fields.update({
-                            "description": record_data.get("description"), "enabled": record_data.get("enabled", True),
-                            "image_name": record_data.get("image_name"), "long_description": record_data.get("long_description"),
-                            "order_type": record_data.get("order_type"), "shipping_type": record_data.get("shipping_type"),
-                            "active": record_data.get("active"), "seo_description": record_data.get("seo_description"),
-                            "seo_keywords": record_data.get("seo_keywords"), "seo_title": record_data.get("seo_title"),
-                            "url": record_data.get("url"), "position_on_site": record_data.get("position_on_site"),
-                        })
-                    new_category_orm = CategoryOrm(**orm_fields)
-                    db_session.add(new_category_orm)
-                    db_session.flush()
-                    category_db_id = new_category_orm.id
-                    if category_db_id is None:
-                        msg = f"Failed to obtain DB ID for new category: '{current_level_name}' after flush."
-                        logger.error(msg)
-                        raise DataLoaderError(message=msg, error_type=ErrorType.DATABASE, field_name="category_path", offending_value=current_level_full_path)
-                    logger.info(f"Created new category '{current_level_name}' with DB ID {category_db_id}")
+                # create new
+                now = ServerDateTime.now_epoch_ms()
+                payload: Dict[str, Any] = {
+                    "business_details_id": business_details_id,
+                    "parent_id": parent_id,
+                    "name": orm_name,
+                    "created_by": user_id,
+                    "created_date": now,
+                    "updated_by": user_id,
+                    "updated_date": now,
+                    "enabled": enabled if is_leaf else True,
+                    "active": active_flag,
+                    "description": description if is_leaf else seg,
+                    "url": url,
+                }
+                if is_leaf:
+                    payload.update({
+                        "image_name":       image_name,
+                        "long_description": long_description,
+                        "order_type":       order_type,
+                        "shipping_type":    shipping_type,
+                        "seo_description":  seo_description,
+                        "seo_keywords":     seo_keywords,
+                        "seo_title":        seo_title,
+                        "position_on_site": position,
+                    })
+                new_cat = CategoryOrm(**payload)
+                db_session.add(new_cat)
+                db_session.flush()
+                final_id = new_cat.id
+                logger.info(f"Created category '{full_path}' (ID={final_id})")
 
-                if db_pk_redis_pipeline is not None and category_db_id is not None:
-                     add_to_id_map(session_id, f"categories{DB_PK_MAP_SUFFIX}", current_level_full_path, category_db_id, pipeline=db_pk_redis_pipeline)
-                elif category_db_id is not None:
-                     add_to_id_map(session_id, f"categories{DB_PK_MAP_SUFFIX}", current_level_full_path, category_db_id)
+            # cache in Redis
+            add_to_id_map(
+                session_id,
+                f"categories{DB_PK_MAP_SUFFIX}",
+                full_path,
+                final_id,
+                pipeline=db_pk_redis_pipeline
+            )
 
-            current_parent_db_id = category_db_id
-            current_full_path_processed = current_level_full_path
-            if is_last_level:
-                final_category_db_id = category_db_id
+            parent_id = final_id  # type: ignore
 
-        return final_category_db_id
+        return final_id  # type: ignore
 
-    except DataLoaderError:
-        raise
     except IntegrityError as e:
-        logger.error(f"DB integrity error processing category path '{category_path_str}': {e.orig}", exc_info=False)
+        logger.error(f"DB integrity error for '{path}': {e.orig}")
         raise DataLoaderError(
-            message=f"Database integrity error for category path '{category_path_str}': {str(e.orig)}",
+            message=f"Integrity error for '{path}': {e.orig}",
             error_type=ErrorType.DATABASE,
             field_name="category_path",
-            offending_value=category_path_str,
+            offending_value=path,
             original_exception=e
         )
     except DataError as e:
-        logger.error(f"DB data error processing category path '{category_path_str}': {e.orig}", exc_info=False)
+        logger.error(f"DB data error for '{path}': {e.orig}")
         raise DataLoaderError(
-            message=f"Database data error for category path '{category_path_str}': {str(e.orig)}", # e.g. value too long for column
-            error_type=ErrorType.DATABASE, # Could also be VALIDATION if data is simply wrong type/length
-            field_name="category_path", # Or more specific if determinable
-            offending_value=category_path_str, # Or specific field's value if known
+            message=f"Data error for '{path}': {e.orig}",
+            error_type=ErrorType.DATABASE,
+            field_name="category_path",
+            offending_value=path,
             original_exception=e
         )
     except Exception as e:
-        logger.error(f"Unexpected error processing category record (path: '{category_path_str}'): {e}", exc_info=True)
+        logger.exception(f"Unexpected error for '{path}'")
         raise DataLoaderError(
-            message=f"Unexpected error processing category path '{category_path_str}': {str(e)}",
+            message=f"Unexpected error for category path '{path}': {str(e)}",
             error_type=ErrorType.UNEXPECTED_ROW_ERROR,
             field_name="category_path",
-            offending_value=category_path_str,
+            offending_value=path,
             original_exception=e
         )
-
+             
 def load_brand_to_db(
     db_session: Session,
     business_details_id: int,
