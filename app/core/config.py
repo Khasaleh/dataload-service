@@ -9,12 +9,14 @@ def strip_whitespace(cls, v):
     if isinstance(v, str):
         return v.strip()
     return v
+
 @field_validator('WASABI_ACCESS_KEY')
 @classmethod
 def validate_ascii(cls, v):
     if not all(ord(c) < 128 for c in v):
         raise ValueError("WASABI_ACCESS_KEY contains invalid non-ASCII characters")
     return v.strip()
+
 
 class Settings(BaseSettings):
     # Environment loading configuration
@@ -29,7 +31,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     RELOAD: bool = False
 
-    # Database Configuration
+    # Primary Database Configuration
     DB_DRIVER: str = "postgresql+psycopg2"
     DB_USER: str
     DB_PASSWORD: str
@@ -38,7 +40,11 @@ class Settings(BaseSettings):
     DB_NAME: str
     DATABASE_URL: Optional[PostgresDsn] = None
 
-    # Schema names
+    # Secondary Database Configuration (for return_policies)
+    DB_NAME2: Optional[str] = None
+    DATABASE_URL_DB2: Optional[PostgresDsn] = None
+
+    # Schema names (shared)
     CATALOG_SERVICE_SCHEMA: str = "public"
     BUSINESS_SERVICE_SCHEMA: str = "public"
 
@@ -49,6 +55,7 @@ class Settings(BaseSettings):
     WASABI_BUCKET_NAME: str
     WASABI_REGION: Optional[str] = None
     LOCAL_STORAGE_PATH: str = "/data/uploads"
+
     # JWT Authentication Configuration
     JWT_SECRET: str = Field(..., validation_alias="SECRET_KEY")
     JWT_ALGORITHM: str = "HS512"
@@ -60,39 +67,54 @@ class Settings(BaseSettings):
     REDIS_DB_ID_MAPPING: int = 1
     CELERY_BROKER_DB_NUMBER: int = 0
     CELERY_RESULT_BACKEND_DB_NUMBER: int = 0
-    REDIS_SESSION_TTL_SECONDS: int = 86400
-
-    # Redis password from Kubernetes secret or environment variable
-    REDIS_PASSWORD: str = Field(..., env="REDIS_PASSWORD")  # This will be pulled from the environment (Kubernetes secret)
+    REDIS_PASSWORD: str = Field(...)
 
     CELERY_BROKER_URL: Optional[RedisDsn] = None
     CELERY_RESULT_BACKEND_URL: Optional[RedisDsn] = None
 
+    # Map load_types to which DB key to use
+    # Only 'return_policies' will go to DB2. Everything else uses the default DATABASE_URL.
+    LOADTYPE_DB_MAP: dict[str, str] = {
+        "return_policies": "DB2"
+    }
+
     @model_validator(mode='after')
     def _construct_derived_urls(self) -> 'Settings':
-        # Construct the DATABASE_URL if not provided directly
+        # 1) Build primary DATABASE_URL if absent
         if self.DATABASE_URL is None:
-            if all([self.DB_DRIVER, self.DB_USER, self.DB_PASSWORD, self.DB_HOST, self.DB_PORT, self.DB_NAME]):
-                self.DATABASE_URL = PostgresDsn(
-                    f"{self.DB_DRIVER}://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
-                )
-
-        # Construct Redis connection URLs for Celery
-        if self.CELERY_BROKER_URL is None:
-            self.CELERY_BROKER_URL = RedisDsn(
-                f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.CELERY_BROKER_DB_NUMBER}"
+            self.DATABASE_URL = PostgresDsn(
+                f"{self.DB_DRIVER}://{self.DB_USER}:{self.DB_PASSWORD}"
+                f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
             )
 
+        # 2) Build secondary DATABASE_URL_DB2 if absent
+        if self.DATABASE_URL_DB2 is None and self.DB_NAME2:
+            self.DATABASE_URL_DB2 = PostgresDsn(
+                f"{self.DB_DRIVER}://{self.DB_USER}:{self.DB_PASSWORD}"
+                f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME2}"
+            )
+
+        # 3) Construct Celery Redis URLs if absent
+        if self.CELERY_BROKER_URL is None:
+            self.CELERY_BROKER_URL = RedisDsn(
+                f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}"
+                f":{self.REDIS_PORT}/{self.CELERY_BROKER_DB_NUMBER}"
+            )
         if self.CELERY_RESULT_BACKEND_URL is None:
             self.CELERY_RESULT_BACKEND_URL = RedisDsn(
-                f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.CELERY_RESULT_BACKEND_DB_NUMBER}"
+                f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}"
+                f":{self.REDIS_PORT}/{self.CELERY_RESULT_BACKEND_DB_NUMBER}"
             )
 
         return self
 
     @property
     def computed_redis_dsn_id_mapping(self) -> str:
-        return f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB_ID_MAPPING}"
+        return (
+            f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}"
+            f":{self.REDIS_PORT}/{self.REDIS_DB_ID_MAPPING}"
+        )
+
 
 # Instantiate settings
 settings = Settings()
@@ -100,12 +122,8 @@ settings = Settings()
 # Debug output for development
 if settings.ENVIRONMENT == "development":
     print("--- Loaded Application Settings ---")
-    for key, value in settings.dict().items():
-        if "secret" in key.lower() or "password" in key.lower():
-            print(f"{key}: ******")
-        else:
-            print(f"{key}: {value}")
+    print(f"DATABASE_URL:    {settings.DATABASE_URL}")
+    print(f"DATABASE_URL_DB2:{settings.DATABASE_URL_DB2}")
+    print(f"CELERY_BROKER_URL:    {settings.CELERY_BROKER_URL}")
+    print(f"CELERY_RESULT_BACKEND_URL: {settings.CELERY_RESULT_BACKEND_URL}")
     print("--- End Application Settings ---")
-    print(f"DATABASE_URL (from validator or env): {settings.DATABASE_URL}")
-    print(f"CELERY_BROKER_URL (from validator or env): {settings.CELERY_BROKER_URL}")
-    print(f"CELERY_RESULT_BACKEND_URL (from validator or env): {settings.CELERY_RESULT_BACKEND_URL}")

@@ -13,12 +13,16 @@ from app.dependencies.auth import get_current_user
 from app.db.models import UploadSessionOrm
 from app.db.connection import get_session
 from app.models import ErrorDetailModel, ErrorType
-from app.services.storage import upload_file as local_upload_file, delete_file as local_delete_file
+from app.services.storage import upload_file as local_upload_file
 from app.tasks.load_jobs import (
-    process_brands_file, process_attributes_file,
-    process_return_policies_file, process_products_file,
-    process_product_items_file, process_product_prices_file,
-    process_meta_tags_file, process_categories_file
+    process_brands_file,
+    process_attributes_file,
+    process_return_policies_file,
+    process_products_file,
+    process_product_items_file,
+    process_product_prices_file,
+    process_meta_tags_file,
+    process_categories_file,
 )
 from pydantic import BaseModel
 
@@ -30,16 +34,25 @@ UPLOAD_SEQUENCE_DEPENDENCIES = {
     "product_items": ["products"],
     "product_prices": ["products"],
     "meta_tags": ["products"],
-    "categories": ["products"]
+    "categories": ["products"],
 }
 
 ROLE_PERMISSIONS = {
-    "ROLE_ADMIN": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags", "categories"},
-    "ROLE_INVENTORY_SPECIALIST": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags", "categories"},
-    "ROLE_IT_TECHNICAL_SUPPORT": {"brands", "attributes", "return_policies", "products", "product_items", "product_prices", "meta_tags", "categories"},
+    "ROLE_ADMIN": {
+        "brands", "attributes", "return_policies", "products",
+        "product_items", "product_prices", "meta_tags", "categories"
+    },
+    "ROLE_INVENTORY_SPECIALIST": {
+        "brands", "attributes", "return_policies", "products",
+        "product_items", "product_prices", "meta_tags", "categories"
+    },
+    "ROLE_IT_TECHNICAL_SUPPORT": {
+        "brands", "attributes", "return_policies", "products",
+        "product_items", "product_prices", "meta_tags", "categories"
+    },
     "ROLE_MARKETING_COORDINATOR": {"product_prices", "meta_tags"},
     "ROLE_STORE_MANAGER": {"return_policies"},
-    "viewer": set()
+    "viewer": set(),
 }
 
 CELERY_TASK_MAP = {
@@ -52,6 +65,7 @@ CELERY_TASK_MAP = {
     "meta_tags": process_meta_tags_file,
     "categories": process_categories_file,
 }
+
 
 class UploadResponseModel(BaseModel):
     message: str
@@ -68,7 +82,7 @@ def create_upload_session_in_db_sync(
     user_business_id: int,
     load_type_str: str,
     original_filename_str: str,
-    storage_path_str: str
+    storage_path_str: str,
 ) -> UploadSessionOrm:
     db = None
     try:
@@ -95,19 +109,20 @@ def create_upload_session_in_db_sync(
         if db:
             db.close()
 
+
 @router.post(
     "/api/v1/business/{business_id}/upload/{load_type}",
     summary="Upload catalog file to local storage, create DB session, and queue processing",
     status_code=202,
-    response_model=UploadResponseModel
+    response_model=UploadResponseModel,
 )
 async def upload_file_and_queue_for_processing(
     business_id: str,
     load_type: str,
     file: UploadFile = File(...),
-    user: dict = Depends(get_current_user)
+    user: dict = Depends(get_current_user),
 ):
-    # Validate business
+    # 1) Validate and authorize
     try:
         biz_id = int(business_id)
     except ValueError:
@@ -115,52 +130,54 @@ async def upload_file_and_queue_for_processing(
     if biz_id != user["business_id"]:
         raise HTTPException(403, "Unauthorized business_id.")
 
-    # Check permissions
     role = user.get("roles", ["viewer"])[0]
     if role not in ROLE_PERMISSIONS or load_type not in ROLE_PERMISSIONS[role]:
         raise HTTPException(403, "Insufficient permissions.")
     if load_type not in CELERY_TASK_MAP:
         raise HTTPException(400, f"Unsupported load_type: {load_type}")
-    if not file.filename.lower().endswith('.csv'):
+    if not file.filename.lower().endswith(".csv"):
         raise HTTPException(400, "Only CSV files allowed.")
 
-    # Read file content
+    # 2) Read file into memory
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(400, "Empty file.")
     file_stream = BytesIO(file_bytes)
 
-    # Prepare session and storage
+    # 3) Create an UploadSession record
     session_id = str(uuid.uuid4())
     storage_key = f"uploads/{biz_id}/{session_id}/{load_type}/{file.filename}"
-
     session_orm = await run_in_threadpool(
         create_upload_session_in_db_sync,
-        session_id, biz_id, load_type, file.filename, storage_key
+        session_id,
+        biz_id,
+        load_type,
+        file.filename,
+        storage_key,
     )
 
-    # Store locally
+    # 4) Save to local storage
     try:
         tracking_id = await run_in_threadpool(
-            local_upload_file,
-            file_stream,
-            str(biz_id),
-            storage_key
+            local_upload_file, file_stream, str(biz_id), storage_key
         )
+
+        # 5) Dispatch Celery task (always pass user_id)
+        task = CELERY_TASK_MAP[load_type].delay(
+            business_id=str(biz_id),
+            session_id=session_orm.session_id,
+            wasabi_file_path=session_orm.wasabi_path,
+            original_filename=session_orm.original_filename,
+            user_id=user["user_id"],
+        )
+        logger.info("Queued Celery task %s for session %s", task.id, session_id)
+
     except Exception as e_loc:
-        logger.error("Local storage upload failed: %s", e_loc, exc_info=True)
-        raise HTTPException(500, "Failed saving file locally.")
+        logger.error("Error during storage or dispatch: %s", e_loc, exc_info=True)
+        # Optionally mark session as failed_storage_upload here...
+        raise HTTPException(500, "Failed storing file or queueing processing.")
 
-        # Dispatch Celery task including user_id
-    task = CELERY_TASK_MAP[load_type].delay(
-        business_id=str(biz_id),
-        session_id=session_orm.session_id,
-        wasabi_file_path=session_orm.wasabi_path,
-        original_filename=session_orm.original_filename,
-        user_id=user['user_id']
-    )
-    logger.info("Queued Celery task %s for session %s", task.id, session_id)
-
+    # 6) Return initial response
     return UploadResponseModel(
         message="File accepted.",
         session_id=session_id,
@@ -168,5 +185,5 @@ async def upload_file_and_queue_for_processing(
         storage_path=storage_key,
         status=session_orm.status,
         task_id=task.id,
-        tracking_id=tracking_id
+        tracking_id=tracking_id,
     )
