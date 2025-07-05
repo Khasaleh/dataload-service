@@ -137,7 +137,7 @@ def load_category_to_db(
                     'updated_by': user_id,
                     'updated_date': now,
                     'enabled': enabled if is_leaf else True,
-                    'active': active_flag if is_leaf else 'INACTIVE',
+                    'active': active_flag,
                     'description': description if is_leaf else seg,
                 }
                 if is_leaf:
@@ -196,6 +196,7 @@ def load_category_to_db(
             offending_value=path,
             original_exception=e
         )
+        
 def load_brand_to_db(
     db_session: Session,
     business_details_id: int,
