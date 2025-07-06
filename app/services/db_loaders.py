@@ -25,6 +25,7 @@ from app.db.models import (
     ProductItemOrm,
 )
 from datetime import datetime
+from app.core.config import settings
 from app.dataload.models.price_csv import PriceCsv, PriceTypeEnum as PriceCsvTypeEnum
 from app.utils.slug import generate_slug
 from app.utils.redis_utils import add_to_id_map, get_from_id_map, DB_PK_MAP_SUFFIX
