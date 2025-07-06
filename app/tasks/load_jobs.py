@@ -3,7 +3,6 @@ import logging
 import json
 from datetime import datetime
 from celery import shared_task
-from sqlalchemy import text
 from sqlalchemy.exc import (
     OperationalError as SQLAlchemyOperationalError,
     TimeoutError as SQLAlchemyTimeoutError,
@@ -94,7 +93,6 @@ def process_csv_task(
     Generic CSV processing pipeline.
     If db_key is provided, get_session will pick the alternate DB URL.
     """
-    # pick up the correct DB connection (uses db_key if non‐None)
     db = get_session(business_id=int(business_id), db_key=db_key)
 
     _update_session_status(db, session_id, UploadJobStatus.DOWNLOADING_FILE)
@@ -198,8 +196,28 @@ def process_csv_task(
         "errors": [e.model_dump() for e in errors],
     }
 
+
+# -----------------------------------------------------------------------------
+# Celery wrapper tasks
+# -----------------------------------------------------------------------------
+
+@shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
+def process_brands_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
+    return process_csv_task(
+        business_id,
+        session_id,
+        wasabi_file_path,
+        original_filename,
+        "name",
+        "brand",
+        "brands",
+        user_id,
+    )
+
+
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 def process_return_policies_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
+    db_key = settings.LOADTYPE_DB_MAP.get("return_policies")
     return process_csv_task(
         business_id,
         session_id,
@@ -209,8 +227,9 @@ def process_return_policies_file(self, business_id, session_id, wasabi_file_path
         "rp",
         "return_policies",
         user_id,
-        db_key=settings.LOADTYPE_DB_MAP.get("return_policies"),
+        db_key=db_key,
     )
+
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 def process_attributes_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
@@ -225,21 +244,6 @@ def process_attributes_file(self, business_id, session_id, wasabi_file_path, ori
         user_id,
     )
 
-@shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_return_policies_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
-    # This one uses the alternate DB as configured in settings.LOADTYPE_DB_MAP
-    db_key = settings.LOADTYPE_DB_MAP.get("return_policies")
-    return process_csv_task(
-        business_id,
-        session_id,
-        wasabi_file_path,
-        original_filename,
-        "policy_name",
-        "rp",
-        "return_policies",
-        user_id,
-        db_key=db_key,
-    )
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 def process_products_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
@@ -254,6 +258,7 @@ def process_products_file(self, business_id, session_id, wasabi_file_path, origi
         user_id,
     )
 
+
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 def process_product_items_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
     return process_csv_task(
@@ -266,6 +271,7 @@ def process_product_items_file(self, business_id, session_id, wasabi_file_path, 
         "product_items",
         user_id,
     )
+
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 def process_product_prices_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
@@ -280,6 +286,7 @@ def process_product_prices_file(self, business_id, session_id, wasabi_file_path,
         user_id,
     )
 
+
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 def process_meta_tags_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
     return process_csv_task(
@@ -292,6 +299,7 @@ def process_meta_tags_file(self, business_id, session_id, wasabi_file_path, orig
         "meta_tags",
         user_id,
     )
+
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 def process_categories_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
