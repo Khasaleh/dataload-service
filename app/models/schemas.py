@@ -203,6 +203,28 @@ class ProductCsvModel(BaseModel):
     class Config:
         anystr_strip_whitespace = True
 
+class ProductItemModel(BaseModel):
+    product_name: str
+    variant_sku: str
+    attribute_combination: str
+    status: str
+    published: str
+    default_sku: str
+    quantity: int
+    image_urls: Optional[str] = None
+
+    @validator('product_name', 'variant_sku', 'attribute_combination', 'status', 'published', 'default_sku')
+    def item_text_fields_must_not_be_empty(cls, value):
+        if not value.strip():
+            raise ValueError('field must not be empty')
+        return value
+
+    @validator('quantity')
+    def quantity_must_be_non_negative(cls, value):
+        if value < 0:
+            raise ValueError('quantity must be non-negative')
+        return value
+
 class MetaTagModel(BaseModel):
     product_name: str
     meta_title: Optional[str] = None
