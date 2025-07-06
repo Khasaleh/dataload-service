@@ -4,7 +4,6 @@ from datetime import datetime
 from enum import Enum
 import re
 from app.utils.slug import generate_slug
-from app.models.schemas import ErrorType, DataLoaderError
 def generate_slug(input_string: str) -> str:
     slug = input_string.lower().strip()
     slug = slug.replace(' ', '-')
@@ -153,7 +152,7 @@ class ReturnPolicyCsvModel(BaseModel):
         except ValueError:
             raise ValueError("must be a valid integer")
 
-    @root_validator(skip_on_failure=True)  # added skip_on_failure
+    @root_validator(skip_on_failure=True)
     def enforce_final_policy_blankness(cls, values):
         typ = values.get("return_policy_type", "").strip().upper()
         if typ == "SALES_ARE_FINAL":
@@ -176,28 +175,6 @@ class ReturnPolicyCsvModel(BaseModel):
                 "'time_period_return' is required when 'return_policy_type' is 'SALES_RETURN_ALLOWED'."
             )
         return values
-class ProductItemModel(BaseModel):
-    product_name: str
-    variant_sku: str
-    attribute_combination: str
-    status: str
-    published: str
-    default_sku: str
-    quantity: int
-    image_urls: Optional[str] = None
-
-    @validator('product_name', 'variant_sku', 'attribute_combination', 'status', 'published', 'default_sku')
-    def item_text_fields_must_not_be_empty(cls, value):
-        if not value.strip():
-            raise ValueError('field must not be empty')
-        return value
-
-    @validator('quantity')
-    def quantity_must_be_non_negative(cls, value):
-        if value < 0:
-            raise ValueError('quantity must be non-negative')
-        return value
-
 class ProductPriceModel(BaseModel):
     product_name: str
     price: float
