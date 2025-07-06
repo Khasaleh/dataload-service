@@ -412,16 +412,17 @@ def load_return_policy_to_db(
 ) -> Dict[str, int]:
     """
     Upsert CSV-loaded return policies into the `return_policy` table.
-    - `db_session` is already connected to the correct DB (DB2 when called with db_key="DB2").
-    - Each business may only have one SALES_ARE_FINAL policy.
-    - Blank/missing numeric fields become NULL.
+    - db_session is already connected to DB2 when called with db_key="DB2".
+    - `return_type` column maps to CSV's 'return_policy_type'.
+    - `return_days` ← CSV's 'time_period_return'
+    - `return_fee`  ← CSV's 'grace_period_return' (if you prefer another mapping, adjust here).
     """
     if not records_data:
         return {"inserted": 0, "updated": 0}
 
     summary = {"inserted": 0, "updated": 0}
 
-    # Ensure at most one final in CSV
+    # Ensure at most one final policy in CSV
     finals = [r for r in records_data if r.get("return_policy_type") == "SALES_ARE_FINAL"]
     if len(finals) > 1:
         raise DataLoaderError(
@@ -429,16 +430,7 @@ def load_return_policy_to_db(
             error_type=ErrorType.VALIDATION
         )
 
-    # Check existing final in DB by policy_type
-    existing_final = (
-        db_session
-        .query(ReturnPolicyOrm)
-        .filter_by(
-            business_details_id=business_details_id,
-            policy_type="SALES_ARE_FINAL"          # ← use policy_type here
-        )
-        .first()
-    )
+    now = datetime.utcnow()
 
     def _parse_int(val: Any) -> Optional[int]:
         if val is None or (isinstance(val, str) and not val.strip()):
@@ -448,13 +440,22 @@ def load_return_policy_to_db(
         except ValueError:
             return None
 
-    now = datetime.utcnow()
+    # Look for an existing final policy in DB
+    existing_final = (
+        db_session
+        .query(ReturnPolicyOrm)
+        .filter_by(
+            business_details_id=business_details_id,
+            return_type="SALES_ARE_FINAL"
+        )
+        .first()
+    )
 
     try:
         for rec in records_data:
-            name   = rec.get("policy_name")
-            typ    = rec.get("return_policy_type")
-            grace  = _parse_int(rec.get("grace_period_return"))
+            name = rec.get("policy_name")
+            typ  = rec.get("return_policy_type")
+            grace = _parse_int(rec.get("grace_period_return"))
             period = _parse_int(rec.get("time_period_return"))
 
             # Enforce single final
@@ -465,7 +466,7 @@ def load_return_policy_to_db(
                         error_type=ErrorType.VALIDATION
                     )
 
-            # Lookup by business + name
+            # Lookup by business + policy_name
             existing = (
                 db_session
                 .query(ReturnPolicyOrm)
@@ -478,27 +479,26 @@ def load_return_policy_to_db(
 
             if existing:
                 # UPDATE
-                existing.grace_period_return = grace
-                existing.policy_type          = typ   # ← update this column
-                existing.time_period_return   = period
-                existing.updated_date         = now
+                existing.return_type = typ
+                existing.return_days = period
+                existing.return_fee  = grace
+                existing.updated_date_ts = now
                 summary["updated"] += 1
-
             else:
                 # INSERT
                 new = ReturnPolicyOrm(
                     business_details_id=business_details_id,
-                    created_date=now,
-                    updated_date=now,
+                    created_date_ts=now,
+                    updated_date_ts=now,
                     policy_name=name,
-                    policy_type=typ,                   # ← set this column
-                    grace_period_return=grace,
-                    time_period_return=period,
+                    return_type=typ,
+                    return_days=period,
+                    return_fee=grace,
                 )
                 db_session.add(new)
                 summary["inserted"] += 1
 
-        # commit is done by caller
+        # Caller will commit
         return summary
 
     except IntegrityError as e:
@@ -524,9 +524,7 @@ def load_return_policy_to_db(
             message=f"Unexpected error in return policy loader: {str(e)}",
             error_type=ErrorType.UNEXPECTED_ROW_ERROR,
             original_exception=e
-        )        
-        
-        
+        )      
         
 def load_price_to_db(
     db_session: Session,
