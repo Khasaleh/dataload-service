@@ -413,16 +413,16 @@ def load_return_policy_to_db(
     """
     Upsert CSV-loaded return policies into the `return_policy` table.
     - db_session is already connected to DB2 when called with db_key="DB2".
-    - `return_type` column maps to CSV's 'return_policy_type'.
-    - `return_days` ← CSV's 'time_period_return'
-    - `return_fee`  ← CSV's 'grace_period_return' (if you prefer another mapping, adjust here).
+    - CSV field 'return_policy_type' → ORM.col return_policy_type
+    - CSV field 'time_period_return'  → ORM.col time_period_return
+    - CSV field 'grace_period_return' → ORM.col grace_period_return
     """
     if not records_data:
         return {"inserted": 0, "updated": 0}
 
     summary = {"inserted": 0, "updated": 0}
 
-    # Ensure at most one final policy in CSV
+    # Validate at most one SALES_ARE_FINAL in CSV
     finals = [r for r in records_data if r.get("return_policy_type") == "SALES_ARE_FINAL"]
     if len(finals) > 1:
         raise DataLoaderError(
@@ -440,22 +440,22 @@ def load_return_policy_to_db(
         except ValueError:
             return None
 
-    # Look for an existing final policy in DB
+    # Look for an existing final in DB
     existing_final = (
         db_session
         .query(ReturnPolicyOrm)
         .filter_by(
             business_details_id=business_details_id,
-            return_type="SALES_ARE_FINAL"
+            return_policy_type="SALES_ARE_FINAL"
         )
         .first()
     )
 
     try:
         for rec in records_data:
-            name = rec.get("policy_name")
-            typ  = rec.get("return_policy_type")
-            grace = _parse_int(rec.get("grace_period_return"))
+            name   = rec.get("policy_name")
+            typ    = rec.get("return_policy_type")
+            grace  = _parse_int(rec.get("grace_period_return"))
             period = _parse_int(rec.get("time_period_return"))
 
             # Enforce single final
@@ -479,30 +479,31 @@ def load_return_policy_to_db(
 
             if existing:
                 # UPDATE
-                existing.return_type = typ
-                existing.return_days = period
-                existing.return_fee  = grace
-                existing.updated_date_ts = now
+                existing.return_policy_type   = typ
+                existing.time_period_return   = period
+                existing.grace_period_return  = grace
+                existing.updated_date         = now
                 summary["updated"] += 1
             else:
                 # INSERT
                 new = ReturnPolicyOrm(
-                    business_details_id=business_details_id,
-                    created_date_ts=now,
-                    updated_date_ts=now,
-                    policy_name=name,
-                    return_type=typ,
-                    return_days=period,
-                    return_fee=grace,
+                    business_details_id    = business_details_id,
+                    created_date           = now,
+                    updated_date           = now,
+                    policy_name            = name,
+                    return_policy_type     = typ,
+                    grace_period_return    = grace,
+                    time_period_return     = period,
                 )
                 db_session.add(new)
                 summary["inserted"] += 1
 
-        # Caller will commit
+        # caller commits
         return summary
 
     except IntegrityError as e:
         db_session.rollback()
+        logger.error("DB integrity error loading return policies: %s", e.orig)
         raise DataLoaderError(
             message=f"Integrity error loading return policies: {e.orig}",
             error_type=ErrorType.DATABASE,
@@ -510,6 +511,7 @@ def load_return_policy_to_db(
         )
     except DataError as e:
         db_session.rollback()
+        logger.error("DB data error loading return policies: %s", e.orig)
         raise DataLoaderError(
             message=f"Data error loading return policies: {e.orig}",
             error_type=ErrorType.DATABASE,
@@ -520,11 +522,14 @@ def load_return_policy_to_db(
         raise
     except Exception as e:
         db_session.rollback()
+        logger.exception("Unexpected error in return policy loader")
         raise DataLoaderError(
-            message=f"Unexpected error in return policy loader: {str(e)}",
+            message=f"Unexpected error: {str(e)}",
             error_type=ErrorType.UNEXPECTED_ROW_ERROR,
             original_exception=e
-        )      
+        )
+
+  
         
 def load_price_to_db(
     db_session: Session,
