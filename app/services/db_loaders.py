@@ -429,13 +429,13 @@ def load_return_policy_to_db(
             error_type=ErrorType.VALIDATION
         )
 
-    # Check existing final in DB
+    # Check existing final in DB by policy_type
     existing_final = (
         db_session
         .query(ReturnPolicyOrm)
         .filter_by(
             business_details_id=business_details_id,
-            return_policy_type="SALES_ARE_FINAL"
+            policy_type="SALES_ARE_FINAL"          # ← use policy_type here
         )
         .first()
     )
@@ -452,14 +452,13 @@ def load_return_policy_to_db(
 
     try:
         for rec in records_data:
-            name = rec.get("policy_name")
-            typ = rec.get("return_policy_type")
-            grace = _parse_int(rec.get("grace_period_return"))
+            name   = rec.get("policy_name")
+            typ    = rec.get("return_policy_type")
+            grace  = _parse_int(rec.get("grace_period_return"))
             period = _parse_int(rec.get("time_period_return"))
 
             # Enforce single final
             if typ == "SALES_ARE_FINAL" and existing_final:
-                # if updating that row, OK; else error
                 if name != existing_final.policy_name:
                     raise DataLoaderError(
                         message="Business already has a SALES_ARE_FINAL policy; cannot add another.",
@@ -480,9 +479,9 @@ def load_return_policy_to_db(
             if existing:
                 # UPDATE
                 existing.grace_period_return = grace
-                existing.return_policy_type = typ
-                existing.time_period_return = period
-                existing.updated_date = now
+                existing.policy_type          = typ   # ← update this column
+                existing.time_period_return   = period
+                existing.updated_date         = now
                 summary["updated"] += 1
 
             else:
@@ -492,14 +491,14 @@ def load_return_policy_to_db(
                     created_date=now,
                     updated_date=now,
                     policy_name=name,
-                    return_policy_type=typ,
+                    policy_type=typ,                   # ← set this column
                     grace_period_return=grace,
                     time_period_return=period,
                 )
                 db_session.add(new)
                 summary["inserted"] += 1
 
-        # flush/commit happen in caller
+        # commit is done by caller
         return summary
 
     except IntegrityError as e:
@@ -525,8 +524,7 @@ def load_return_policy_to_db(
             message=f"Unexpected error in return policy loader: {str(e)}",
             error_type=ErrorType.UNEXPECTED_ROW_ERROR,
             original_exception=e
-        )     
-        
+        )        
         
         
         
