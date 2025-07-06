@@ -141,6 +141,7 @@ def process_csv_task(
         processed = summary.get("inserted", 0) + summary.get("updated", 0)
 
     elif map_type == "return_policies":
+        # this loader writes into DB2
         summary = load_return_policy_to_db(db, int(business_id), validated, session_id, None)
         processed = summary.get("inserted", 0) + summary.get("updated", 0)
 
@@ -197,20 +198,18 @@ def process_csv_task(
         "errors": [e.model_dump() for e in errors],
     }
 
-
-# -- Celery task wrappers -- #
-# Only `return_policies` picks up the alternate DB; others use the default.
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_brands_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
+def process_return_policies_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
     return process_csv_task(
         business_id,
         session_id,
         wasabi_file_path,
         original_filename,
-        "name",
-        "brand",
-        "brands",
+        "policy_name",
+        "rp",
+        "return_policies",
         user_id,
+        db_key=settings.LOADTYPE_DB_MAP.get("return_policies"),
     )
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)

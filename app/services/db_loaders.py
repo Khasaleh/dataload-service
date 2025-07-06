@@ -30,6 +30,7 @@ from app.utils.slug import generate_slug
 from app.utils.redis_utils import add_to_id_map, get_from_id_map, DB_PK_MAP_SUFFIX
 from app.exceptions import DataLoaderError
 from app.models.schemas import ErrorType
+from app.db.models import ReturnPolicyOrm
 
 logger = logging.getLogger(__name__)
 
@@ -402,102 +403,133 @@ def load_attribute_to_db(
         )
 
 def load_return_policy_to_db(
-    db_session: Session,
     business_details_id: int,
     records_data: List[Dict[str, Any]],
     session_id: str,
-    db_pk_redis_pipeline: Any
+    db_pk_redis_pipeline: Any = None
 ) -> Dict[str, int]:
+    """
+    Upsert CSV-loaded return policies into the `return_policy` table in DB2.
+    - Each business may only have one SALES_ARE_FINAL policy.
+    - Timestamps are stored as UTC datetimes.
+    - Blank/missing numeric fields become NULL.
+    """
+    # early exit
     if not records_data:
         return {"inserted": 0, "updated": 0, "errors": 0}
 
+    # pick the right DB
+    db_key = settings.LOADTYPE_DB_MAP.get("return_policies")
+    db: Session = get_session(business_id=business_details_id, db_key=db_key)
+
     summary = {"inserted": 0, "updated": 0, "errors": 0}
 
-    processed_records_for_bulk = []
-    for record in records_data:
-        processed_record = record.copy()
-        if record.get("return_policy_type") == "SALES_ARE_FINAL":
-            processed_record["policy_name"] = None
-            processed_record["time_period_return"] = None
-        if "time_period_return" in processed_record:
-            processed_record["return_days"] = processed_record.pop("time_period_return")
-        if "created_date" in processed_record:
-            processed_record["created_date_ts"] = processed_record.pop("created_date")
-        if "updated_date" in processed_record:
-            processed_record["updated_date_ts"] = processed_record.pop("updated_date")
-        processed_records_for_bulk.append(processed_record)
+    # count how many SALES_ARE_FINAL in this batch
+    finals_in_csv = [r for r in records_data if r.get("return_policy_type") == "SALES_ARE_FINAL"]
+    if len(finals_in_csv) > 1:
+        raise DataLoaderError(
+            message="CSV contains more than one SALES_ARE_FINAL policy",
+            error_type=ErrorType.VALIDATION
+        )
 
-    records_with_id_in_csv = [r for r in processed_records_for_bulk if r.get("id") is not None]
-    records_without_id_in_csv = [r for r in processed_records_for_bulk if r.get("id") is None]
-
-    updates_list_of_dicts = []
-    inserts_list_of_dicts = []
+    # see if DB already has one
+    existing_final = (
+        db.query(ReturnPolicyOrm)
+          .filter_by(business_details_id=business_details_id, return_policy_type="SALES_ARE_FINAL")
+          .first()
+    )
 
     try:
-        if records_with_id_in_csv:
-            ids_from_csv = [r['id'] for r in records_with_id_in_csv]
-            existing_policies_by_id_query = db_session.query(ReturnPolicyOrm).filter(
-                ReturnPolicyOrm.business_details_id == business_details_id,
-                ReturnPolicyOrm.id.in_(ids_from_csv)
+        for rec in records_data:
+            name = rec.get("policy_name")
+            typ  = rec.get("return_policy_type")
+            grace_raw  = rec.get("grace_period_return")
+            period_raw = rec.get("time_period_return")
+
+            # parse integers or None
+            def parse_int(v):
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    return None
+
+            grace  = parse_int(grace_raw)
+            period = parse_int(period_raw)
+            now    = datetime.utcnow()
+
+            # enforce single final
+            if typ == "SALES_ARE_FINAL" and existing_final:
+                # if updating that same row, OK; else error
+                if name != existing_final.policy_name:
+                    raise DataLoaderError(
+                        message="Business already has a SALES_ARE_FINAL policy; cannot add another.",
+                        error_type=ErrorType.VALIDATION
+                    )
+
+            # lookup by name + business
+            existing = (
+                db.query(ReturnPolicyOrm)
+                  .filter_by(business_details_id=business_details_id, policy_name=name)
+                  .first()
             )
-            existing_policies_by_id_map = {p.id: p for p in existing_policies_by_id_query.all()}
 
-            for record in records_with_id_in_csv:
-                csv_id = record['id']
-                if csv_id in existing_policies_by_id_map:
-                    update_data = record.copy()
-                    updates_list_of_dicts.append(update_data)
-                else:
-                    logger.warning(f"Return policy ID '{csv_id}' provided in CSV not found for business {business_details_id}. Will attempt to process as new if name matches or insert.")
-                    records_without_id_in_csv.append(record)
-                    summary["errors"] +=1
+            if existing:
+                # UPDATE
+                existing.grace_period_return = grace
+                existing.return_policy_type = typ
+                existing.time_period_return = period
+                existing.updated_date = now
+                summary["updated"] += 1
 
-        if records_without_id_in_csv:
-            policy_names_to_check = {r['policy_name'] for r in records_without_id_in_csv if r.get('policy_name')}
-            existing_policies_by_name_map = {}
-            if policy_names_to_check:
-                existing_policies_by_name_query = db_session.query(ReturnPolicyOrm).filter(
-                    ReturnPolicyOrm.business_details_id == business_details_id,
-                    ReturnPolicyOrm.policy_name.in_(policy_names_to_check)
+            else:
+                # INSERT
+                new = ReturnPolicyOrm(
+                    business_details_id=business_details_id,
+                    created_date=now,
+                    updated_date=now,
+                    policy_name=name,
+                    return_policy_type=typ,
+                    grace_period_return=grace,
+                    time_period_return=period,
                 )
-                existing_policies_by_name_map = {p.policy_name: p for p in existing_policies_by_name_query.all()}
+                db.add(new)
+                summary["inserted"] += 1
 
-            for record in records_without_id_in_csv:
-                policy_name = record.get("policy_name")
-                existing_policy_by_name = existing_policies_by_name_map.get(policy_name) if policy_name else None
-
-                is_already_targeted_for_update_by_id = any(u['id'] == record.get('id') for u in updates_list_of_dicts if record.get('id') is not None)
-
-                if existing_policy_by_name and not is_already_targeted_for_update_by_id:
-                    update_data = record.copy()
-                    update_data['id'] = existing_policy_by_name.id
-                    if not any(u['id'] == update_data['id'] for u in updates_list_of_dicts):
-                        updates_list_of_dicts.append(update_data)
-                elif not is_already_targeted_for_update_by_id :
-                    insert_data = record.copy()
-                    insert_data['business_details_id'] = business_details_id
-                    if 'id' in insert_data: del insert_data['id']
-                    inserts_list_of_dicts.append(insert_data)
-
-        if updates_list_of_dicts:
-            logger.info(f"Bulk updating {len(updates_list_of_dicts)} return policies for business {business_details_id}.")
-            db_session.bulk_update_mappings(ReturnPolicyOrm, updates_list_of_dicts)
-            summary["updated"] = len(updates_list_of_dicts)
-
-        if inserts_list_of_dicts:
-            logger.info(f"Bulk inserting {len(inserts_list_of_dicts)} new return policies for business {business_details_id}.")
-            db_session.bulk_insert_mappings(ReturnPolicyOrm, inserts_list_of_dicts)
-            summary["inserted"] = len(inserts_list_of_dicts)
-
+        db.commit()
         return summary
 
     except IntegrityError as e:
-        logger.error(f"Bulk database integrity error processing return policies for business {business_details_id}: {e.orig}", exc_info=False)
-        raise DataLoaderError(message=f"Bulk database integrity error for return policies: {str(e.orig)}", error_type=ErrorType.DATABASE, original_exception=e)
+        db.rollback()
+        logger.error("DB integrity error loading return policies: %s", e.orig)
+        raise DataLoaderError(
+            message=f"Integrity error loading return policies: {e.orig}",
+            error_type=ErrorType.DATABASE,
+            original_exception=e
+        )
+    except DataError as e:
+        db.rollback()
+        logger.error("DB data error loading return policies: %s", e.orig)
+        raise DataLoaderError(
+            message=f"Data error loading return policies: {e.orig}",
+            error_type=ErrorType.DATABASE,
+            original_exception=e
+        )
+    except DataLoaderError:
+        db.rollback()
+        raise
     except Exception as e:
-        logger.error(f"Unexpected error during bulk processing of return policies for business {business_details_id}: {e}", exc_info=True)
-        raise DataLoaderError(message=f"Unexpected error during bulk return policy processing: {str(e)}", error_type=ErrorType.UNEXPECTED_ROW_ERROR, original_exception=e)
-
+        db.rollback()
+        logger.exception("Unexpected error in return policy loader")
+        raise DataLoaderError(
+            message=f"Unexpected error: {str(e)}",
+            error_type=ErrorType.UNEXPECTED_ROW_ERROR,
+            original_exception=e
+        )
+        
+        
+        
+        
+        
 def load_price_to_db(
     db_session: Session,
     business_details_id: int,

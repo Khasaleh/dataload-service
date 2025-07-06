@@ -132,16 +132,37 @@ class ReturnPolicyCsvModel(BaseModel):
     id: Optional[int] = None
     created_date: Optional[datetime] = None
     updated_date: Optional[datetime] = None
+
     grace_period_return: Optional[int] = None
     policy_name: Optional[str] = None
-    return_policy_type: str
+    return_policy_type: constr(strip_whitespace=True, min_length=1)
     time_period_return: Optional[int] = None
+
+    # we don't expect business_details_id in the CSV
     business_details_id: Optional[int] = None
 
     class Config:
         anystr_strip_whitespace = True
         extra = "forbid"
 
+    @validator("grace_period_return", "time_period_return", pre=True)
+    def parse_ints_or_null(cls, v):
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        try:
+            return int(v)
+        except ValueError:
+            raise ValueError("must be a valid integer")
+
+    @root_validator
+    def enforce_final_policy_blankness(cls, values):
+        typ = values.get("return_policy_type", "").strip().upper()
+        if typ == "SALES_ARE_FINAL":
+            if values.get("policy_name"):
+                raise ValueError("policy_name must be empty when return_policy_type is SALES_ARE_FINAL")
+            if values.get("time_period_return") is not None:
+                raise ValueError("time_period_return must be empty when return_policy_type is SALES_ARE_FINAL")
+        return values
     @root_validator(pre=False, skip_on_failure=True)
     def check_conditional_fields(cls, values):
         policy_type = values.get('return_policy_type')
