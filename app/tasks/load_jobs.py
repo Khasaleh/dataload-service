@@ -93,16 +93,19 @@ def process_csv_task(
     Generic CSV processing pipeline.
     If db_key is provided, get_session will pick the alternate DB URL.
     """
-    db = get_session(business_id=int(business_id), db_key=db_key)
+    # 1) Always open a “meta” session on the default DB for upload_sessions updates
+    meta_db = get_session(business_id=int(business_id), db_key=None)
+    # 2) If requested, open a second “data” session on DB2; else reuse meta_db
+    data_db = get_session(business_id=int(business_id), db_key=db_key) if db_key else meta_db
 
-    _update_session_status(db, session_id, UploadJobStatus.DOWNLOADING_FILE)
+    _update_session_status(meta_db, session_id, UploadJobStatus.DOWNLOADING_FILE)
 
     abs_path = os.path.join(STORAGE_ROOT, business_id, wasabi_file_path)
     with open(abs_path, newline="", encoding="utf-8") as f:
         original_records = list(csv.DictReader(f))
     if not original_records:
         _update_session_status(
-            db,
+            meta_db,
             session_id,
             UploadJobStatus.COMPLETED_EMPTY_FILE,
             record_count=0,
@@ -110,11 +113,11 @@ def process_csv_task(
         )
         return
 
-    _update_session_status(db, session_id, UploadJobStatus.VALIDATING_SCHEMA)
+    _update_session_status(meta_db, session_id, UploadJobStatus.VALIDATING_SCHEMA)
     init_errors, validated = validate_csv(map_type, original_records, session_id)
     if init_errors:
         _update_session_status(
-            db,
+            meta_db,
             session_id,
             UploadJobStatus.FAILED_VALIDATION,
             details=init_errors,
@@ -124,7 +127,7 @@ def process_csv_task(
         return
 
     _update_session_status(
-        db,
+        meta_db,
         session_id,
         UploadJobStatus.DB_PROCESSING_STARTED,
         record_count=len(validated),
@@ -133,31 +136,31 @@ def process_csv_task(
     processed = 0
     errors = []
 
-    # route to the correct loader
+    # route to the correct loader (writes go into data_db)
     if map_type == "brands":
-        summary = load_brand_to_db(db, int(business_id), validated, session_id, None, user_id)
+        summary = load_brand_to_db(data_db, int(business_id), validated, session_id, None, user_id)
         processed = summary.get("inserted", 0) + summary.get("updated", 0)
 
     elif map_type == "return_policies":
-        # this loader writes into DB2
-        summary = load_return_policy_to_db(db, int(business_id), validated, session_id, None)
+        # this loader writes into DB2 (data_db), metadata remains on meta_db
+        summary = load_return_policy_to_db(data_db, int(business_id), validated, session_id, None)
         processed = summary.get("inserted", 0) + summary.get("updated", 0)
 
     elif map_type == "product_prices":
-        summary = load_price_to_db(db, int(business_id), validated, session_id, None)
+        summary = load_price_to_db(data_db, int(business_id), validated, session_id, None)
         processed = summary.get("inserted", 0) + summary.get("updated", 0)
 
     else:
         for idx, rec in enumerate(validated, start=2):
             try:
                 if map_type == "attributes":
-                    load_attribute_to_db(db, int(business_id), rec, session_id, None)
+                    load_attribute_to_db(data_db, int(business_id), rec, session_id, None)
                 elif map_type == "products":
-                    load_product_record_to_db(db, int(business_id), rec, session_id, None)
+                    load_product_record_to_db(data_db, int(business_id), rec, session_id, None)
                 elif map_type == "meta_tags":
-                    load_meta_tags_from_csv(db, int(business_id), rec, session_id, None)
+                    load_meta_tags_from_csv(data_db, int(business_id), rec, session_id, None)
                 elif map_type == "categories":
-                    load_category_to_db(db, int(business_id), rec, session_id, None, user_id)
+                    load_category_to_db(data_db, int(business_id), rec, session_id, None, user_id)
                 processed += 1
             except Exception as e:
                 errors.append(
@@ -168,7 +171,10 @@ def process_csv_task(
                     )
                 )
 
-    db.commit()
+    # commit both DBs if distinct
+    meta_db.commit()
+    if data_db is not meta_db:
+        data_db.commit()
 
     final_status = (
         UploadJobStatus.COMPLETED
@@ -176,7 +182,7 @@ def process_csv_task(
         else UploadJobStatus.COMPLETED_WITH_ERRORS
     )
     _update_session_status(
-        db,
+        meta_db,
         session_id,
         final_status,
         details=errors if errors else None,
@@ -189,7 +195,10 @@ def process_csv_task(
     except OSError:
         pass
 
-    db.close()
+    meta_db.close()
+    if data_db is not meta_db:
+        data_db.close()
+
     return {
         "status": final_status.value,
         "processed": processed,
@@ -198,7 +207,7 @@ def process_csv_task(
 
 
 # -----------------------------------------------------------------------------
-# Celery wrapper tasks
+# Celery wrapper tasks (unchanged)
 # -----------------------------------------------------------------------------
 
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
