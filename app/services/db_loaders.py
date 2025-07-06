@@ -404,74 +404,77 @@ def load_attribute_to_db(
         )
 
 def load_return_policy_to_db(
+    db_session: Session,
     business_details_id: int,
     records_data: List[Dict[str, Any]],
     session_id: str,
     db_pk_redis_pipeline: Any = None
 ) -> Dict[str, int]:
     """
-    Upsert CSV-loaded return policies into the `return_policy` table in DB2.
+    Upsert CSV-loaded return policies into the `return_policy` table.
+    - `db_session` is already connected to the correct DB (DB2 when called with db_key="DB2").
     - Each business may only have one SALES_ARE_FINAL policy.
-    - Timestamps are stored as UTC datetimes.
     - Blank/missing numeric fields become NULL.
     """
-    # early exit
     if not records_data:
-        return {"inserted": 0, "updated": 0, "errors": 0}
+        return {"inserted": 0, "updated": 0}
 
-    # pick the right DB
-    db_key = settings.LOADTYPE_DB_MAP.get("return_policies")
-    db: Session = get_session(business_id=business_details_id, db_key=db_key)
+    summary = {"inserted": 0, "updated": 0}
 
-    summary = {"inserted": 0, "updated": 0, "errors": 0}
-
-    # count how many SALES_ARE_FINAL in this batch
-    finals_in_csv = [r for r in records_data if r.get("return_policy_type") == "SALES_ARE_FINAL"]
-    if len(finals_in_csv) > 1:
+    # Ensure at most one final in CSV
+    finals = [r for r in records_data if r.get("return_policy_type") == "SALES_ARE_FINAL"]
+    if len(finals) > 1:
         raise DataLoaderError(
             message="CSV contains more than one SALES_ARE_FINAL policy",
             error_type=ErrorType.VALIDATION
         )
 
-    # see if DB already has one
+    # Check existing final in DB
     existing_final = (
-        db.query(ReturnPolicyOrm)
-          .filter_by(business_details_id=business_details_id, return_policy_type="SALES_ARE_FINAL")
-          .first()
+        db_session
+        .query(ReturnPolicyOrm)
+        .filter_by(
+            business_details_id=business_details_id,
+            return_policy_type="SALES_ARE_FINAL"
+        )
+        .first()
     )
+
+    def _parse_int(val: Any) -> Optional[int]:
+        if val is None or (isinstance(val, str) and not val.strip()):
+            return None
+        try:
+            return int(val)
+        except ValueError:
+            return None
+
+    now = datetime.utcnow()
 
     try:
         for rec in records_data:
             name = rec.get("policy_name")
-            typ  = rec.get("return_policy_type")
-            grace_raw  = rec.get("grace_period_return")
-            period_raw = rec.get("time_period_return")
+            typ = rec.get("return_policy_type")
+            grace = _parse_int(rec.get("grace_period_return"))
+            period = _parse_int(rec.get("time_period_return"))
 
-            # parse integers or None
-            def parse_int(v):
-                try:
-                    return int(v)
-                except (TypeError, ValueError):
-                    return None
-
-            grace  = parse_int(grace_raw)
-            period = parse_int(period_raw)
-            now    = datetime.utcnow()
-
-            # enforce single final
+            # Enforce single final
             if typ == "SALES_ARE_FINAL" and existing_final:
-                # if updating that same row, OK; else error
+                # if updating that row, OK; else error
                 if name != existing_final.policy_name:
                     raise DataLoaderError(
                         message="Business already has a SALES_ARE_FINAL policy; cannot add another.",
                         error_type=ErrorType.VALIDATION
                     )
 
-            # lookup by name + business
+            # Lookup by business + name
             existing = (
-                db.query(ReturnPolicyOrm)
-                  .filter_by(business_details_id=business_details_id, policy_name=name)
-                  .first()
+                db_session
+                .query(ReturnPolicyOrm)
+                .filter_by(
+                    business_details_id=business_details_id,
+                    policy_name=name
+                )
+                .first()
             )
 
             if existing:
@@ -493,40 +496,36 @@ def load_return_policy_to_db(
                     grace_period_return=grace,
                     time_period_return=period,
                 )
-                db.add(new)
+                db_session.add(new)
                 summary["inserted"] += 1
 
-        db.commit()
+        # flush/commit happen in caller
         return summary
 
     except IntegrityError as e:
-        db.rollback()
-        logger.error("DB integrity error loading return policies: %s", e.orig)
+        db_session.rollback()
         raise DataLoaderError(
             message=f"Integrity error loading return policies: {e.orig}",
             error_type=ErrorType.DATABASE,
             original_exception=e
         )
     except DataError as e:
-        db.rollback()
-        logger.error("DB data error loading return policies: %s", e.orig)
+        db_session.rollback()
         raise DataLoaderError(
             message=f"Data error loading return policies: {e.orig}",
             error_type=ErrorType.DATABASE,
             original_exception=e
         )
     except DataLoaderError:
-        db.rollback()
+        db_session.rollback()
         raise
     except Exception as e:
-        db.rollback()
-        logger.exception("Unexpected error in return policy loader")
+        db_session.rollback()
         raise DataLoaderError(
-            message=f"Unexpected error: {str(e)}",
+            message=f"Unexpected error in return policy loader: {str(e)}",
             error_type=ErrorType.UNEXPECTED_ROW_ERROR,
             original_exception=e
-        )
-        
+        )     
         
         
         

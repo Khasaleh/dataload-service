@@ -223,9 +223,15 @@ def process_brands_file(self, business_id, session_id, wasabi_file_path, origina
         user_id,
     )
 
-
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
-def process_return_policies_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
+def process_return_policies_file(
+    self,
+    business_id: str,
+    session_id: str,
+    wasabi_file_path: str,
+    original_filename: str,
+    user_id: int
+):
     db_key = settings.LOADTYPE_DB_MAP.get("return_policies")
     return process_csv_task(
         business_id,
@@ -238,8 +244,6 @@ def process_return_policies_file(self, business_id, session_id, wasabi_file_path
         user_id,
         db_key=db_key,
     )
-
-
 @shared_task(bind=True, autoretry_for=RETRYABLE_EXCEPTIONS, **COMMON_RETRY_KWARGS)
 def process_attributes_file(self, business_id, session_id, wasabi_file_path, original_filename, user_id):
     return process_csv_task(
