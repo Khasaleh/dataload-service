@@ -4,8 +4,6 @@ from datetime import datetime
 from enum import Enum
 import re
 from app.utils.slug import generate_slug
-
-
 def generate_slug(input_string: str) -> str:
     slug = input_string.lower().strip()
     slug = slug.replace(' ', '-')
@@ -132,46 +130,51 @@ class ReturnPolicyCsvModel(BaseModel):
     id: Optional[int] = None
     created_date: Optional[datetime] = None
     updated_date: Optional[datetime] = None
+
     grace_period_return: Optional[int] = None
     policy_name: Optional[str] = None
-    return_policy_type: str
+    return_policy_type: constr(strip_whitespace=True, min_length=1)
     time_period_return: Optional[int] = None
+
+    # we don't expect business_details_id in the CSV
     business_details_id: Optional[int] = None
 
     class Config:
         anystr_strip_whitespace = True
         extra = "forbid"
 
-    @root_validator(pre=False, skip_on_failure=True)
-    def check_conditional_fields(cls, values):
-        policy_type = values.get('return_policy_type')
-        time_period = values.get('time_period_return')
-        if policy_type == "SALES_RETURN_ALLOWED" and time_period is None:
-            raise ValueError("'time_period_return' is required when 'return_policy_type' is 'SALES_RETURN_ALLOWED'.")
+    @validator("grace_period_return", "time_period_return", pre=True)
+    def parse_ints_or_null(cls, v):
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        try:
+            return int(v)
+        except ValueError:
+            raise ValueError("must be a valid integer")
+
+    @root_validator(skip_on_failure=True)
+    def enforce_final_policy_blankness(cls, values):
+        typ = values.get("return_policy_type", "").strip().upper()
+        if typ == "SALES_ARE_FINAL":
+            if values.get("policy_name"):
+                raise ValueError(
+                    "policy_name must be empty when return_policy_type is SALES_ARE_FINAL"
+                )
+            if values.get("time_period_return") is not None:
+                raise ValueError(
+                    "time_period_return must be empty when return_policy_type is SALES_ARE_FINAL"
+                )
         return values
 
-class ProductItemModel(BaseModel):
-    product_name: str
-    variant_sku: str
-    attribute_combination: str
-    status: str
-    published: str
-    default_sku: str
-    quantity: int
-    image_urls: Optional[str] = None
-
-    @validator('product_name', 'variant_sku', 'attribute_combination', 'status', 'published', 'default_sku')
-    def item_text_fields_must_not_be_empty(cls, value):
-        if not value.strip():
-            raise ValueError('field must not be empty')
-        return value
-
-    @validator('quantity')
-    def quantity_must_be_non_negative(cls, value):
-        if value < 0:
-            raise ValueError('quantity must be non-negative')
-        return value
-
+    @root_validator(pre=False, skip_on_failure=True)
+    def check_conditional_fields(cls, values):
+        policy_type = values.get('return_policy_type', '').strip().upper()
+        time_period = values.get('time_period_return')
+        if policy_type == "SALES_RETURN_ALLOWED" and time_period is None:
+            raise ValueError(
+                "'time_period_return' is required when 'return_policy_type' is 'SALES_RETURN_ALLOWED'."
+            )
+        return values
 class ProductPriceModel(BaseModel):
     product_name: str
     price: float
@@ -199,6 +202,28 @@ class ProductCsvModel(BaseModel):
 
     class Config:
         anystr_strip_whitespace = True
+
+class ProductItemModel(BaseModel):
+    product_name: str
+    variant_sku: str
+    attribute_combination: str
+    status: str
+    published: str
+    default_sku: str
+    quantity: int
+    image_urls: Optional[str] = None
+
+    @validator('product_name', 'variant_sku', 'attribute_combination', 'status', 'published', 'default_sku')
+    def item_text_fields_must_not_be_empty(cls, value):
+        if not value.strip():
+            raise ValueError('field must not be empty')
+        return value
+
+    @validator('quantity')
+    def quantity_must_be_non_negative(cls, value):
+        if value < 0:
+            raise ValueError('quantity must be non-negative')
+        return value
 
 class MetaTagModel(BaseModel):
     product_name: str
