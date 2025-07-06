@@ -143,11 +143,11 @@ def process_csv_task(
 
     elif map_type == "return_policies":
         # this loader writes into DB2 (data_db), metadata remains on meta_db
-        summary = load_return_policy_to_db(data_db, int(business_id), validated, session_id, None)
+        summary = load_return_policy_to_db(data_db, int(business_id), validated, session_id)
         processed = summary.get("inserted", 0) + summary.get("updated", 0)
 
     elif map_type == "product_prices":
-        summary = load_price_to_db(data_db, int(business_id), validated, session_id)
+        summary = load_price_to_db(data_db, int(business_id), validated, session_id, None)
         processed = summary.get("inserted", 0) + summary.get("updated", 0)
 
     else:
