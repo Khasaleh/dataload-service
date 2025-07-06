@@ -209,42 +209,37 @@ class AttributeValueOrm(Base):
     )
 
 class ReturnPolicyOrm(Base):
-    __tablename__ = "return_policy" # Renamed table
-
-    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-
-    # Fields based on the DDL for return_policy table and product linking needs
-    # (id, policy_name, return_type, return_fee_type, return_fee, business_details_id are key)
-
-    # DDL: created_date timestamp without time zone NOT NULL (or similar audit fields)
-    # Using created_by/created_date/updated_by/updated_date from typical patterns if available
-    created_by = Column(BigInteger, nullable=True)
-    created_date_ts = Column("created_date", DateTime, server_default=func.now(), nullable=True) # aliasing if 'created_date' is used differently
-    updated_by = Column(BigInteger, nullable=True)
-    updated_date_ts = Column("updated_date", DateTime, onupdate=func.now(), nullable=True) # aliasing
-
-    policy_name = Column(Text, nullable=False, index=True) # DDL: policy_name text
-
-    # Fields crucial for product linking and lookup from products.csv
-    return_type = Column(String(255), nullable=False, index=True) # e.g., SALES_RETURN_ALLOWED, SALES_ARE_FINAL
-    return_fee_type = Column(String(255), nullable=True, index=True) # e.g., FIXED, PERCENTAGE, FREE
-    return_fee = Column(Float, nullable=True) # The actual fee amount or percentage
-
-    # Other potential fields from a typical return_policy table
-    return_days = Column(Integer, nullable=True) # Or time_period_return, grace_period_return from old DDL
-    is_default = Column(Boolean, default=False, nullable=True) # If there's a concept of a default policy
-
-    business_details_id = Column(BigInteger, ForeignKey(f'{PUBLIC_SCHEMA}.business_details.id'), index=True, nullable=False)
-
-    # Relationships
-    business_detail = relationship("BusinessDetailsOrm", back_populates="return_policies")
-    products = relationship("ProductOrm", back_populates="return_policy")
-
+    __tablename__ = "return_policy"
     __table_args__ = (
         UniqueConstraint('business_details_id', 'policy_name', name='uq_return_policy_business_name'),
         Index('idx_return_policy_lookup', "business_details_id", "return_type", "return_fee_type", "return_fee"),
         {"schema": PUBLIC_SCHEMA},
     )
+
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
+
+    # Timestamps
+    created_date_ts = Column("created_date", DateTime, server_default=func.now(), nullable=False)
+    updated_date_ts = Column("updated_date", DateTime, onupdate=func.now(), nullable=True)
+
+    # Core fields
+    policy_name    = Column(Text, nullable=False, index=True)
+    return_type    = Column(String(255), nullable=False, index=True)   # maps to CSV's return_policy_type
+    return_fee_type= Column(String(255), nullable=True, index=True)
+    return_fee     = Column(Float, nullable=True)                      # we'll store 'grace_period_return' here
+    return_days    = Column("time_period_return", BigInteger, nullable=True)  # CSV's time_period_return
+    is_default     = Column(Boolean, default=False, nullable=True)
+
+    business_details_id = Column(
+        BigInteger,
+        ForeignKey(f'{PUBLIC_SCHEMA}.business_details.id'),
+        index=True,
+        nullable=False
+    )
+
+    # Relationships
+    business_detail = relationship("BusinessDetailsOrm", back_populates="return_policies")
+    products        = relationship("ProductOrm", back_populates="return_policy")
 
 # --- Shopping Category Model (Basic for FK reference) ---
 # This will be defined in a separate file app/models/shopping_category.py
