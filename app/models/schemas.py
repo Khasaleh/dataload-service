@@ -4,8 +4,7 @@ from datetime import datetime
 from enum import Enum
 import re
 from app.utils.slug import generate_slug
-
-
+from app.models.schemas import ErrorType, DataLoaderError
 def generate_slug(input_string: str) -> str:
     slug = input_string.lower().strip()
     slug = slug.replace(' ', '-')
@@ -154,23 +153,29 @@ class ReturnPolicyCsvModel(BaseModel):
         except ValueError:
             raise ValueError("must be a valid integer")
 
-    @root_validator
+    @root_validator(skip_on_failure=True)  # added skip_on_failure
     def enforce_final_policy_blankness(cls, values):
         typ = values.get("return_policy_type", "").strip().upper()
         if typ == "SALES_ARE_FINAL":
             if values.get("policy_name"):
-                raise ValueError("policy_name must be empty when return_policy_type is SALES_ARE_FINAL")
+                raise ValueError(
+                    "policy_name must be empty when return_policy_type is SALES_ARE_FINAL"
+                )
             if values.get("time_period_return") is not None:
-                raise ValueError("time_period_return must be empty when return_policy_type is SALES_ARE_FINAL")
-        return values
-    @root_validator(pre=False, skip_on_failure=True)
-    def check_conditional_fields(cls, values):
-        policy_type = values.get('return_policy_type')
-        time_period = values.get('time_period_return')
-        if policy_type == "SALES_RETURN_ALLOWED" and time_period is None:
-            raise ValueError("'time_period_return' is required when 'return_policy_type' is 'SALES_RETURN_ALLOWED'.")
+                raise ValueError(
+                    "time_period_return must be empty when return_policy_type is SALES_ARE_FINAL"
+                )
         return values
 
+    @root_validator(pre=False, skip_on_failure=True)
+    def check_conditional_fields(cls, values):
+        policy_type = values.get('return_policy_type', '').strip().upper()
+        time_period = values.get('time_period_return')
+        if policy_type == "SALES_RETURN_ALLOWED" and time_period is None:
+            raise ValueError(
+                "'time_period_return' is required when 'return_policy_type' is 'SALES_RETURN_ALLOWED'."
+            )
+        return values
 class ProductItemModel(BaseModel):
     product_name: str
     variant_sku: str
