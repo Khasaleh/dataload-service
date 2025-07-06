@@ -147,7 +147,7 @@ def process_csv_task(
         processed = summary.get("inserted", 0) + summary.get("updated", 0)
 
     elif map_type == "product_prices":
-        summary = load_price_to_db(data_db, int(business_id), validated, session_id, None)
+        summary = load_price_to_db(data_db, int(business_id), validated, session_id)
         processed = summary.get("inserted", 0) + summary.get("updated", 0)
 
     else:
