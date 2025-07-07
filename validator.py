@@ -18,45 +18,48 @@ MODEL_MAP = {
     "products": ProductCsvModel
 }
 
-def validate_csv(load_type, records):
-    errors = []
-    valid_rows = []
-    model = MODEL_MAP.get(load_type)
-    
-    if not model:
-        return [{"error": f"Unsupported load type: {load_type}"}], []
+def validate_csv(
+    load_type: str,
+    records: List[Dict],
+    session_id: str
+) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Validate raw CSV rows against their Pydantic model, enforce file-level uniqueness,
+    and run any load-type–specific business rules (e.g. category hierarchy).
+    Returns (errors, valid_rows).
+    """
+    errors: List[Dict] = []
+    valid_rows: List[Dict] = []
 
-    for i, row in enumerate(records):
+    Model = MODEL_MAP.get(load_type)
+    if not Model:
+        return [{"row": None, "field": None, "error": f"Unsupported load type: {load_type}"}], []
+
+    # 1) Per‐row model validation
+    for idx, row in enumerate(records):
         try:
-            valid = model(**row)
-            valid_rows.append(valid.dict())
+            inst = Model(**row)
+            valid_rows.append(inst.model_dump())
         except ValidationError as e:
             for err in e.errors():
                 errors.append({
-                    "row": i + 1,
-                    "field": ".".join(str(f) for f in err['loc']),
-                    "error": err['msg']
+                    "row": idx + 1,
+                    "field": ".".join(str(f) for f in err["loc"]),
+                    "error": err["msg"]
                 })
+
+    # 2) File‐level uniqueness check (if applicable)
+    unique_key = UNIQUE_KEY_MAP.get(load_type)
+    if unique_key and valid_rows:
+        dup_errs = check_file_uniqueness(valid_rows, unique_key)
+        errors.extend(dup_errs)
+
+    # 3) Categories need additional hierarchy checks
+    if load_type == "categories" and valid_rows:
+        cat_errs = check_category_hierarchy(valid_rows, session_id)
+        errors.extend(cat_errs)
+
     return errors, valid_rows
-
-def check_file_uniqueness(records: List[Dict], unique_key: str) -> List[Dict]:
-    errors = []
-    key_counts = defaultdict(list)
-    
-    for i, record in enumerate(records):
-        key_value = record.get(unique_key)
-        if key_value is not None:
-            key_counts[key_value].append(i + 1)  # Store 1-based row index
-
-    for key_value, rows in key_counts.items():
-        if len(rows) > 1:
-            errors.append({
-                "error": "Duplicate key found in file",
-                "key": key_value,
-                "rows": rows,
-                "field": unique_key
-            })
-    return errors
 
 def check_referential_integrity(
     records: List[Dict],

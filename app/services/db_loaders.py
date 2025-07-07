@@ -293,115 +293,149 @@ def load_attribute_to_db(
     business_details_id: int,
     record_data: Dict[str, Any],
     session_id: str,
-    db_pk_redis_pipeline: Any,
-    user_id: int,                            # ← new!
+    db_pk_redis_pipeline: Any = None
 ) -> Optional[int]:
-    """
-    Upsert one attribute and its pipe-delimited values.
-    - Inserts stamp both created_* and updated_*.
-    - Updates only touch updated_*.
-    """
-    now = int(datetime.utcnow().timestamp() * 1000)
+    parent_attribute_name = record_data.get("attribute_name")
+    if not parent_attribute_name:
+        msg = "Missing 'attribute_name' in record_data."
+        logger.error(f"{msg} Business: {business_details_id}, Session: {session_id}, Record: {record_data}")
+        raise DataLoaderError(message=msg, error_type=ErrorType.VALIDATION, field_name="attribute_name")
 
-    name = record_data.get("attribute_name", "").strip()
-    if not name:
-        raise DataLoaderError(
-            message="Missing 'attribute_name'",
-            error_type=ErrorType.VALIDATION,
-            field_name="attribute_name"
+    try:
+        # 1) Upsert parent Attribute
+        parent = (
+            db_session.query(AttributeOrm)
+                      .filter_by(business_details_id=business_details_id, name=parent_attribute_name)
+                      .first()
         )
-
-    # normalize CSV booleans/text
-    is_color = str(record_data.get("is_color", False)).strip().lower() in ("1", "true", "yes")
-    active_attr = record_data.get("attribute_active", "").strip().upper() or "INACTIVE"
-
-    # 1) Find or create/update the parent AttributeOrm
-    attr = (
-        db_session
-          .query(AttributeOrm)
-          .filter_by(business_details_id=business_details_id, name=name)
-          .first()
-    )
-
-    if attr:
-        # → UPDATE existing
-        attr.is_color    = is_color
-        attr.active      = active_attr
-        attr.updated_by  = user_id
-        attr.updated_date = now
-    else:
-        # → INSERT new
-        attr = AttributeOrm(
-            business_details_id = business_details_id,
-            name                = name,
-            is_color            = is_color,
-            active              = active_attr,
-            created_by          = user_id,
-            created_date        = now,
-            updated_by          = user_id,
-            updated_date        = now,
-        )
-        db_session.add(attr)
-        db_session.flush()
-
-    attribute_db_id = attr.id
-
-    # 2) Push into Redis id-map if you use that
-    add_to_id_map(
-        session_id,
-        f"attributes{DB_PK_MAP_SUFFIX}",
-        name,
-        attribute_db_id,
-        pipeline=db_pk_redis_pipeline
-    )
-
-    # 3) Parse the pipe-delimited value lists
-    names   = [v.strip() for v in record_data.get("values_name", "").split("|") if v.strip()]
-    vals    = (record_data.get("value_value") or "").split("|")
-    imgs    = (record_data.get("img_url")    or "").split("|")
-    actives = [s.strip().upper() for s in (record_data.get("values_active") or "").split("|")]
-
-    for idx, display in enumerate(names):
-        actual = vals[idx].strip() if idx < len(vals) else None
-        url    = imgs[idx].strip() if idx < len(imgs) else None
-        act    = actives[idx] if idx < len(actives) and actives[idx] in ("ACTIVE","INACTIVE") else "INACTIVE"
-
-        # If it's a color attr, prefer the 'value_value' part (hex) over display name.
-        db_value = actual if is_color and actual else display
-        if not db_value:
-            continue
-
-        av = (
-            db_session
-              .query(AttributeValueOrm)
-              .filter_by(attribute_id=attribute_db_id, name=display)
-              .first()
-        )
-        if av:
-            # → UPDATE existing value
-            av.value            = db_value
-            av.attribute_image_url = url or av.attribute_image_url
-            av.active           = act
-            av.updated_by       = user_id
-            av.updated_date     = now
+        is_color_flag = record_data.get("is_color", False)
+        if parent:
+            logger.info(f"Updating existing attribute '{parent_attribute_name}' (ID: {parent.id})")
+            parent.is_color   = is_color_flag
+            parent.active     = record_data.get("attribute_active", parent.active)
+            parent.updated_by = record_data.get("updated_by", parent.updated_by)
+            parent.updated_date = record_data.get("updated_date", parent.updated_date)
+            attribute_db_id = parent.id
         else:
-            # → INSERT new value
-            av = AttributeValueOrm(
-                attribute_id        = attribute_db_id,
-                name                = display,
-                value               = db_value,
-                attribute_image_url = url,
-                active              = act,
-                created_by          = user_id,
-                created_date        = now,
-                updated_by          = user_id,
-                updated_date        = now,
+            logger.info(f"Creating new attribute '{parent_attribute_name}'")
+            parent = AttributeOrm(
+                business_details_id=business_details_id,
+                name=parent_attribute_name,
+                is_color=is_color_flag,
+                active=record_data.get("attribute_active"),
+                created_by=record_data.get("created_by"),
+                created_date=record_data.get("created_date"),
+                updated_by=record_data.get("updated_by", record_data.get("created_by")),
+                updated_date=record_data.get("updated_date", record_data.get("created_date")),
             )
-            db_session.add(av)
+            db_session.add(parent)
+            db_session.flush()
+            if parent.id is None:
+                raise DataLoaderError(
+                    message=f"Failed to flush new attribute '{parent_attribute_name}'",
+                    error_type=ErrorType.DATABASE,
+                    field_name="attribute_name",
+                    offending_value=parent_attribute_name
+                )
+            attribute_db_id = parent.id
+            logger.info(f"Created attribute '{parent_attribute_name}' with ID {attribute_db_id}")
 
-    # 4) Leave orphan-deletes to your cascade on the relationship
-    return attribute_db_id
+        # 2) Cache in Redis
+        add_to_id_map(
+            session_id,
+            f"attributes{DB_PK_MAP_SUFFIX}",
+            parent_attribute_name,
+            attribute_db_id,
+            pipeline=db_pk_redis_pipeline
+        )
 
+        # 3) Process values (zip‐longest semantics)
+        values_name_str  = record_data.get("values_name")  or ""
+        values_value_str = record_data.get("value_value")  or ""
+        img_url_str      = record_data.get("img_url")      or ""
+        values_active_str= record_data.get("values_active")or ""
+
+        names = [n.strip() for n in values_name_str.split("|")]
+        vals  = [v.strip() for v in values_value_str.split("|")]
+        imgs  = [u.strip() for u in img_url_str.split("|")]
+        acts  = [s.strip().upper() for s in values_active_str.split("|")]
+
+        max_len = max(len(names), len(vals))
+        for i in range(max_len):
+            disp = names[i] if i < len(names) and names[i] else (vals[i] if i < len(vals) else None)
+            actual = vals[i]  if i < len(vals) and vals[i] else disp
+            url   = imgs[i]  if i < len(imgs) and imgs[i] else None
+            st    = acts[i]  if i < len(acts) and acts[i] in ("ACTIVE","INACTIVE") else "INACTIVE"
+
+            # choose stored value
+            value_for_db = actual if parent.is_color and actual else disp
+            if not value_for_db:
+                logger.warning(f"Skipping empty attribute‐value at index {i} for '{parent_attribute_name}'")
+                continue
+
+            # upsert AttributeValue
+            val_orm = (
+                db_session.query(AttributeValueOrm)
+                          .filter_by(attribute_id=attribute_db_id, name=disp)
+                          .first()
+            )
+            if val_orm:
+                logger.debug(f"Updating value '{disp}' for attribute ID {attribute_db_id}")
+                val_orm.value               = value_for_db
+                val_orm.attribute_image_url = url or val_orm.attribute_image_url
+                val_orm.active              = st
+                val_orm.updated_by          = record_data.get("updated_by", val_orm.updated_by)
+                val_orm.updated_date        = record_data.get("updated_date", val_orm.updated_date)
+            else:
+                logger.debug(f"Creating value '{disp}' for attribute ID {attribute_db_id}")
+                new_val = AttributeValueOrm(
+                    attribute_id        = attribute_db_id,
+                    name                = disp,
+                    value               = value_for_db,
+                    attribute_image_url = url,
+                    active              = st,
+                    created_by          = record_data.get("created_by"),
+                    created_date        = record_data.get("created_date"),
+                    updated_by          = record_data.get("updated_by", record_data.get("created_by")),
+                    updated_date        = record_data.get("updated_date", record_data.get("created_date")),
+                )
+                db_session.add(new_val)
+
+        return attribute_db_id
+
+    except IntegrityError as e:
+        db_session.rollback()
+        logger.error(f"Integrity error for attribute '{parent_attribute_name}': {e.orig}")
+        raise DataLoaderError(
+            message=f"Database integrity error: {e.orig}",
+            error_type=ErrorType.DATABASE,
+            field_name="attribute_name",
+            offending_value=parent_attribute_name,
+            original_exception=e
+        )
+    except DataError as e:
+        db_session.rollback()
+        logger.error(f"Data error for attribute '{parent_attribute_name}': {e.orig}")
+        raise DataLoaderError(
+            message=f"Database data error: {e.orig}",
+            error_type=ErrorType.DATABASE,
+            field_name="attribute_name",
+            offending_value=parent_attribute_name,
+            original_exception=e
+        )
+    except DataLoaderError:
+        db_session.rollback()
+        raise
+    except Exception as e:
+        db_session.rollback()
+        logger.exception(f"Unexpected error processing attribute '{parent_attribute_name}'")
+        raise DataLoaderError(
+            message=f"Unexpected error: {str(e)}",
+            error_type=ErrorType.UNEXPECTED_ROW_ERROR,
+            field_name="attribute_name",
+            offending_value=parent_attribute_name,
+            original_exception=e
+        )
 
 def load_return_policy_to_db(
     db_session: Session,
