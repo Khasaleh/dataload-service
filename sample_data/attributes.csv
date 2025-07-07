@@ -1,8 +1,8 @@
 attribute_name,is_color,attribute_active,values_name,value_value,img_url,values_active
-Color,TRUE,ACTIVE,"Red|Blue|Green","FF0000|0000FF|00FF00","img/red.png|img/blue.png|img/green.png","ACTIVE|ACTIVE|INACTIVE"
-Size,FALSE,ACTIVE,"Small|Medium|Large","S|M|L",,,"ACTIVE|ACTIVE|ACTIVE"
-Material,FALSE,INACTIVE,"Cotton|Polyester",,img/cotton.png,ACTIVE
-Pattern,FALSE,ACTIVE,"Solid|Striped|Checked","solid|striped|checked",,,
-Screen Size,FALSE,ACTIVE,"13 inch|15 inch|17 inch",,,,
-Finish,FALSE,ACTIVE,"Matte|Glossy|Satin",,,"ACTIVE||INACTIVE"
-Sleeve Length,FALSE,ACTIVE,"Short Sleeve|Long Sleeve",,,,
+Color,TRUE,ACTIVE,Red|Blue|Green,FF0000|0000FF|00FF00,img/red.png|img/blue.png|img/green.png,ACTIVE|ACTIVE|INACTIVE
+Size,FALSE,ACTIVE,Small|Medium|Large,S|M|L,,ACTIVE|ACTIVE|ACTIVE
+Material,TRUE,INACTIVE,Cotton|Polyester,,img/cotton.png,ACTIVE
+Pattern,FALSE,ACTIVE,Solid|Striped|Checked,solid|striped|checked,,ACTIVE|ACTIVE|ACTIVE
+Screen Size,FALSE,ACTIVE,13 inch|15 inch|17 inch,,,ACTIVE|ACTIVE|ACTIVE
+Finish,FALSE,ACTIVE,Matte|Glossy|Satin,,,ACTIVE||INACTIVE
+Sleeve Length,FALSE,ACTIVE,Short Sleeve|Long Sleeve,,,

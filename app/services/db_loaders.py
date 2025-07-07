@@ -25,13 +25,11 @@ from app.db.models import (
     ProductItemOrm,
 )
 from datetime import datetime
-from app.core.config import settings
 from app.dataload.models.price_csv import PriceCsv, PriceTypeEnum as PriceCsvTypeEnum
 from app.utils.slug import generate_slug
 from app.utils.redis_utils import add_to_id_map, get_from_id_map, DB_PK_MAP_SUFFIX
 from app.exceptions import DataLoaderError
 from app.models.schemas import ErrorType
-from app.db.models import ReturnPolicyOrm
 
 logger = logging.getLogger(__name__)
 
@@ -295,111 +293,155 @@ def load_attribute_to_db(
     business_details_id: int,
     record_data: Dict[str, Any],
     session_id: str,
-    db_pk_redis_pipeline: Any
+    db_pk_redis_pipeline: Any = None,
+    user_id: int = None
 ) -> Optional[int]:
-    parent_attribute_name = record_data.get("attribute_name")
-    if not parent_attribute_name:
-        msg = "Missing 'attribute_name' in record_data."
-        logger.error(f"{msg} Business: {business_details_id}, Session: {session_id}, Record: {record_data}")
-        raise DataLoaderError(message=msg, error_type=ErrorType.VALIDATION, field_name="attribute_name")
+    """
+    Upsert an attribute and its values.
+    - created_by/created_date/updated_by/updated_date are all set from user_id & now.
+    - On update, only updated_by/updated_date are changed.
+    """
+    name = record_data.get("attribute_name")
+    if not name:
+        raise DataLoaderError(
+            message="Missing 'attribute_name'",
+            error_type=ErrorType.VALIDATION,
+            field_name="attribute_name"
+        )
 
-    attribute_db_id: Optional[int] = None
-    parent_attr_orm_instance: Optional[AttributeOrm] = None
+    now = ServerDateTime.now_epoch_ms()
+    is_color = bool(record_data.get("is_color", False))
+    active_flag = record_data.get("attribute_active")
 
     try:
-        parent_attr_orm_instance = db_session.query(AttributeOrm).filter_by(business_details_id=business_details_id, name=parent_attribute_name).first()
-        is_color_from_csv = record_data.get('is_color', False)
+        # --- PARENT ATTRIBUTE UPSERT ---
+        parent = (
+            db_session.query(AttributeOrm)
+                      .filter_by(business_details_id=business_details_id, name=name)
+                      .first()
+        )
 
-        if parent_attr_orm_instance:
-            logger.info(f"Updating existing attribute '{parent_attribute_name}' (ID: {parent_attr_orm_instance.id})")
-            parent_attr_orm_instance.is_color = is_color_from_csv
-            parent_attr_orm_instance.active = record_data.get("attribute_active", parent_attr_orm_instance.active)
-            if record_data.get("updated_by") is not None: parent_attr_orm_instance.updated_by = record_data.get("updated_by")
-            if record_data.get("updated_date") is not None: parent_attr_orm_instance.updated_date = record_data.get("updated_date")
-            attribute_db_id = parent_attr_orm_instance.id
+        if parent:
+            logger.info(f"Updating attribute '{name}' (ID={parent.id})")
+            parent.is_color   = is_color
+            parent.active     = active_flag or parent.active
+            parent.updated_by = user_id
+            parent.updated_date = now
+            attribute_db_id = parent.id
+
         else:
-            logger.info(f"Creating new attribute '{parent_attribute_name}'")
-            parent_orm_data = {
-                "business_details_id": business_details_id, "name": parent_attribute_name,
-                "is_color": is_color_from_csv, "active": record_data.get("attribute_active"),
-                "created_by": record_data.get("created_by"), "created_date": record_data.get("created_date"),
-                "updated_by": record_data.get("updated_by", record_data.get("created_by")),
-                "updated_date": record_data.get("updated_date", record_data.get("created_date")),
-            }
-            parent_attr_orm_instance = AttributeOrm(**parent_orm_data)
-            db_session.add(parent_attr_orm_instance)
+            logger.info(f"Creating attribute '{name}'")
+            new_attr = AttributeOrm(
+                business_details_id=business_details_id,
+                name=name,
+                is_color=is_color,
+                active=active_flag,
+                created_by=user_id,
+                created_date=now,
+                updated_by=user_id,
+                updated_date=now,
+            )
+            db_session.add(new_attr)
             db_session.flush()
-            if parent_attr_orm_instance.id is None:
-                msg = f"DB flush failed to return an ID for new attribute '{parent_attribute_name}'."
-                logger.error(msg)
-                raise DataLoaderError(message=msg, error_type=ErrorType.DATABASE, field_name="attribute_name", offending_value=parent_attribute_name)
-            attribute_db_id = parent_attr_orm_instance.id
-            logger.info(f"Created new attribute '{parent_attribute_name}' with DB ID {attribute_db_id}")
+            if new_attr.id is None:
+                raise DataLoaderError(
+                    message=f"Failed to flush new attribute '{name}'",
+                    error_type=ErrorType.DATABASE,
+                    field_name="attribute_name",
+                    offending_value=name
+                )
+            attribute_db_id = new_attr.id
+            parent = new_attr
 
-        if attribute_db_id is not None:
-            redis_pipe_to_use = db_pk_redis_pipeline if db_pk_redis_pipeline else db_session.get_bind().pool._redis_client.pipeline() if hasattr(db_session.get_bind().pool, '_redis_client') else None # Simplified
-            add_to_id_map(session_id, f"attributes{DB_PK_MAP_SUFFIX}", parent_attribute_name, attribute_db_id, pipeline=redis_pipe_to_use)
-            if redis_pipe_to_use and not db_pk_redis_pipeline : redis_pipe_to_use.execute()
-        values_name_str = record_data.get("values_name")
-        if values_name_str and attribute_db_id is not None and parent_attr_orm_instance is not None:
-            value_display_names = [name.strip() for name in values_name_str.split('|') if name.strip()]
-            raw_value_values = record_data.get("value_value")
-            value_actual_values = [v.strip() for v in raw_value_values.split('|')] if raw_value_values else []
-            raw_img_urls = record_data.get("img_url")
-            value_image_urls = [img.strip() for img in raw_img_urls.split('|')] if raw_img_urls else []
-            raw_values_active = record_data.get("values_active")
-            value_active_statuses = [status.strip().upper() for status in raw_values_active.split('|')] if raw_values_active else []
+        # cache in redis
+        add_to_id_map(
+            session_id,
+            f"attributes{DB_PK_MAP_SUFFIX}",
+            name,
+            attribute_db_id,
+            pipeline=db_pk_redis_pipeline
+        )
 
-            for i, val_display_name in enumerate(value_display_names):
-                actual_value_part = value_actual_values[i] if i < len(value_actual_values) else None
-                image_url_part = value_image_urls[i] if i < len(value_image_urls) else None
-                active_status_part = value_active_statuses[i] if i < len(value_active_statuses) and value_active_statuses[i] in ["ACTIVE", "INACTIVE"] else "INACTIVE"
-                value_for_db = actual_value_part if parent_attr_orm_instance.is_color and actual_value_part else val_display_name
-                if not value_for_db:
-                    logger.warning(f"Skipping attribute value for '{parent_attribute_name}' due to missing value/name part at index {i}.")
-                    continue
-                attr_value_orm = db_session.query(AttributeValueOrm).filter_by(attribute_id=attribute_db_id, name=val_display_name).first()
-                if attr_value_orm:
-                    logger.debug(f"Updating existing attribute value '{val_display_name}' for attribute ID {attribute_db_id}")
-                    attr_value_orm.value = value_for_db
-                    attr_value_orm.attribute_image_url = image_url_part if image_url_part is not None else attr_value_orm.attribute_image_url
-                    attr_value_orm.active = active_status_part
-                else:
-                    logger.debug(f"Creating new attribute value '{val_display_name}' for attribute ID {attribute_db_id}")
-                    new_val_orm_data = {
-                        "attribute_id": attribute_db_id, "name": val_display_name, "value": value_for_db,
-                        "attribute_image_url": image_url_part, "active": active_status_part,
-                    }
-                    attr_value_orm = AttributeValueOrm(**new_val_orm_data)
-                    db_session.add(attr_value_orm)
+        # --- ATTRIBUTE VALUES UPSERT ---
+        names =   (record_data.get("values_name")   or "").split("|")
+        vals  =   (record_data.get("value_value")   or "").split("|")
+        imgs  =   (record_data.get("img_url")       or "").split("|")
+        acts  = [s.strip().upper() for s in (record_data.get("values_active") or "").split("|")]
+
+        max_len = max(len(names), len(vals))
+        for i in range(max_len):
+            disp    = names[i].strip() if i < len(names) and names[i].strip() else (vals[i].strip() if i < len(vals) else None)
+            actual  = vals[i].strip() if i < len(vals) and vals[i].strip() else disp
+            url     = imgs[i].strip() if i < len(imgs) and imgs[i].strip() else None
+            status  = acts[i] if i < len(acts) and acts[i] in ("ACTIVE","INACTIVE") else "INACTIVE"
+            if not disp:
+                logger.warning(f"Skipping empty attribute-value at index {i} for '{name}'")
+                continue
+
+            # choose stored value
+            store_val = actual if parent.is_color and actual else disp
+
+            val_orm = (
+                db_session.query(AttributeValueOrm)
+                          .filter_by(attribute_id=attribute_db_id, name=disp)
+                          .first()
+            )
+            if val_orm:
+                logger.debug(f"Updating value '{disp}' for attribute ID {attribute_db_id}")
+                val_orm.value            = store_val
+                val_orm.attribute_image_url = url or val_orm.attribute_image_url
+                val_orm.active           = status
+                val_orm.updated_by       = user_id
+                val_orm.updated_date     = now
+
+            else:
+                logger.debug(f"Creating value '{disp}' for attribute ID {attribute_db_id}")
+                new_val = AttributeValueOrm(
+                    attribute_id        = attribute_db_id,
+                    name                = disp,
+                    value               = store_val,
+                    attribute_image_url = url,
+                    active              = status,
+                    created_by          = user_id,
+                    created_date        = now,
+                    updated_by          = user_id,
+                    updated_date        = now,
+                )
+                db_session.add(new_val)
+
         return attribute_db_id
-    except DataLoaderError:
-        raise
+
     except IntegrityError as e:
-        logger.error(f"DB integrity error processing attribute '{parent_attribute_name}': {e.orig}", exc_info=False)
+        db_session.rollback()
+        logger.error(f"Integrity error for attribute '{name}': {e.orig}")
         raise DataLoaderError(
-            message=f"Database integrity error for attribute '{parent_attribute_name}' or its values: {str(e.orig)}",
+            message=str(e.orig),
             error_type=ErrorType.DATABASE,
-            field_name="attribute_name", # Or specific value if parsable from e.orig
-            offending_value=parent_attribute_name,
+            field_name="attribute_name",
+            offending_value=name,
             original_exception=e
         )
     except DataError as e:
-        logger.error(f"DB data error processing attribute '{parent_attribute_name}': {e.orig}", exc_info=False)
+        db_session.rollback()
+        logger.error(f"Data error for attribute '{name}': {e.orig}")
         raise DataLoaderError(
-            message=f"Database data error for attribute '{parent_attribute_name}' or its values: {str(e.orig)}",
+            message=str(e.orig),
             error_type=ErrorType.DATABASE,
-            field_name="attribute_name", # Or specific value field
-            offending_value=parent_attribute_name, # Or specific problematic value
+            field_name="attribute_name",
+            offending_value=name,
             original_exception=e
         )
+    except DataLoaderError:
+        db_session.rollback()
+        raise
     except Exception as e:
-        logger.error(f"Unexpected error processing attribute record '{parent_attribute_name}': {e}", exc_info=True)
+        db_session.rollback()
+        logger.exception(f"Unexpected error processing attribute '{name}'")
         raise DataLoaderError(
-            message=f"Unexpected error for attribute '{parent_attribute_name}': {str(e)}",
+            message=str(e),
             error_type=ErrorType.UNEXPECTED_ROW_ERROR,
             field_name="attribute_name",
-            offending_value=parent_attribute_name,
+            offending_value=name,
             original_exception=e
         )
 
@@ -408,129 +450,98 @@ def load_return_policy_to_db(
     business_details_id: int,
     records_data: List[Dict[str, Any]],
     session_id: str,
-    db_pk_redis_pipeline: Any = None
+    db_pk_redis_pipeline: Any
 ) -> Dict[str, int]:
-    """
-    Upsert CSV-loaded return policies into the `return_policy` table.
-    - db_session is already connected to DB2 when called with db_key="DB2".
-    - CSV field 'return_policy_type' → ORM.col return_policy_type
-    - CSV field 'time_period_return'  → ORM.col time_period_return
-    - CSV field 'grace_period_return' → ORM.col grace_period_return
-    """
     if not records_data:
-        return {"inserted": 0, "updated": 0}
+        return {"inserted": 0, "updated": 0, "errors": 0}
 
-    summary = {"inserted": 0, "updated": 0}
+    summary = {"inserted": 0, "updated": 0, "errors": 0}
 
-    # Validate at most one SALES_ARE_FINAL in CSV
-    finals = [r for r in records_data if r.get("return_policy_type") == "SALES_ARE_FINAL"]
-    if len(finals) > 1:
-        raise DataLoaderError(
-            message="CSV contains more than one SALES_ARE_FINAL policy",
-            error_type=ErrorType.VALIDATION
-        )
+    processed_records_for_bulk = []
+    for record in records_data:
+        processed_record = record.copy()
+        if record.get("return_policy_type") == "SALES_ARE_FINAL":
+            processed_record["policy_name"] = None
+            processed_record["time_period_return"] = None
+        if "time_period_return" in processed_record:
+            processed_record["return_days"] = processed_record.pop("time_period_return")
+        if "created_date" in processed_record:
+            processed_record["created_date_ts"] = processed_record.pop("created_date")
+        if "updated_date" in processed_record:
+            processed_record["updated_date_ts"] = processed_record.pop("updated_date")
+        processed_records_for_bulk.append(processed_record)
 
-    now = datetime.utcnow()
+    records_with_id_in_csv = [r for r in processed_records_for_bulk if r.get("id") is not None]
+    records_without_id_in_csv = [r for r in processed_records_for_bulk if r.get("id") is None]
 
-    def _parse_int(val: Any) -> Optional[int]:
-        if val is None or (isinstance(val, str) and not val.strip()):
-            return None
-        try:
-            return int(val)
-        except ValueError:
-            return None
-
-    # Look for an existing final in DB
-    existing_final = (
-        db_session
-        .query(ReturnPolicyOrm)
-        .filter_by(
-            business_details_id=business_details_id,
-            return_policy_type="SALES_ARE_FINAL"
-        )
-        .first()
-    )
+    updates_list_of_dicts = []
+    inserts_list_of_dicts = []
 
     try:
-        for rec in records_data:
-            name   = rec.get("policy_name")
-            typ    = rec.get("return_policy_type")
-            grace  = _parse_int(rec.get("grace_period_return"))
-            period = _parse_int(rec.get("time_period_return"))
-
-            # Enforce single final
-            if typ == "SALES_ARE_FINAL" and existing_final:
-                if name != existing_final.policy_name:
-                    raise DataLoaderError(
-                        message="Business already has a SALES_ARE_FINAL policy; cannot add another.",
-                        error_type=ErrorType.VALIDATION
-                    )
-
-            # Lookup by business + policy_name
-            existing = (
-                db_session
-                .query(ReturnPolicyOrm)
-                .filter_by(
-                    business_details_id=business_details_id,
-                    policy_name=name
-                )
-                .first()
+        if records_with_id_in_csv:
+            ids_from_csv = [r['id'] for r in records_with_id_in_csv]
+            existing_policies_by_id_query = db_session.query(ReturnPolicyOrm).filter(
+                ReturnPolicyOrm.business_details_id == business_details_id,
+                ReturnPolicyOrm.id.in_(ids_from_csv)
             )
+            existing_policies_by_id_map = {p.id: p for p in existing_policies_by_id_query.all()}
 
-            if existing:
-                # UPDATE
-                existing.return_policy_type   = typ
-                existing.time_period_return   = period
-                existing.grace_period_return  = grace
-                existing.updated_date         = now
-                summary["updated"] += 1
-            else:
-                # INSERT
-                new = ReturnPolicyOrm(
-                    business_details_id    = business_details_id,
-                    created_date           = now,
-                    updated_date           = now,
-                    policy_name            = name,
-                    return_policy_type     = typ,
-                    grace_period_return    = grace,
-                    time_period_return     = period,
+            for record in records_with_id_in_csv:
+                csv_id = record['id']
+                if csv_id in existing_policies_by_id_map:
+                    update_data = record.copy()
+                    updates_list_of_dicts.append(update_data)
+                else:
+                    logger.warning(f"Return policy ID '{csv_id}' provided in CSV not found for business {business_details_id}. Will attempt to process as new if name matches or insert.")
+                    records_without_id_in_csv.append(record)
+                    summary["errors"] +=1
+
+        if records_without_id_in_csv:
+            policy_names_to_check = {r['policy_name'] for r in records_without_id_in_csv if r.get('policy_name')}
+            existing_policies_by_name_map = {}
+            if policy_names_to_check:
+                existing_policies_by_name_query = db_session.query(ReturnPolicyOrm).filter(
+                    ReturnPolicyOrm.business_details_id == business_details_id,
+                    ReturnPolicyOrm.policy_name.in_(policy_names_to_check)
                 )
-                db_session.add(new)
-                summary["inserted"] += 1
+                existing_policies_by_name_map = {p.policy_name: p for p in existing_policies_by_name_query.all()}
 
-        # caller commits
+            for record in records_without_id_in_csv:
+                policy_name = record.get("policy_name")
+                existing_policy_by_name = existing_policies_by_name_map.get(policy_name) if policy_name else None
+
+                is_already_targeted_for_update_by_id = any(u['id'] == record.get('id') for u in updates_list_of_dicts if record.get('id') is not None)
+
+                if existing_policy_by_name and not is_already_targeted_for_update_by_id:
+                    update_data = record.copy()
+                    update_data['id'] = existing_policy_by_name.id
+                    if not any(u['id'] == update_data['id'] for u in updates_list_of_dicts):
+                        updates_list_of_dicts.append(update_data)
+                elif not is_already_targeted_for_update_by_id :
+                    insert_data = record.copy()
+                    insert_data['business_details_id'] = business_details_id
+                    if 'id' in insert_data: del insert_data['id']
+                    inserts_list_of_dicts.append(insert_data)
+
+        if updates_list_of_dicts:
+            logger.info(f"Bulk updating {len(updates_list_of_dicts)} return policies for business {business_details_id}.")
+            db_session.bulk_update_mappings(ReturnPolicyOrm, updates_list_of_dicts)
+            summary["updated"] = len(updates_list_of_dicts)
+
+        if inserts_list_of_dicts:
+            logger.info(f"Bulk inserting {len(inserts_list_of_dicts)} new return policies for business {business_details_id}.")
+            db_session.bulk_insert_mappings(ReturnPolicyOrm, inserts_list_of_dicts)
+            summary["inserted"] = len(inserts_list_of_dicts)
+
         return summary
 
     except IntegrityError as e:
-        db_session.rollback()
-        logger.error("DB integrity error loading return policies: %s", e.orig)
-        raise DataLoaderError(
-            message=f"Integrity error loading return policies: {e.orig}",
-            error_type=ErrorType.DATABASE,
-            original_exception=e
-        )
-    except DataError as e:
-        db_session.rollback()
-        logger.error("DB data error loading return policies: %s", e.orig)
-        raise DataLoaderError(
-            message=f"Data error loading return policies: {e.orig}",
-            error_type=ErrorType.DATABASE,
-            original_exception=e
-        )
-    except DataLoaderError:
-        db_session.rollback()
-        raise
+        logger.error(f"Bulk database integrity error processing return policies for business {business_details_id}: {e.orig}", exc_info=False)
+        raise DataLoaderError(message=f"Bulk database integrity error for return policies: {str(e.orig)}", error_type=ErrorType.DATABASE, original_exception=e)
     except Exception as e:
-        db_session.rollback()
-        logger.exception("Unexpected error in return policy loader")
-        raise DataLoaderError(
-            message=f"Unexpected error: {str(e)}",
-            error_type=ErrorType.UNEXPECTED_ROW_ERROR,
-            original_exception=e
-        )
+        logger.error(f"Unexpected error during bulk processing of return policies for business {business_details_id}: {e}", exc_info=True)
+        raise DataLoaderError(message=f"Unexpected error during bulk return policy processing: {str(e)}", error_type=ErrorType.UNEXPECTED_ROW_ERROR, original_exception=e)
 
-  
-        
 def load_price_to_db(
     db_session: Session,
     business_details_id: int,
