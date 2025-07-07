@@ -221,8 +221,8 @@ class ProductCsvModel(BaseModel):
     quantity: Optional[int] = Field(default=0, ge=0)
     brand_name: constr(strip_whitespace=True, min_length=1)
     category_path: constr(strip_whitespace=True, min_length=1)
-    warehouse_location: Optional[str] = None
-    store_location: Optional[str] = None
+    warehouse_location: Optional[str] = None  # NEW: location in warehouse
+    store_location: Optional[str] = None      # NEW: location in store
     shopping_category_name: Optional[str] = None
     price: Optional[float] = Field(default=0.0, ge=0)
     sale_price: Optional[float] = Field(default=0.0, ge=0)
@@ -296,6 +296,7 @@ class ProductCsvModel(BaseModel):
             return v.strip().lower().replace(' ', '-')
         name = values.get('product_name', '')
         return generate_slug(name)
+
 class ProductItemModel(BaseModel):
     product_name: str
     variant_sku: str
