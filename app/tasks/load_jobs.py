@@ -16,7 +16,7 @@ from redis.exceptions import (
     TimeoutError as RedisTimeoutError,
     BusyLoadingError as RedisBusyLoadingError,
 )
-
+from app.services.db_loaders import load_products_to_db
 from app.core.config import settings
 from app.db.connection import get_session
 from app.db.models import UploadSessionOrm
@@ -197,7 +197,7 @@ def process_csv_task(
                     if map_type == "attributes":
                         load_attribute_to_db(data_db, int(business_id), rec, session_id, None, user_id)
                     elif map_type == "products":
-                        load_product_record_to_db(data_db, int(business_id), rec, session_id, None)
+                        load_product_record_to_db(data_db, int(business_id), rec, session_id, None, user_id)
                     elif map_type == "meta_tags":
                         load_meta_tags_from_csv(data_db, int(business_id), rec, session_id, None)
                     elif map_type == "categories":

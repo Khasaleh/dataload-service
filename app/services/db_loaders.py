@@ -30,6 +30,8 @@ from app.utils.slug import generate_slug
 from app.utils.redis_utils import add_to_id_map, get_from_id_map, DB_PK_MAP_SUFFIX
 from app.exceptions import DataLoaderError
 from app.models.schemas import ErrorType
+from app.dataload.product_loader import load_product_record_to_db
+from app.dataload.models.product_csv import ProductCsvModel
 
 logger = logging.getLogger(__name__)
 
