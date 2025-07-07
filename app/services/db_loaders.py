@@ -294,6 +294,7 @@ def load_attribute_to_db(
     record_data: Dict[str, Any],
     session_id: str,
     db_pk_redis_pipeline: Any = None
+    user_id: int = None
 ) -> Optional[int]:
     parent_attribute_name = record_data.get("attribute_name")
     if not parent_attribute_name:
