@@ -213,7 +213,6 @@ class ProductPriceModel(BaseModel):
         if v is not None and v <= 0:
             raise ValueError('offer_price must be positive if provided')
         return v
-
 class ProductCsvModel(BaseModel):
     """Pydantic model for validating and normalizing product CSV rows."""
     self_gen_product_id: constr(strip_whitespace=True, min_length=1)
@@ -222,6 +221,8 @@ class ProductCsvModel(BaseModel):
     quantity: Optional[int] = Field(default=0, ge=0)
     brand_name: constr(strip_whitespace=True, min_length=1)
     category_path: constr(strip_whitespace=True, min_length=1)
+    warehouse_location: Optional[str] = None
+    store_location: Optional[str] = None
     shopping_category_name: Optional[str] = None
     price: Optional[float] = Field(default=0.0, ge=0)
     sale_price: Optional[float] = Field(default=0.0, ge=0)
@@ -295,7 +296,6 @@ class ProductCsvModel(BaseModel):
             return v.strip().lower().replace(' ', '-')
         name = values.get('product_name', '')
         return generate_slug(name)
-
 class ProductItemModel(BaseModel):
     product_name: str
     variant_sku: str
