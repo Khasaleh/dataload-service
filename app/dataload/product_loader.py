@@ -1,3 +1,4 @@
+
 import csv
 from typing import List, Dict, Optional, Any
 from sqlalchemy.orm import Session
@@ -19,13 +20,13 @@ from app.models.shopping_category import ShoppingCategoryOrm
 from app.dataload.models.product_csv import ProductCsvModel
 from app.exceptions import DataLoaderError
 from app.models.schemas import ErrorType
-from app.core.context import get_current_user_id  # context helper
+from app.core.context import get_current_user_id  # extracts user ID from request context
 
 logger = logging.getLogger(__name__)
 
 
 def parse_specifications(spec_str: Optional[str]) -> List[Dict[str, str]]:
-    specs: List[Dict[str,str]] = []
+    specs: List[Dict[str, str]] = []
     if not spec_str:
         return specs
     for pair in spec_str.split('|'):
@@ -41,7 +42,7 @@ def parse_specifications(spec_str: Optional[str]) -> List[Dict[str, str]]:
 
 
 def parse_images(image_str: Optional[str]) -> List[Dict[str, Any]]:
-    images: List[Dict[str,Any]] = []
+    images: List[Dict[str, Any]] = []
     if not image_str:
         return images
     parts = image_str.split('|')
@@ -64,24 +65,23 @@ def parse_images(image_str: Optional[str]) -> List[Dict[str, Any]]:
         images.append({"url": url, "main_image": is_main})
     return images
 
+
 def load_products_to_db(
     db_session: Session,
     business_details_id: int,
     records_data: List[Dict[str, Any]],
     session_id: str,
-    db_pk_redis_pipeline: Any = None,
-    user_id: int = None
+    db_pk_redis_pipeline: Any = None
 ) -> Dict[str, int]:
     """
-    Upsert all products from the CSV into products (+ specs + images),
-    delegating each row to load_product_record_to_db().
+    Upsert all products from the CSV into products (+ specs + images).
     """
     summary = {"inserted": 0, "updated": 0, "errors": 0}
+    user_id = get_current_user_id()
+
     for idx, raw in enumerate(records_data, start=2):
         try:
-            # validate / coerce into your ProductCsvModel
             model = ProductCsvModel(**raw)
-            # call your existing loader
             prod_id = load_product_record_to_db(
                 db_session,
                 business_details_id,
@@ -89,7 +89,8 @@ def load_products_to_db(
                 session_id,
                 user_id
             )
-            # use Redis map to see if this was new or existing
+            # track insert vs update via Redis (assumes add_to_id_map imported)
+            from app.utils.redis_utils import add_to_id_map, DB_PK_MAP_SUFFIX
             prev = add_to_id_map(
                 session_id,
                 f"products{DB_PK_MAP_SUFFIX}",
@@ -102,7 +103,7 @@ def load_products_to_db(
                 summary["inserted"] += 1
             else:
                 summary["updated"] += 1
-            # now (re)store the mapping
+            # re-store mapping
             add_to_id_map(
                 session_id,
                 f"products{DB_PK_MAP_SUFFIX}",
@@ -114,7 +115,6 @@ def load_products_to_db(
             summary["errors"] += 1
         except Exception:
             summary["errors"] += 1
-
     return summary
 
 
@@ -127,18 +127,15 @@ def load_product_record_to_db(
 ) -> int:
     """
     Loads or updates a single product.
-    - On create: sets created_by, created_date via now_epoch_ms()
-    - On update: sets updated_by, updated_date via now_epoch_ms(), preserves created_* fields
     """
     log_prefix = f"[Product {product_data.self_gen_product_id}]"
     now_ms = now_epoch_ms()
     try:
-        # 1) Lookup related entities
-        brand = (
-            db.query(BrandOrm)
-              .filter_by(name=product_data.brand_name, business_details_id=business_details_id)
-              .one_or_none()
-        )
+        # 1) Lookups
+        brand = db.query(BrandOrm).filter_by(
+            name=product_data.brand_name,
+            business_details_id=business_details_id
+        ).one_or_none()
         if not brand:
             raise DataLoaderError(
                 message=f"Brand '{product_data.brand_name}' not found.",
@@ -146,11 +143,11 @@ def load_product_record_to_db(
                 field_name="brand_name",
                 offending_value=product_data.brand_name
             )
-        category = (
-            db.query(CategoryOrm)
-              .filter_by(id=product_data.category_id, business_details_id=business_details_id)
-              .one_or_none()
-        )
+        # category lookup by path: you may need to split 'A/B/C' and query
+        category = db.query(CategoryOrm).filter_by(
+            id=product_data.category_id,
+            business_details_id=business_details_id
+        ).one_or_none()
         if not category:
             raise DataLoaderError(
                 message=f"Category ID '{product_data.category_id}' not found.",
@@ -160,16 +157,14 @@ def load_product_record_to_db(
             )
         shopping_cat_id: Optional[int] = None
         if product_data.shopping_category_name:
-            sc = (
-                db.query(ShoppingCategoryOrm)
-                  .filter_by(name=product_data.shopping_category_name)
-                  .one_or_none()
-            )
+            sc = db.query(ShoppingCategoryOrm).filter_by(
+                name=product_data.shopping_category_name
+            ).one_or_none()
             if sc:
                 shopping_cat_id = sc.id
             else:
                 logger.warning(f"{log_prefix} ShoppingCategory '{product_data.shopping_category_name}' not found.")
-        # 2) Return policy lookup
+        # return policy
         rp_filters = [
             ReturnPolicyOrm.business_details_id == business_details_id,
             ReturnPolicyOrm.return_policy_type == product_data.return_type
@@ -180,9 +175,7 @@ def load_product_record_to_db(
                 ReturnPolicyOrm.time_period_return == product_data.return_fee
             ]
         else:
-            rp_filters += [
-                ReturnPolicyOrm.time_period_return.is_(None)
-            ]
+            rp_filters += [ReturnPolicyOrm.time_period_return.is_(None)]
         rp = db.query(ReturnPolicyOrm).filter(*rp_filters).one_or_none()
         if not rp:
             raise DataLoaderError(
@@ -191,15 +184,11 @@ def load_product_record_to_db(
                 field_name="return_type",
                 offending_value=product_data.return_type
             )
-        # 3) Upsert product
-        prod = (
-            db.query(ProductOrm)
-              .filter_by(
-                  self_gen_product_id=product_data.self_gen_product_id,
-                  business_details_id=business_details_id
-              )
-              .one_or_none()
-        )
+        # 2) Upsert product
+        prod = db.query(ProductOrm).filter_by(
+            self_gen_product_id=product_data.self_gen_product_id,
+            business_details_id=business_details_id
+        ).one_or_none()
         is_new = prod is None
         if is_new:
             prod = ProductOrm(
@@ -213,43 +202,57 @@ def load_product_record_to_db(
         else:
             prod.updated_by = user_id
             prod.updated_date = now_ms
-        # 4) Populate common fields
-        prod.name                   = product_data.product_name
-        prod.description            = product_data.description
-        prod.brand_name             = product_data.brand_name
-        prod.category_id            = product_data.category_id
-        prod.shopping_category_id   = shopping_cat_id
-        prod.price                  = product_data.price or 0.0
-        prod.sale_price             = product_data.sale_price or 0.0
-        prod.cost_price             = product_data.cost_price or 0.0
-        prod.quantity               = product_data.quantity or 0
-        prod.package_size_length    = product_data.package_size_length or 0.0
-        prod.package_size_width     = product_data.package_size_width or 0.0
-        prod.package_size_height    = product_data.package_size_height or 0.0
-        prod.product_weights        = product_data.product_weights or 0.0
-        prod.size_unit              = product_data.size_unit.upper() if product_data.size_unit else None
-        prod.weight_unit            = product_data.weight_unit.upper() if product_data.weight_unit else None
-        prod.return_policy_id       = rp.id
-        prod.return_type            = product_data.return_type
-        prod.return_fee_type        = product_data.return_fee_type
-        prod.time_period_return     = product_data.return_fee
-        prod.url                    = product_data.url or generate_slug(product_data.product_name)
-        prod.video_url              = product_data.video_url
-        prod.video_thumbnail_url    = product_data.video_thumbnail_url
-        prod.active                 = product_data.active or 'ACTIVE'
-        prod.ean                    = product_data.ean
-        prod.isbn                   = product_data.isbn
-        prod.keywords               = product_data.keywords
-        prod.mpn                    = product_data.mpn
-        prod.seo_description        = product_data.seo_description
-        prod.seo_title              = product_data.seo_title
-        prod.upc                    = product_data.upc
-        prod.is_child_item          = product_data.is_child_item
+        # common fields
+        prod.name                 = product_data.product_name
+        prod.description          = product_data.description
+        prod.brand_name           = product_data.brand_name
+        prod.category_id          = product_data.category_id
+        prod.shopping_category_id = shopping_cat_id
+        prod.price                = product_data.price
+        prod.sale_price           = product_data.sale_price
+        prod.cost_price           = product_data.cost_price
+        prod.quantity             = product_data.quantity
+        prod.package_size_length  = product_data.package_size_length
+        prod.package_size_width   = product_data.package_size_width
+        prod.package_size_height  = product_data.package_size_height
+        prod.product_weights      = product_data.product_weights
+        prod.size_unit            = product_data.size_unit.upper() if product_data.size_unit else None
+        prod.weight_unit          = product_data.weight_unit.upper() if product_data.weight_unit else None
+        prod.return_policy_id     = rp.id
+        prod.return_type          = product_data.return_type
+        prod.return_fee_type      = product_data.return_fee_type
+        prod.time_period_return   = product_data.return_fee
+        prod.url                  = product_data.url or generate_slug(product_data.product_name)
+        prod.video_url            = product_data.video_url
+        prod.video_thumbnail_url  = product_data.video_thumbnail_url
+        prod.active               = product_data.active
+        prod.ean                  = product_data.ean
+        prod.isbn                 = product_data.isbn
+        prod.keywords             = product_data.keywords
+        prod.mpn                  = product_data.mpn
+        prod.seo_description      = product_data.seo_description
+        prod.seo_title            = product_data.seo_title
+        prod.upc                  = product_data.upc
+        prod.is_child_item        = product_data.is_child_item
         # flush to get ID
         db.flush()
-        # 5) Specs
+        # 3) Specs
         if not is_new:
             db.query(ProductSpecificationOrm).filter_by(product_id=prod.id).delete()
+        # warehouse/store
+        for name, val in [
+            ("Warehouse_Location", product_data.warehouse_location),
+            ("Store_Location", product_data.store_location)
+        ]:
+            if val is not None:
+                db.add(ProductSpecificationOrm(
+                    product_id=prod.id,
+                    name=name,
+                    value=val,
+                    active='ACTIVE',
+                    created_by=user_id if is_new else None,
+                    created_date=now_ms if is_new else None
+                ))
         for spec in parse_specifications(product_data.specifications):
             db.add(ProductSpecificationOrm(
                 product_id=prod.id,
@@ -259,7 +262,7 @@ def load_product_record_to_db(
                 created_by=user_id if is_new else None,
                 created_date=now_ms if is_new else None
             ))
-        # 6) Images
+        # 4) Images
         if not is_new:
             db.query(ProductImageOrm).filter_by(product_id=prod.id).delete()
         main_img: Optional[str] = None

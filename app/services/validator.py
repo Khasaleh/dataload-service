@@ -10,6 +10,7 @@ from app.models.schemas import (
 )
 from typing import List, Dict, Optional
 from app.utils.redis_utils import get_from_id_map
+from app.dataload.models.product_csv import ProductCsvModel
 
 MODEL_MAP = {
     "brands":           BrandCsvModel,
