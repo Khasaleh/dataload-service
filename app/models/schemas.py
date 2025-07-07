@@ -111,7 +111,10 @@ class AttributeCsvModel(BaseModel):
     """Pydantic model for validating a row from an Attributes CSV file."""
     attribute_name: constr(strip_whitespace=True, min_length=1)
     is_color: bool = False
-    attribute_active: Optional[str] = None
+    attribute_active: Optional[str] = Field(
+        None,
+        description="Either 'ACTIVE' or 'INACTIVE'; default to 'INACTIVE' otherwise"
+    )
     values_name: Optional[str] = None
     value_value: Optional[str] = None
     img_url: Optional[str] = None
@@ -119,12 +122,30 @@ class AttributeCsvModel(BaseModel):
 
     class Config:
         anystr_strip_whitespace = True
+        extra = "forbid"
 
     @validator('values_name', 'value_value', 'img_url', 'values_active', pre=True, always=True)
-    def ensure_optional_fields_are_not_empty_strings(cls, v):
-        if v == "":
-            return None
-        return v
+    def empty_str_to_none(cls, v):
+        return None if v == "" else v
+
+    @root_validator(pre=True)
+    def normalize_active_fields(cls, values):
+        # attribute_active → exactly "ACTIVE" or "INACTIVE"
+        raw_attr = values.get("attribute_active")
+        if isinstance(raw_attr, str) and raw_attr.strip().lower() == "active":
+            values["attribute_active"] = "ACTIVE"
+        else:
+            # anything else (including None) → INACTIVE
+            values["attribute_active"] = "INACTIVE"
+
+        # If user provided a values_active string, canonicalize each segment
+        va = values.get("values_active")
+        if isinstance(va, str):
+            parts = [seg.strip().upper() for seg in va.split("|")]
+            # force each to ACTIVE/INACTIVE only
+            parts = ["ACTIVE" if p == "ACTIVE" else "INACTIVE" for p in parts]
+            values["values_active"] = "|".join(parts)
+        return values
 
 class ReturnPolicyCsvModel(BaseModel):
     id: Optional[int] = None

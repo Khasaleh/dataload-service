@@ -103,6 +103,11 @@ def validate_csv(load_type: str, records: List[Dict], session_id: str) -> (List[
     if load_type == 'categories' and valid_rows:
         cat_errs = check_category_hierarchy(valid_rows, session_id)
         errors.extend(cat_errs)
+        
+        # File‐level duplicate check for attributes
+    if load_type == 'attributes' and valid_rows:
+        dupes = check_file_uniqueness(valid_rows, unique_key="attribute_name")
+        errors.extend(dupes)
 
     return errors, valid_rows
 

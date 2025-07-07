@@ -154,7 +154,7 @@ def process_csv_task(
         for idx, rec in enumerate(validated, start=2):
             try:
                 if map_type == "attributes":
-                    load_attribute_to_db(data_db, int(business_id), rec, session_id, None)
+                    load_attribute_to_db(data_db, int(business_id), rec, session_id, None, user_id )
                 elif map_type == "products":
                     load_product_record_to_db(data_db, int(business_id), rec, session_id, None)
                 elif map_type == "meta_tags":
