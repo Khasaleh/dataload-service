@@ -91,18 +91,52 @@ def process_csv_task(
 ):
     """
     Generic CSV processing pipeline.
-    If db_key is provided, get_session will pick the alternate DB URL.
+    - meta_db: always the default DB, used only to update upload_sessions (status/details).
+    - data_db: either meta_db or the alternate (DB2) if db_key="DB2", used for actual row upserts.
+    Any unexpected exception in:
+      • file read   → FAILED_VALIDATION
+      • schema valid → FAILED_VALIDATION
+      • DB load     → FAILED_PROCESSING
+    will be caught, the session status updated, and both sessions closed.
     """
-    # 1) Always open a “meta” session on the default DB for upload_sessions updates
+    # 1) “meta” session for upload_sessions
     meta_db = get_session(business_id=int(business_id), db_key=None)
-    # 2) If requested, open a second “data” session on DB2; else reuse meta_db
+    # 2) “data” session for actual writes
     data_db = get_session(business_id=int(business_id), db_key=db_key) if db_key else meta_db
 
+    # helper to fail early
+    def fail(status, detail_list, rec_count=None, err_count=None):
+        _update_session_status(
+            meta_db,
+            session_id,
+            status,
+            details=detail_list,
+            record_count=rec_count,
+            error_count=err_count,
+        )
+        try:
+            meta_db.rollback()
+        except: pass
+        if data_db is not meta_db:
+            try:
+                data_db.rollback()
+            except: pass
+        meta_db.close()
+        if data_db is not meta_db:
+            data_db.close()
+
+    # PHASE 1: DOWNLOAD
     _update_session_status(meta_db, session_id, UploadJobStatus.DOWNLOADING_FILE)
 
+    # PHASE 2: READ FILE
     abs_path = os.path.join(STORAGE_ROOT, business_id, wasabi_file_path)
-    with open(abs_path, newline="", encoding="utf-8") as f:
-        original_records = list(csv.DictReader(f))
+    try:
+        with open(abs_path, newline="", encoding="utf-8") as f:
+            original_records = list(csv.DictReader(f))
+    except Exception as e:
+        detail = [{"row": None, "field": None, "error": f"Failed reading file: {e}"}]
+        return fail(UploadJobStatus.FAILED_VALIDATION, detail, rec_count=None, err_count=1)
+
     if not original_records:
         _update_session_status(
             meta_db,
@@ -111,21 +145,28 @@ def process_csv_task(
             record_count=0,
             error_count=0,
         )
+        meta_db.close()
+        if data_db is not meta_db:
+            data_db.close()
         return
 
+    # PHASE 3: VALIDATE SCHEMA & BUSINESS RULES
     _update_session_status(meta_db, session_id, UploadJobStatus.VALIDATING_SCHEMA)
-    init_errors, validated = validate_csv(map_type, original_records, session_id)
-    if init_errors:
-        _update_session_status(
-            meta_db,
-            session_id,
-            UploadJobStatus.FAILED_VALIDATION,
-            details=init_errors,
-            record_count=len(original_records),
-            error_count=len(init_errors),
-        )
-        return
+    try:
+        init_errors, validated = validate_csv(map_type, original_records, session_id)
+    except Exception as e:
+        detail = [{"row": None, "field": None, "error": f"Schema validator error: {type(e).__name__}: {e}"}]
+        return fail(UploadJobStatus.FAILED_VALIDATION, detail, rec_count=len(original_records), err_count=1)
 
+    if init_errors:
+        return fail(
+            UploadJobStatus.FAILED_VALIDATION,
+            init_errors,
+            rec_count=len(original_records),
+            err_count=len(init_errors),
+        )
+
+    # PHASE 4: START DB PROCESSING
     _update_session_status(
         meta_db,
         session_id,
@@ -133,63 +174,74 @@ def process_csv_task(
         record_count=len(validated),
     )
 
+    # PHASE 5: DISPATCH TO LOADERS (and collect per-row errors)
     processed = 0
-    errors = []
+    row_errors: list[ErrorDetailModel] = []
 
-    # route to the correct loader (writes go into data_db)
-    if map_type == "brands":
-        summary = load_brand_to_db(data_db, int(business_id), validated, session_id, None, user_id)
-        processed = summary.get("inserted", 0) + summary.get("updated", 0)
+    try:
+        if map_type == "brands":
+            summary = load_brand_to_db(data_db, int(business_id), validated, session_id, None, user_id)
+            processed = summary.get("inserted", 0) + summary.get("updated", 0)
 
-    elif map_type == "return_policies":
-        # this loader writes into DB2 (data_db), metadata remains on meta_db
-        summary = load_return_policy_to_db(data_db, int(business_id), validated, session_id)
-        processed = summary.get("inserted", 0) + summary.get("updated", 0)
+        elif map_type == "return_policies":
+            summary = load_return_policy_to_db(data_db, int(business_id), validated, session_id)
+            processed = summary.get("inserted", 0) + summary.get("updated", 0)
 
-    elif map_type == "product_prices":
-        summary = load_price_to_db(data_db, int(business_id), validated, session_id, None)
-        processed = summary.get("inserted", 0) + summary.get("updated", 0)
+        elif map_type == "product_prices":
+            summary = load_price_to_db(data_db, int(business_id), validated, session_id, None)
+            processed = summary.get("inserted", 0) + summary.get("updated", 0)
 
-    else:
-        for idx, rec in enumerate(validated, start=2):
-            try:
-                if map_type == "attributes":
-                    load_attribute_to_db(data_db, int(business_id), rec, session_id, None, user_id )
-                elif map_type == "products":
-                    load_product_record_to_db(data_db, int(business_id), rec, session_id, None)
-                elif map_type == "meta_tags":
-                    load_meta_tags_from_csv(data_db, int(business_id), rec, session_id, None)
-                elif map_type == "categories":
-                    load_category_to_db(data_db, int(business_id), rec, session_id, None, user_id)
-                processed += 1
-            except Exception as e:
-                errors.append(
-                    ErrorDetailModel(
-                        row_number=idx,
-                        error_message=str(e),
-                        error_type=ErrorType.UNEXPECTED_ROW_ERROR,
+        else:
+            for idx, rec in enumerate(validated, start=2):
+                try:
+                    if map_type == "attributes":
+                        load_attribute_to_db(data_db, int(business_id), rec, session_id, None, user_id)
+                    elif map_type == "products":
+                        load_product_record_to_db(data_db, int(business_id), rec, session_id, None)
+                    elif map_type == "meta_tags":
+                        load_meta_tags_from_csv(data_db, int(business_id), rec, session_id, None)
+                    elif map_type == "categories":
+                        load_category_to_db(data_db, int(business_id), rec, session_id, None, user_id)
+                    processed += 1
+                except Exception as e:
+                    row_errors.append(
+                        ErrorDetailModel(
+                            row_number=idx,
+                            error_message=str(e),
+                            error_type=ErrorType.UNEXPECTED_ROW_ERROR,
+                        )
                     )
-                )
 
-    # commit both DBs if distinct
-    meta_db.commit()
-    if data_db is not meta_db:
-        data_db.commit()
+        # PHASE 6: COMMIT BOTH DBs
+        meta_db.commit()
+        if data_db is not meta_db:
+            data_db.commit()
 
+    except Exception as e:
+        # Any exception in loader or commit → FAILED_PROCESSING
+        detail = [{
+            "row": None,
+            "field": None,
+            "error": f"Processing error: {type(e).__name__}: {e}"
+        }]
+        return fail(UploadJobStatus.FAILED_PROCESSING, detail, rec_count=len(validated), err_count=1)
+
+    # PHASE 7: FINALIZE
     final_status = (
         UploadJobStatus.COMPLETED
-        if not errors
+        if not row_errors
         else UploadJobStatus.COMPLETED_WITH_ERRORS
     )
     _update_session_status(
         meta_db,
         session_id,
         final_status,
-        details=errors if errors else None,
+        details=[e.model_dump() for e in row_errors] if row_errors else None,
         record_count=len(validated),
-        error_count=len(errors),
+        error_count=len(row_errors),
     )
 
+    # CLEANUP
     try:
         os.remove(abs_path)
     except OSError:
@@ -202,9 +254,8 @@ def process_csv_task(
     return {
         "status": final_status.value,
         "processed": processed,
-        "errors": [e.model_dump() for e in errors],
+        "errors": [e.model_dump() for e in row_errors],
     }
-
 
 # -----------------------------------------------------------------------------
 # Celery wrapper tasks (unchanged)
