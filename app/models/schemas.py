@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, validator, constr, root_validator
+from pydantic import BaseModel, Field, validator, constr, root_validator,HttpUrl
 from typing import Optional, List, Any
 from datetime import datetime
 from enum import Enum
