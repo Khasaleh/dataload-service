@@ -45,22 +45,23 @@ class UploadSessionOrm(Base):
 # --- Business Details Model ---
 class BusinessDetailsOrm(Base):
     __tablename__ = "business_details"
-
-    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-    # Example other fields:
-    # company_id_string = Column(String, unique=True, index=True, nullable=False)
-    # business_name = Column(String, nullable=True)
-
-    # Relationships
-    return_policies = relationship("ReturnPolicyOrm", back_populates="business_detail")
-    # Add other relationships as needed, e.g.:
-    # upload_sessions = relationship("UploadSessionOrm", back_populates="business_detail_fk_name")
-    # categories = relationship("CategoryOrm", back_populates="business_detail_fk_name")
-
     __table_args__ = (
         {"schema": PUBLIC_SCHEMA},
     )
 
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
+
+    return_policies = relationship(
+        "ReturnPolicyOrm",
+        back_populates="business_detail"
+    )
+
+    # ✅ Add this to fix the error!
+    shopping_categories = relationship(
+        "ShoppingCategoryOrm",
+        back_populates="business_detail",
+        cascade="all, delete-orphan"
+    )
 # --- Category Models ---
 class CategoryOrm(Base):
     __tablename__ = "categories"
