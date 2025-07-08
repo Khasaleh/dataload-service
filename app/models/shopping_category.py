@@ -1,7 +1,7 @@
 from sqlalchemy import Column, BigInteger, String, DateTime, ForeignKey, UniqueConstraint, Index
 from sqlalchemy.orm import relationship
 from app.db.base_class import Base
-from app.db.models import PUBLIC_SCHEMA
+from app.db.schema_names import PUBLIC_SCHEMA
 
 class ShoppingCategoryOrm(Base):
     __tablename__ = "shopping_categories"

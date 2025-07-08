@@ -6,7 +6,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func # For server-side default timestamps
 # from sqlalchemy.sql.expression import nextval # Removed incorrect import
-
+from app.db.schema_names import PUBLIC_SCHEMA
 from .base_class import Base
 import os # Added os import
 from app.models.shopping_category import ShoppingCategoryOrm
@@ -15,7 +15,7 @@ from app.models.shopping_category import ShoppingCategoryOrm
 # These should align with what's set in app/db/connection.py via environment variables
 CATALOG_SCHEMA = os.getenv("CATALOG_SERVICE_SCHEMA", "catalog_management")
 BUSINESS_SCHEMA = os.getenv("BUSINESS_SERVICE_SCHEMA", "fazeal_business")
-PUBLIC_SCHEMA = "public"
+
 
 # --- Upload Session Model ---
 class UploadSessionOrm(Base):
