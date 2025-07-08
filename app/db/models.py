@@ -540,3 +540,25 @@ class MetaTagOrm(Base):
         # UniqueConstraint('business_details_id', 'product_id', name='uq_metatag_business_product'), # product_id is already unique
         {"schema": CATALOG_SCHEMA} # Assigned schema
     )
+
+
+# --- Products Price History Model ---
+class ProductsPriceHistoryOrm(Base):
+    __tablename__ = "products_price_history"
+    __table_args__ = (
+        Index('idx_products_price_history_product_id', "product_id"),
+        {"schema": PUBLIC_SCHEMA} # Assuming public schema as per DDL
+    )
+
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True) # DDL: bigint
+    price = Column(Float, nullable=True) # DDL: real
+    sale_price = Column(Float, nullable=True) # DDL: real
+    product_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.products.id"), nullable=True, index=True) # DDL: bigint
+    month = Column(String(255), nullable=True) # DDL: character varying(255)
+    old_price = Column(Float, nullable=True) # DDL: real
+    year = Column(Integer, nullable=True) # DDL: integer
+
+    # Optional: Define relationship back to ProductOrm if needed
+    # product = relationship("ProductOrm") # If ProductOrm needs a price_history backref:
+                                         # price_history = relationship("ProductsPriceHistoryOrm", back_populates="product")
+                                         # For now, keeping it simple as the loader doesn't require this backref.
