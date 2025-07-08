@@ -16,7 +16,7 @@ from redis.exceptions import (
     TimeoutError as RedisTimeoutError,
     BusyLoadingError as RedisBusyLoadingError,
 )
-from app.services.db_loaders import load_products_to_db
+from app.dataload.product_loader import load_products_to_db
 from app.core.config import settings
 from app.db.connection import get_session
 from app.db.models import UploadSessionOrm
@@ -77,46 +77,6 @@ def _update_session_status(
 
     db.commit()
 
-def load_products_to_db(
-    db_session: Session,
-    business_details_id: int,
-    record_data: Dict[str, Any],
-    session_id: str,
-    db_pk_redis_pipeline: Any = None,
-    user_id: Optional[int] = None
-) -> int:
-    """
-    Adapter to let process_csv_task call your product loader.
-    """
-    # 1) Validate + coerce into Pydantic model
-    try:
-        product = ProductCsvModel(**record_data)
-    except Exception as e:
-        raise DataLoaderError(
-            message=f"Product CSV validation failed: {e}",
-            error_type=ErrorType.VALIDATION
-        )
-
-    # 2) Call the real loader (in product_loader.py), which returns product.id
-    prod_id = load_product_record_to_db(
-        db_session,
-        business_details_id,
-        product,
-        session_id,
-        user_id
-    )
-
-    # 3) If you’re maintaining a Redis map of CSV→DB PKs:
-    if db_pk_redis_pipeline is not None:
-        add_to_id_map(
-            session_id,
-            f"products{DB_PK_MAP_SUFFIX}",
-            product.self_gen_product_id,
-            prod_id,
-            pipeline=db_pk_redis_pipeline
-        )
-
-    return prod_id
 
 def process_csv_task(
     business_id: str,
@@ -237,7 +197,7 @@ def process_csv_task(
                     if map_type == "attributes":
                         load_attribute_to_db(data_db, int(business_id), rec, session_id, None, user_id)
                     elif map_type == "products":
-                        from app.services.db_loaders import load_products_to_db
+                        from app.dataload.product_loader import load_products_to_db
                         load_products_to_db(data_db, int(business_id), rec, session_id, None, user_id)
                     elif map_type == "meta_tags":
                         load_meta_tags_from_csv(data_db, int(business_id), rec, session_id, None)
