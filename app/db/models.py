@@ -62,15 +62,14 @@ class ShoppingCategoryOrm(Base):
         remote_side=[id],
         back_populates="children",
         single_parent=True,  # Ensures a category has only one parent
+        cascade="all, delete-orphan",  # Ensure orphan categories are deleted when parent is deleted
     )
 
     # Children categories: one category can have many children
     children = relationship(
         "ShoppingCategoryOrm",
         back_populates="parent",
-        cascade="all, delete-orphan"  # Correct location for the delete-orphan cascade
     )
-
 
 # --- Business Details Model ---
 class BusinessDetailsOrm(Base):
