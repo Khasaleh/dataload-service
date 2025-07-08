@@ -55,6 +55,16 @@ class ShoppingCategoryOrm(Base):
     business_detail     = relationship("BusinessDetailsOrm", back_populates="shopping_categories")
     parent              = relationship("ShoppingCategoryOrm", remote_side=[id], back_populates="children")
     children            = relationship("ShoppingCategoryOrm", back_populates="parent", cascade="all, delete-orphan")
+    
+    
+    parent = relationship(
+        "ShoppingCategoryOrm",
+        remote_side=[id],
+        backref="children_categories",
+        single_parent=True,             # ← enforce one‐to‐one parent link
+        cascade="all, delete-orphan"    # ← enable delete-orphan
+    )
+
 
 # --- Business Details Model ---
 class BusinessDetailsOrm(Base):
