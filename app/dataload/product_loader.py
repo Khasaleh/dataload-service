@@ -5,7 +5,14 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, NoResultFound, DataError
 import logging
 
-from app.utils.date_utils import now_epoch_ms
+# Fix missing now_epoch_ms import: fallback to local definition
+try:
+    from app.utils.date_utils import now_epoch_ms
+except ImportError:
+    from datetime import datetime
+    def now_epoch_ms() -> int:
+        return int(datetime.utcnow().timestamp() * 1000)
+
 from app.utils.slug import generate_slug
 
 from app.db.models import (
@@ -39,6 +46,7 @@ def parse_specifications(spec_str: Optional[str]) -> List[Dict[str, str]]:
         else:
             logger.warning(f"Skipping empty spec name or value in '{pair}'")
     return specs
+
 
 
 def parse_images(image_str: Optional[str]) -> List[Dict[str, Any]]:
@@ -89,7 +97,6 @@ def load_products_to_db(
                 session_id,
                 user_id
             )
-            # track insert vs update via Redis (assumes add_to_id_map imported)
             from app.utils.redis_utils import add_to_id_map, DB_PK_MAP_SUFFIX
             prev = add_to_id_map(
                 session_id,
@@ -103,7 +110,6 @@ def load_products_to_db(
                 summary["inserted"] += 1
             else:
                 summary["updated"] += 1
-            # re-store mapping
             add_to_id_map(
                 session_id,
                 f"products{DB_PK_MAP_SUFFIX}",
@@ -143,7 +149,6 @@ def load_product_record_to_db(
                 field_name="brand_name",
                 offending_value=product_data.brand_name
             )
-        # category lookup by path: you may need to split 'A/B/C' and query
         category = db.query(CategoryOrm).filter_by(
             id=product_data.category_id,
             business_details_id=business_details_id
@@ -234,15 +239,13 @@ def load_product_record_to_db(
         prod.seo_title            = product_data.seo_title
         prod.upc                  = product_data.upc
         prod.is_child_item        = product_data.is_child_item
-        # flush to get ID
         db.flush()
         # 3) Specs
         if not is_new:
             db.query(ProductSpecificationOrm).filter_by(product_id=prod.id).delete()
-        # warehouse/store
         for name, val in [
-            ("Warehouse_Location", product_data.warehouse_location),
-            ("Store_Location", product_data.store_location)
+            ("Warehouse_Location", getattr(product_data, 'warehouse_location', None)),
+            ("Store_Location", getattr(product_data, 'store_location', None))
         ]:
             if val is not None:
                 db.add(ProductSpecificationOrm(
