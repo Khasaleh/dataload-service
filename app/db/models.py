@@ -54,14 +54,14 @@ class ShoppingCategoryOrm(Base):
     updated_at          = Column(DateTime, onupdate=func.now(), nullable=True)
     business_detail     = relationship("BusinessDetailsOrm", back_populates="shopping_categories")
     
-    # One-to-many relationship: a category can have multiple children
+    # Correctly configure the children relationship with delete-orphan cascade
     children = relationship(
         "ShoppingCategoryOrm",
         back_populates="parent",
-        cascade="all, delete-orphan"  # Only set delete-orphan on the "many" side (children)
+        cascade="all, delete-orphan"  # Only set on the "many" side (children)
     )
     
-    # Many-to-one relationship: each category can have a single parent
+    # Correctly configure the parent relationship with single_parent=True
     parent = relationship(
         "ShoppingCategoryOrm",
         remote_side=[id],
