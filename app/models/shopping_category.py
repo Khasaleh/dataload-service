@@ -2,7 +2,7 @@ from sqlalchemy import Column, BigInteger, String, DateTime, ForeignKey, UniqueC
 from sqlalchemy.orm import relationship
 from app.db.base_class import Base
 from app.db.schema_names import PUBLIC_SCHEMA
-
+from sqlalchemy.sql import func
 class ShoppingCategoryOrm(Base):
     __tablename__ = "shopping_categories"
     __table_args__ = (
