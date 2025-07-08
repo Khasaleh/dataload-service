@@ -53,17 +53,22 @@ class ShoppingCategoryOrm(Base):
     created_at          = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at          = Column(DateTime, onupdate=func.now(), nullable=True)
     business_detail     = relationship("BusinessDetailsOrm", back_populates="shopping_categories")
-    parent              = relationship("ShoppingCategoryOrm", remote_side=[id], back_populates="children")
-    children            = relationship("ShoppingCategoryOrm", back_populates="parent", cascade="all, delete-orphan")
     
+    # One-to-many relationship: a category can have multiple children
+    children = relationship(
+        "ShoppingCategoryOrm",
+        back_populates="parent",
+        cascade="all, delete-orphan"  # Only set delete-orphan on the "many" side (children)
+    )
     
+    # Many-to-one relationship: each category can have a single parent
     parent = relationship(
         "ShoppingCategoryOrm",
         remote_side=[id],
-        backref="children_categories",
-        single_parent=True,             # ← enforce one‐to‐one parent link
-        cascade="all, delete-orphan"    # ← enable delete-orphan
+        back_populates="children",
+        single_parent=True  # Ensures a category can only have one parent
     )
+
 
 
 # --- Business Details Model ---
