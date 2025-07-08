@@ -175,20 +175,12 @@ def load_product_record_to_db(
             else:
                 logger.warning(f"{log_prefix} ShoppingCategory '{product_data.shopping_category_name}' not found.")
 
-        # 4) Return policy lookup
-        rp_filters = [
+        # 4) Return policy lookup (fixed logic)
+        rp = db.query(ReturnPolicyOrm).filter(
             ReturnPolicyOrm.business_details_id == business_details_id,
             ReturnPolicyOrm.return_policy_type == product_data.return_type
-        ]
-        if product_data.return_type == "SALES_RETURN_ALLOWED":
-            rp_filters += [
-                ReturnPolicyOrm.return_fee_type == product_data.return_fee_type,
-                ReturnPolicyOrm.time_period_return == product_data.return_fee
-            ]
-        else:
-            rp_filters += [ReturnPolicyOrm.time_period_return.is_(None)]
+        ).one_or_none()
 
-        rp = db.query(ReturnPolicyOrm).filter(*rp_filters).one_or_none()
         if not rp:
             raise DataLoaderError(
                 message="Matching return policy not found.",
