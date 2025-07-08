@@ -190,30 +190,67 @@ def process_csv_task(
         elif map_type == "product_prices":
             summary = load_price_to_db(data_db, int(business_id), validated, session_id, None)
             processed = summary.get("inserted", 0) + summary.get("updated", 0)
+            # load_price_to_db might return detailed errors in summary["errors_list"]
+            if "errors_list" in summary and summary["errors_list"]:
+                row_errors.extend(summary["errors_list"])
 
-        else:
+
+        elif map_type == "products":
+            # Products are processed as a batch by load_products_to_db
+            from app.dataload.product_loader import load_products_to_db
+            # Assuming db_pk_redis_pipeline is not strictly needed here or handled by default None
+            product_summary = load_products_to_db(data_db, int(business_id), validated, session_id, None, user_id)
+            processed = product_summary.get("inserted", 0) + product_summary.get("updated", 0)
+            # load_products_to_db currently returns summary["errors"] as a count.
+            # If it were to return detailed ErrorDetailModel list, we'd append them to row_errors.
+            # For now, this error count will be part of the final _update_session_status.
+            # To make it consistent with other row_errors, we'd need load_products_to_db to collect ErrorDetailModel.
+            # Let's assume for now that if product_summary["errors"] > 0, we create a generic error detail.
+            if product_summary.get("errors", 0) > 0:
+                 # This is a general error for the batch.
+                 # To get per-row errors, load_products_to_db would need to be modified.
+                 # For now, we'll just indicate a batch error count. The total error count will be updated later.
+                 # The details field in UploadSessionOrm might not have per-row product errors unless load_products_to_db is changed.
+                 pass # The summary["errors"] from load_products_to_db will be used in final_status update
+
+        else: # Handles attributes, meta_tags, categories (record by record)
             for idx, rec in enumerate(validated, start=2):
                 try:
                     if map_type == "attributes":
                         load_attribute_to_db(data_db, int(business_id), rec, session_id, None, user_id)
-                    elif map_type == "products":
-                        from app.dataload.product_loader import load_products_to_db
-                        load_products_to_db(data_db, int(business_id), rec, session_id, None, user_id)
+                    # Removed "products" from here
                     elif map_type == "meta_tags":
                         load_meta_tags_from_csv(data_db, int(business_id), rec, session_id, None)
                     elif map_type == "categories":
                         load_category_to_db(data_db, int(business_id), rec, session_id, None, user_id)
+                    else:
+                        logger.warning(f"Unhandled map_type '{map_type}' in per-record processing loop.")
+                        # Add a generic error if an unhandled map_type reaches here, though caught by initial checks usually.
+                        row_errors.append(ErrorDetailModel(row_number=idx, error_message=f"Unhandled map_type: {map_type}", error_type=ErrorType.UNEXPECTED_ROW_ERROR))
+                        continue # Skip processed += 1 for this iteration
                     processed += 1
-                except Exception as e:
+                except Exception as e: # Catches errors from load_attribute_to_db, etc.
+                    # Attempt to get offending value if DataLoaderError
+                    offending_val = None
+                    field_name = None
+                    if hasattr(e, 'offending_value'):
+                        offending_val = str(e.offending_value)
+                    if hasattr(e, 'field_name'):
+                        field_name = str(e.field_name)
+                    
                     row_errors.append(
                         ErrorDetailModel(
                             row_number=idx,
+                            field_name=field_name,
                             error_message=str(e),
-                            error_type=ErrorType.UNEXPECTED_ROW_ERROR,
+                            error_type=getattr(e, 'error_type', ErrorType.UNEXPECTED_ROW_ERROR),
+                            offending_value=offending_val
                         )
                     )
 
         # PHASE 6: COMMIT BOTH DBs
+        # The final error count for _update_session_status will include errors from product_summary
+        # This commit happens *after* all processing for the given map_type batch
         meta_db.commit()
         if data_db is not meta_db:
             data_db.commit()
@@ -233,13 +270,26 @@ def process_csv_task(
         if not row_errors
         else UploadJobStatus.COMPLETED_WITH_ERRORS
     )
+    final_error_count = len(row_errors)
+    if map_type == "products" and 'product_summary' in locals(): # Check if product_summary exists
+        final_error_count = product_summary.get("errors", 0)
+        # If product_summary["errors"] > 0 and row_errors is empty,
+        # we might want to add a generic error detail for the batch.
+        if final_error_count > 0 and not row_errors:
+            row_errors.append(ErrorDetailModel(
+                row_number=None, # Batch error
+                error_message=f"{final_error_count} error(s) occurred during product batch processing.",
+                error_type=ErrorType.BATCH_PROCESSING_ERROR
+            ))
+
+
     _update_session_status(
         meta_db,
         session_id,
         final_status,
         details=[e.model_dump() for e in row_errors] if row_errors else None,
         record_count=len(validated),
-        error_count=len(row_errors),
+        error_count=final_error_count, # Use the potentially adjusted error count
     )
 
     # CLEANUP
