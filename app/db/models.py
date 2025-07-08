@@ -9,7 +9,6 @@ from sqlalchemy.sql import func # For server-side default timestamps
 from app.db.schema_names import PUBLIC_SCHEMA
 from .base_class import Base
 import os # Added os import
-from app.models.shopping_category import ShoppingCategoryOrm
 
 # Schema constants (can be imported from a config file or defined here)
 # These should align with what's set in app/db/connection.py via environment variables
@@ -59,10 +58,11 @@ class BusinessDetailsOrm(Base):
 
     # Add this relationship to match ShoppingCategoryOrm
     shopping_categories = relationship(
-        "ShoppingCategoryOrm",
+        "app.models.shopping_category.ShoppingCategoryOrm",
         back_populates="business_detail",
         cascade="all, delete-orphan"
     )
+
 
 # --- Category Models ---
 class CategoryOrm(Base):
