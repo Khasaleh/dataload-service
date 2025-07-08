@@ -10,24 +10,20 @@ class ShoppingCategoryOrm(Base):
         {"schema": PUBLIC_SCHEMA},
     )
 
-    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-    name = Column(String(150), nullable=False, index=True)
-    parent_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.shopping_categories.id"), nullable=True)
+    id                  = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
+    name                = Column(String(150), nullable=False, index=True)
+    parent_id           = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.shopping_categories.id"), nullable=True)
+    business_details_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.business_details.id"), nullable=False)
+    created_at          = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at          = Column(DateTime, onupdate=func.now(), nullable=True)
 
-    # ✅ Corrected with ForeignKey:
-    business_details_id = Column(
-        BigInteger,
-        ForeignKey(f"{PUBLIC_SCHEMA}.business_details.id"),
-        nullable=False,
-        index=True
+    # Relationship with BusinessDetailsOrm
+    business_detail = relationship(
+        "BusinessDetailsOrm",
+        back_populates="shopping_categories"
     )
 
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, onupdate=func.now(), nullable=True)
-
-    # Relationship to BusinessDetails
-    business_detail = relationship("BusinessDetailsOrm", back_populates="shopping_categories")
-
+    # Self-referential parent/children
     parent = relationship(
         "ShoppingCategoryOrm",
         remote_side=[id],
@@ -38,8 +34,10 @@ class ShoppingCategoryOrm(Base):
     children = relationship(
         "ShoppingCategoryOrm",
         back_populates="parent",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
+        single_parent=True
     )
+
 
 
     def __repr__(self):
