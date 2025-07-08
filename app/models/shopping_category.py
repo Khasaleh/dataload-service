@@ -13,26 +13,34 @@ class ShoppingCategoryOrm(Base):
     id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
     name = Column(String(150), nullable=False, index=True)
     parent_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.shopping_categories.id"), nullable=True)
-    business_details_id = Column(BigInteger, nullable=False, index=True)
+
+    # ✅ Corrected with ForeignKey:
+    business_details_id = Column(
+        BigInteger,
+        ForeignKey(f"{PUBLIC_SCHEMA}.business_details.id"),
+        nullable=False,
+        index=True
+    )
+
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, onupdate=func.now(), nullable=True)
 
-    # Relationship with BusinessDetailsOrm
+    # Relationship to BusinessDetails
     business_detail = relationship("BusinessDetailsOrm", back_populates="shopping_categories")
 
-    # Self-referential parent-child hierarchy
     parent = relationship(
         "ShoppingCategoryOrm",
         remote_side=[id],
         back_populates="children",
+        single_parent=True
     )
 
     children = relationship(
         "ShoppingCategoryOrm",
         back_populates="parent",
-        cascade="all, delete-orphan",
-        single_parent=True,
+        cascade="all, delete-orphan"
     )
+
 
     def __repr__(self):
         return f"<ShoppingCategoryOrm(id={self.id}, name='{self.name}', parent_id={self.parent_id})>"
