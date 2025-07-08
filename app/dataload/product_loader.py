@@ -27,7 +27,7 @@ from app.models.shopping_category import ShoppingCategoryOrm
 from app.dataload.models.product_csv import ProductCsvModel
 from app.exceptions import DataLoaderError
 from app.models.schemas import ErrorType
-from app.utils.redis_utils import add_to_id_map, DB_PK_MAP_SUFFIX
+from app.utils.redis_utils import add_to_id_map, DB_PK_MAP_SUFFIX, get_from_id_map # Added get_from_id_map
 
 logger = logging.getLogger(__name__)
 
