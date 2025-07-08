@@ -40,6 +40,10 @@ class ProductCsvModel(BaseModel):
     return_type: str # "SALES_RETURN_ALLOWED", "SALES_ARE_FINAL"
     return_fee_type: Optional[str] = None # "FIXED", "PERCENTAGE", "FREE"
     return_fee: Optional[float] = None
+    warehouse_location: Optional[str] = None
+    store_location: Optional[str] = None
+    return_policy: Optional[str] = None
+    size_chart_img: Optional[str] = None
 
     url: Optional[str] = None # Will be auto-generated if None, or validated
     video_url: Optional[str] = None
