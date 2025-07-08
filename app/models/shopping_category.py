@@ -18,18 +18,17 @@ class ShoppingCategoryOrm(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, onupdate=func.now(), nullable=True)
 
-    # Relationship to BusinessDetails
+    # This matches BusinessDetailsOrm.shopping_categories
     business_detail = relationship(
         "BusinessDetailsOrm",
         back_populates="shopping_categories"
     )
 
-    # Self-referential parent/children
+    #  Self-referencing parent/children
     parent = relationship(
         "ShoppingCategoryOrm",
         remote_side=[id],
-        back_populates="children",
-        single_parent=True
+        back_populates="children"
     )
 
     children = relationship(

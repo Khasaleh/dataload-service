@@ -51,17 +51,19 @@ class BusinessDetailsOrm(Base):
 
     id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
 
+    # Existing relationships
     return_policies = relationship(
         "ReturnPolicyOrm",
         back_populates="business_detail"
     )
 
-    # ✅ Add this to fix the error!
+    # Add this relationship to match ShoppingCategoryOrm
     shopping_categories = relationship(
         "ShoppingCategoryOrm",
         back_populates="business_detail",
         cascade="all, delete-orphan"
     )
+
 # --- Category Models ---
 class CategoryOrm(Base):
     __tablename__ = "categories"
