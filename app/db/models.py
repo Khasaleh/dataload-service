@@ -9,6 +9,7 @@ from sqlalchemy.sql import func # For server-side default timestamps
 
 from .base_class import Base
 import os # Added os import
+from app.models.shopping_category import ShoppingCategoryOrm
 
 # Schema constants (can be imported from a config file or defined here)
 # These should align with what's set in app/db/connection.py via environment variables
@@ -38,36 +39,6 @@ class UploadSessionOrm(Base):
         Index('idx_upload_session_business_status', "business_details_id", "status"),
         Index('idx_upload_session_business_created_at', "business_details_id", "created_at"),
         {"schema": PUBLIC_SCHEMA} # Assuming operational data like this goes to public or a dedicated ops schema
-    )
-class ShoppingCategoryOrm(Base):
-    __tablename__ = "shopping_categories"
-    __table_args__ = (
-        UniqueConstraint('business_details_id', 'name', name='uq_shopping_category_business_name'),
-        {"schema": PUBLIC_SCHEMA},
-    )
-
-    id                  = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-    name                = Column(String(150), nullable=False, index=True)
-    parent_id           = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.shopping_categories.id"), nullable=True)
-    business_details_id = Column(BigInteger, nullable=False, index=True)
-    created_at          = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at          = Column(DateTime, onupdate=func.now(), nullable=True)
-
-    # Relationship with BusinessDetailsOrm (many categories per business)
-    business_detail     = relationship("BusinessDetailsOrm", back_populates="shopping_categories")
-
-    # Parent category: one category can have many children
-    parent = relationship(
-        "ShoppingCategoryOrm",
-        remote_side=[id],
-        back_populates="children",
-    )
-
-    children = relationship(
-        "ShoppingCategoryOrm",
-        back_populates="parent",
-        cascade="all, delete-orphan",
-        single_parent=True,
     )
 
 

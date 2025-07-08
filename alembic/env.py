@@ -40,14 +40,13 @@ from app.db.models import (
     CategoryAttributeOrm,
     BusinessDetailsOrm,
     ProductImageOrm,
-    ProductSpecificationOrm
+    ProductSpecificationOrm,
+    ShoppingCategoryOrm,
 )
 
-# Make sure ShoppingCategoryOrm is also imported if it's defined in models.py and part of Base
-from app.models.shopping_category import ShoppingCategoryOrm  # Corrected import
 
 # target_metadata should point to your Base.metadata
-target_metadata = Base.metadata
+target_metadata = Base.metadataShoppingCategoryOrm,
 
 # --- Database URL Configuration ---
 # Construct database URL from environment variables, similar to app/db/connection.py
