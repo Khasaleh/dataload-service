@@ -52,23 +52,24 @@ class ShoppingCategoryOrm(Base):
     business_details_id = Column(BigInteger, nullable=False, index=True)
     created_at          = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at          = Column(DateTime, onupdate=func.now(), nullable=True)
+
+    # Relationship with BusinessDetailsOrm (many categories per business)
     business_detail     = relationship("BusinessDetailsOrm", back_populates="shopping_categories")
-    
-    # Correctly configure the children relationship with delete-orphan cascade
-    children = relationship(
-        "ShoppingCategoryOrm",
-        back_populates="parent",
-        cascade="all, delete-orphan"  # Only set on the "many" side (children)
-    )
-    
-    # Correctly configure the parent relationship with single_parent=True
+
+    # Parent category: one category can have many children
     parent = relationship(
         "ShoppingCategoryOrm",
         remote_side=[id],
         back_populates="children",
-        single_parent=True  # Ensures a category can only have one parent
+        single_parent=True,  # Ensures a category has only one parent
     )
 
+    # Children categories: one category can have many children
+    children = relationship(
+        "ShoppingCategoryOrm",
+        back_populates="parent",
+        cascade="all, delete-orphan"  # Correct location for the delete-orphan cascade
+    )
 
 
 # --- Business Details Model ---
