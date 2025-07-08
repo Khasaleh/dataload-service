@@ -1,5 +1,5 @@
 from typing import Optional, List, Any
-from pydantic import BaseModel, field_validator, model_validator, Field
+from pydantic import BaseModel, field_validator, model_validator, Field, validator
 import re
 
 def generate_url_slug(name: Optional[str]) -> Optional[str]:
