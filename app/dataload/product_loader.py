@@ -1,11 +1,10 @@
-
 import csv
 from typing import List, Dict, Optional, Any
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, NoResultFound, DataError
 import logging
 
-# Fix missing now_epoch_ms import: fallback to local definition
+# ensure now_epoch_ms is available
 try:
     from app.utils.date_utils import now_epoch_ms
 except ImportError:
@@ -14,7 +13,6 @@ except ImportError:
         return int(datetime.utcnow().timestamp() * 1000)
 
 from app.utils.slug import generate_slug
-
 from app.db.models import (
     ProductOrm,
     ProductImageOrm,
@@ -27,7 +25,7 @@ from app.models.shopping_category import ShoppingCategoryOrm
 from app.dataload.models.product_csv import ProductCsvModel
 from app.exceptions import DataLoaderError
 from app.models.schemas import ErrorType
-from app.core.context import get_current_user_id  # extracts user ID from request context
+from app.utils.redis_utils import add_to_id_map, DB_PK_MAP_SUFFIX
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +44,6 @@ def parse_specifications(spec_str: Optional[str]) -> List[Dict[str, str]]:
         else:
             logger.warning(f"Skipping empty spec name or value in '{pair}'")
     return specs
-
 
 
 def parse_images(image_str: Optional[str]) -> List[Dict[str, Any]]:
@@ -79,13 +76,13 @@ def load_products_to_db(
     business_details_id: int,
     records_data: List[Dict[str, Any]],
     session_id: str,
-    db_pk_redis_pipeline: Any = None
+    db_pk_redis_pipeline: Any = None,
+    user_id: int = None,
 ) -> Dict[str, int]:
     """
     Upsert all products from the CSV into products (+ specs + images).
     """
     summary = {"inserted": 0, "updated": 0, "errors": 0}
-    user_id = get_current_user_id()
 
     for idx, raw in enumerate(records_data, start=2):
         try:
@@ -97,7 +94,6 @@ def load_products_to_db(
                 session_id,
                 user_id
             )
-            from app.utils.redis_utils import add_to_id_map, DB_PK_MAP_SUFFIX
             prev = add_to_id_map(
                 session_id,
                 f"products{DB_PK_MAP_SUFFIX}",
@@ -133,6 +129,8 @@ def load_product_record_to_db(
 ) -> int:
     """
     Loads or updates a single product.
+    - On create: sets created_by/created_date via now_epoch_ms()
+    - On update: sets updated_by/updated_date, preserves created_* fields
     """
     log_prefix = f"[Product {product_data.self_gen_product_id}]"
     now_ms = now_epoch_ms()
@@ -169,7 +167,7 @@ def load_product_record_to_db(
                 shopping_cat_id = sc.id
             else:
                 logger.warning(f"{log_prefix} ShoppingCategory '{product_data.shopping_category_name}' not found.")
-        # return policy
+        # 2) Return policy lookup
         rp_filters = [
             ReturnPolicyOrm.business_details_id == business_details_id,
             ReturnPolicyOrm.return_policy_type == product_data.return_type
@@ -189,7 +187,7 @@ def load_product_record_to_db(
                 field_name="return_type",
                 offending_value=product_data.return_type
             )
-        # 2) Upsert product
+        # 3) Upsert product
         prod = db.query(ProductOrm).filter_by(
             self_gen_product_id=product_data.self_gen_product_id,
             business_details_id=business_details_id
@@ -207,20 +205,20 @@ def load_product_record_to_db(
         else:
             prod.updated_by = user_id
             prod.updated_date = now_ms
-        # common fields
+        # 4) Common fields
         prod.name                 = product_data.product_name
         prod.description          = product_data.description
         prod.brand_name           = product_data.brand_name
         prod.category_id          = product_data.category_id
         prod.shopping_category_id = shopping_cat_id
-        prod.price                = product_data.price
-        prod.sale_price           = product_data.sale_price
-        prod.cost_price           = product_data.cost_price
-        prod.quantity             = product_data.quantity
-        prod.package_size_length  = product_data.package_size_length
-        prod.package_size_width   = product_data.package_size_width
-        prod.package_size_height  = product_data.package_size_height
-        prod.product_weights      = product_data.product_weights
+        prod.price                = product_data.price or 0.0
+        prod.sale_price           = product_data.sale_price or 0.0
+        prod.cost_price           = product_data.cost_price or 0.0
+        prod.quantity             = product_data.quantity or 0
+        prod.package_size_length  = product_data.package_size_length or 0.0
+        prod.package_size_width   = product_data.package_size_width or 0.0
+        prod.package_size_height  = product_data.package_size_height or 0.0
+        prod.product_weights      = product_data.product_weights or 0.0
         prod.size_unit            = product_data.size_unit.upper() if product_data.size_unit else None
         prod.weight_unit          = product_data.weight_unit.upper() if product_data.weight_unit else None
         prod.return_policy_id     = rp.id
@@ -240,9 +238,10 @@ def load_product_record_to_db(
         prod.upc                  = product_data.upc
         prod.is_child_item        = product_data.is_child_item
         db.flush()
-        # 3) Specs
+        # 5) Specifications
         if not is_new:
             db.query(ProductSpecificationOrm).filter_by(product_id=prod.id).delete()
+        # include warehouse/store
         for name, val in [
             ("Warehouse_Location", getattr(product_data, 'warehouse_location', None)),
             ("Store_Location", getattr(product_data, 'store_location', None))
@@ -265,7 +264,7 @@ def load_product_record_to_db(
                 created_by=user_id if is_new else None,
                 created_date=now_ms if is_new else None
             ))
-        # 4) Images
+        # 6) Images
         if not is_new:
             db.query(ProductImageOrm).filter_by(product_id=prod.id).delete()
         main_img: Optional[str] = None
