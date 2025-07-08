@@ -6,9 +6,9 @@ def generate_url_slug(name: Optional[str]) -> Optional[str]:
     if not name:
         return None
     slug = name.lower()
-    slug = re.sub(r'\s+', '-', slug)
-    slug = re.sub(r'[^\w\-]', '', slug)
-    slug = re.sub(r'--+', '-', slug)
+    slug = re.sub(r'\s+', '-', slug)  # Replace spaces with hyphens
+    slug = re.sub(r'[^\w\-]', '', slug)  # Remove special characters except hyphen and word characters
+    slug = re.sub(r'--+', '-', slug)  # Replace multiple hyphens with a single one
     slug = slug.strip('-')
     return slug if slug else None
 
@@ -36,6 +36,7 @@ class ProductCsvModel(BaseModel):
     weight_unit: str
 
     active: str
+
     return_type: str
     return_fee_type: Optional[str] = None
     return_fee: Optional[float] = None
@@ -61,74 +62,7 @@ class ProductCsvModel(BaseModel):
     seo_title: Optional[str] = None
     upc: Optional[str] = None
 
-    #
-    # Universal strip for key fields
-    #
-    @field_validator(
-        'active', 'return_type', 'return_fee_type',
-        'warehouse_location', 'store_location',
-        'return_policy', 'size_chart_img',
-        'size_unit', 'weight_unit',
-        'shopping_category_name', 'ean', 'isbn',
-        'keywords', 'mpn', 'seo_description',
-        'seo_title', 'upc',
-        mode='before'
-    )
-    @classmethod
-    def strip_strings(cls, v):
-        if v is None:
-            return None
-        return v.strip()
-
-    #
-    # Parse floats robustly from CSV, even with spaces
-    #
-    @field_validator(
-        'price', 'sale_price', 'cost_price', 'return_fee',
-        'package_size_length', 'package_size_width',
-        'package_size_height', 'product_weights',
-        mode='before'
-    )
-    @classmethod
-    def parse_float(cls, v):
-        if v is None:
-            return None
-        if isinstance(v, str):
-            v = v.strip()
-            if v == '':
-                return None
-        try:
-            return float(v)
-        except Exception:
-            raise ValueError("Input should be a valid number")
-
-    #
-    # Parse integers robustly from CSV
-    #
-    @field_validator('quantity', 'is_child_item', mode='before')
-    @classmethod
-    def parse_int(cls, v):
-        if v is None:
-            return 0
-        if isinstance(v, str):
-            v = v.strip()
-            if v == '':
-                return 0
-        try:
-            return int(v)
-        except Exception:
-            raise ValueError("Input should be a valid integer")
-
-    #
-    # Clean category_path
-    #
-    @validator('category_path')
-    def clean_category_path(cls, v):
-        return '/'.join(part.strip() for part in v.strip().split('/') if part.strip())
-
-    #
-    # Active field must be ACTIVE or INACTIVE
-    #
+    # ----- FIELD-LEVEL CLEANUPS -----
     @field_validator('active')
     @classmethod
     def validate_active_status(cls, value: str) -> str:
@@ -136,32 +70,51 @@ class ProductCsvModel(BaseModel):
             raise ValueError("Status must be 'ACTIVE' or 'INACTIVE'")
         return value.upper()
 
-    #
-    # Return type check
-    #
     @field_validator('return_type')
     @classmethod
     def validate_return_type(cls, value: str) -> str:
-        value = value.strip()
         if value not in ["SALES_RETURN_ALLOWED", "SALES_ARE_FINAL"]:
             raise ValueError("return_type must be 'SALES_RETURN_ALLOWED' or 'SALES_ARE_FINAL'")
         return value
 
-    #
-    # Validate return_fee_type
-    #
+    @field_validator('return_fee_type', mode='before')
+    @classmethod
+    def clean_return_fee_type(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v.strip()
+
+    @field_validator('return_fee', mode='before')
+    @classmethod
+    def clean_return_fee(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        try:
+            return float(v)
+        except Exception:
+            raise ValueError("Input should be a valid number")
+
     @field_validator('return_fee_type')
     @classmethod
-    def validate_return_fee_type_format(cls, value: Optional[str]) -> Optional[str]:
-        if value is not None:
-            value = value.strip()
-            if value not in ["FIXED", "PERCENTAGE", "FREE"]:
-                raise ValueError("return_fee_type, if provided, must be 'FIXED', 'PERCENTAGE', or 'FREE'")
+    def validate_return_fee_type_format(cls, value: Optional[str], info: Any) -> Optional[str]:
+        if value is not None and value not in ["FIXED", "PERCENTAGE", "FREE"]:
+            raise ValueError("return_fee_type, if provided, must be 'FIXED', 'PERCENTAGE', or 'FREE'")
         return value
 
-    #
-    # Validate is_child_item
-    #
+    @field_validator('url', mode='before')
+    @classmethod
+    def generate_or_validate_url(cls, value: Optional[str], info: Any) -> Optional[str]:
+        product_name = info.data.get('product_name')
+        if value:
+            if not re.match(r"^[a-z0-9]+(?:-[a-z0-9]+)*$", value):
+                raise ValueError("Provided URL is not a valid slug (lowercase, alphanumeric, hyphens only)")
+            return value
+        return generate_url_slug(product_name)
+
     @field_validator('is_child_item')
     @classmethod
     def validate_is_child_item(cls, value: int) -> int:
@@ -169,22 +122,6 @@ class ProductCsvModel(BaseModel):
             raise ValueError("is_child_item must be 0 or 1")
         return value
 
-    #
-    # Validate URL or generate
-    #
-    @field_validator('url', mode='before')
-    @classmethod
-    def generate_or_validate_url(cls, value: Optional[str], info: Any) -> Optional[str]:
-        product_name = info.data.get('product_name')
-        if value:
-            if not re.match(r"^[a-z0-9]+(?:-[a-z0-9]+)*$", value.strip()):
-                raise ValueError("Provided URL is not a valid slug (lowercase, alphanumeric, hyphens only)")
-            return value.strip()
-        return generate_url_slug(product_name)
-
-    #
-    # Validate floats for sale_price, cost_price, return_fee
-    #
     @field_validator('sale_price', 'cost_price', 'return_fee')
     @classmethod
     def validate_optional_positive_floats(cls, value: Optional[float]) -> Optional[float]:
@@ -192,19 +129,20 @@ class ProductCsvModel(BaseModel):
             raise ValueError("Price/fee fields, if provided, must be non-negative.")
         return value
 
-    #
-    # Model-level validation logic
-    #
+    # ----- CROSS-FIELD LOGIC -----
     @model_validator(mode='after')
     def check_model_logic(self) -> 'ProductCsvModel':
         if self.return_type == "SALES_ARE_FINAL":
             if self.return_fee_type or self.return_fee:
                 raise ValueError("return_fee_type and return_fee must be null or empty when return_type is 'SALES_ARE_FINAL'")
+
         elif self.return_type == "SALES_RETURN_ALLOWED":
             if not self.return_fee_type:
                 raise ValueError("return_fee_type is required when return_type is 'SALES_RETURN_ALLOWED'")
+            if self.return_fee_type not in ["FIXED", "PERCENTAGE", "FREE"]:
+                raise ValueError("return_fee_type must be 'FIXED', 'PERCENTAGE', or 'FREE'")
             if self.return_fee_type == "FREE":
-                if self.return_fee not in [None, 0, 0.0]:
+                if self.return_fee not in (None, 0, 0.0):
                     raise ValueError("return_fee must be 0 or null/empty if return_fee_type is 'FREE'")
                 object.__setattr__(self, 'return_fee', 0.0)
             elif self.return_fee_type in ["FIXED", "PERCENTAGE"]:
@@ -231,6 +169,10 @@ class ProductCsvModel(BaseModel):
             raise ValueError("If 'video_url' is provided, 'video_thumbnail_url' must also be provided.")
 
         return self
+
+    @validator('category_path')
+    def clean_category_path(cls, v):
+        return '/'.join(part.strip() for part in v.strip().split('/') if part.strip())
 
     class Config:
         anystr_strip_whitespace = True
