@@ -14,8 +14,8 @@ import sqlalchemy as sa
 
 # Schema constants (ensure these match defaults in app/db/models.py or are set in env for alembic)
 PUBLIC_SCHEMA = os.getenv("PUBLIC_SCHEMA_NAME", "public")
-CATALOG_SCHEMA = os.getenv("CATALOG_SCHEMA_NAME", "catalog_management")
-BUSINESS_SCHEMA = os.getenv("BUSINESS_SCHEMA_NAME", "fazeal_business")
+CATALOG_SCHEMA = os.getenv("CATALOG_SCHEMA_NAME", "public")
+BUSINESS_SCHEMA = os.getenv("BUSINESS_SCHEMA_NAME", "public")
 
 # revision identifiers, used by Alembic.
 revision: str = '0001'
