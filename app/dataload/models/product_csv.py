@@ -175,6 +175,6 @@ class ProductCsvModel(BaseModel):
         return '/'.join(part.strip() for part in v.strip().split('/') if part.strip())
 
     class Config:
-        anystr_strip_whitespace = True
+        str_strip_whitespace = True  # Changed from anystr_strip_whitespace
         validate_assignment = True
         extra = "forbid"

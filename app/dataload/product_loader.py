@@ -162,20 +162,37 @@ def load_product_record_to_db(
             )
         logger.debug(f"{log_prefix} Brand found: {brand.id if brand else 'None'}")
 
-        # 2) Category lookup by full_path
-        logger.debug(f"{log_prefix} Looking up category: {product_data.category_path}")
-        category = db.query(CategoryOrm).filter_by(
-            full_path=product_data.category_path,
-            business_details_id=business_details_id
-        ).one_or_none()
-        if not category:
+        # 2) Category lookup by category_path (using Redis cache first)
+        logger.debug(f"{log_prefix} Looking up category_id for path '{product_data.category_path}' from Redis cache.")
+        category_id_from_cache = get_from_id_map(
+            session_id,
+            f"categories{DB_PK_MAP_SUFFIX}",
+            product_data.category_path
+        )
+
+        if not category_id_from_cache:
             raise DataLoaderError(
-                message=f"Category '{product_data.category_path}' not found.",
+                message=f"Category ID for path '{product_data.category_path}' not found in Redis cache. Ensure categories are loaded first or path is correct.",
                 error_type=ErrorType.LOOKUP,
                 field_name="category_path",
                 offending_value=product_data.category_path
             )
-        logger.debug(f"{log_prefix} Category found: {category.id}")
+        
+        logger.debug(f"{log_prefix} Category ID from cache: {category_id_from_cache}. Fetching CategoryOrm object from DB.")
+        category = db.query(CategoryOrm).filter_by(
+            id=category_id_from_cache,
+            business_details_id=business_details_id # Ensure category belongs to this business
+        ).one_or_none()
+
+        if not category:
+            # This case implies inconsistency between Redis cache and DB, or wrong business_id for cached item.
+            raise DataLoaderError(
+                message=f"Category with ID '{category_id_from_cache}' (from path '{product_data.category_path}') not found in DB for business {business_details_id}.",
+                error_type=ErrorType.LOOKUP, # Or potentially a different error type for inconsistency
+                field_name="category_path",
+                offending_value=product_data.category_path
+            )
+        logger.debug(f"{log_prefix} CategoryOrm object fetched successfully: ID {category.id}, Name: {category.name}")
 
         # 3) Shopping category (optional)
         shopping_cat_id: Optional[int] = None
