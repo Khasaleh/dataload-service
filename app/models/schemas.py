@@ -251,10 +251,11 @@ class ProductCsvModel(BaseModel):
     seo_title: Optional[str] = None
     upc: Optional[str] = None
     size_chart_img: Optional[str] = None
-
+    business_details_id: Optional[int] = None
+    category_id: Optional[int] = None
     class Config:
         anystr_strip_whitespace = True
-        extra = 'forbid'
+        extra = 'ignore'
 
     @validator('*', pre=True)
     def empty_str_to_none(cls, v):

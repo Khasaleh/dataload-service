@@ -131,15 +131,18 @@ def load_product_record_to_db(
     Loads or updates a single product.
     - On create: sets created_by/created_date via now_epoch_ms()
     - On update: sets updated_by/updated_date, preserves created_* fields
+    - Looks up Category by its full_path rather than an ID column
     """
     log_prefix = f"[Product {product_data.self_gen_product_id}]"
     now_ms = now_epoch_ms()
+
     try:
-        # 1) Lookups
-        brand = db.query(BrandOrm).filter_by(
-            name=product_data.brand_name,
-            business_details_id=business_details_id
-        ).one_or_none()
+        # 1) Brand lookup
+        brand = (
+            db.query(BrandOrm)
+              .filter_by(name=product_data.brand_name, business_details_id=business_details_id)
+              .one_or_none()
+        )
         if not brand:
             raise DataLoaderError(
                 message=f"Brand '{product_data.brand_name}' not found.",
@@ -147,27 +150,38 @@ def load_product_record_to_db(
                 field_name="brand_name",
                 offending_value=product_data.brand_name
             )
-        category = db.query(CategoryOrm).filter_by(
-            id=product_data.category_id,
-            business_details_id=business_details_id
-        ).one_or_none()
+
+        # 2) Category lookup by full path
+        category = (
+            db.query(CategoryOrm)
+              .filter(
+                  CategoryOrm.full_path == product_data.category_path,
+                  CategoryOrm.business_details_id == business_details_id
+              )
+              .one_or_none()
+        )
         if not category:
             raise DataLoaderError(
-                message=f"Category ID '{product_data.category_id}' not found.",
+                message=f"Category path '{product_data.category_path}' not found.",
                 error_type=ErrorType.LOOKUP,
-                field_name="category_id",
-                offending_value=product_data.category_id
+                field_name="category_path",
+                offending_value=product_data.category_path
             )
+
+        # 3) Shopping category (optional)
         shopping_cat_id: Optional[int] = None
         if product_data.shopping_category_name:
-            sc = db.query(ShoppingCategoryOrm).filter_by(
-                name=product_data.shopping_category_name
-            ).one_or_none()
+            sc = (
+                db.query(ShoppingCategoryOrm)
+                  .filter_by(name=product_data.shopping_category_name)
+                  .one_or_none()
+            )
             if sc:
                 shopping_cat_id = sc.id
             else:
                 logger.warning(f"{log_prefix} ShoppingCategory '{product_data.shopping_category_name}' not found.")
-        # 2) Return policy lookup
+
+        # 4) Return policy lookup
         rp_filters = [
             ReturnPolicyOrm.business_details_id == business_details_id,
             ReturnPolicyOrm.return_policy_type == product_data.return_type
@@ -187,12 +201,18 @@ def load_product_record_to_db(
                 field_name="return_type",
                 offending_value=product_data.return_type
             )
-        # 3) Upsert product
-        prod = db.query(ProductOrm).filter_by(
-            self_gen_product_id=product_data.self_gen_product_id,
-            business_details_id=business_details_id
-        ).one_or_none()
+
+        # 5) Upsert Product
+        prod = (
+            db.query(ProductOrm)
+              .filter_by(
+                  self_gen_product_id=product_data.self_gen_product_id,
+                  business_details_id=business_details_id
+              )
+              .one_or_none()
+        )
         is_new = prod is None
+
         if is_new:
             prod = ProductOrm(
                 self_gen_product_id=product_data.self_gen_product_id,
@@ -205,82 +225,87 @@ def load_product_record_to_db(
         else:
             prod.updated_by = user_id
             prod.updated_date = now_ms
-        # 4) Common fields
-        prod.name                 = product_data.product_name
-        prod.description          = product_data.description
-        prod.brand_name           = product_data.brand_name
-        prod.category_id          = product_data.category_id
-        prod.shopping_category_id = shopping_cat_id
-        prod.price                = product_data.price or 0.0
-        prod.sale_price           = product_data.sale_price or 0.0
-        prod.cost_price           = product_data.cost_price or 0.0
-        prod.quantity             = product_data.quantity or 0
-        prod.package_size_length  = product_data.package_size_length or 0.0
-        prod.package_size_width   = product_data.package_size_width or 0.0
-        prod.package_size_height  = product_data.package_size_height or 0.0
-        prod.product_weights      = product_data.product_weights or 0.0
-        prod.size_unit            = product_data.size_unit.upper() if product_data.size_unit else None
-        prod.weight_unit          = product_data.weight_unit.upper() if product_data.weight_unit else None
-        prod.return_policy_id     = rp.id
-        prod.return_type          = product_data.return_type
-        prod.return_fee_type      = product_data.return_fee_type
-        prod.time_period_return   = product_data.return_fee
-        prod.url                  = product_data.url or generate_slug(product_data.product_name)
-        prod.video_url            = product_data.video_url
-        prod.video_thumbnail_url  = product_data.video_thumbnail_url
-        prod.active               = product_data.active
-        prod.ean                  = product_data.ean
-        prod.isbn                 = product_data.isbn
-        prod.keywords             = product_data.keywords
-        prod.mpn                  = product_data.mpn
-        prod.seo_description      = product_data.seo_description
-        prod.seo_title            = product_data.seo_title
-        prod.upc                  = product_data.upc
-        prod.is_child_item        = product_data.is_child_item
-        db.flush()
-        # 5) Specifications
+
+        # 6) Populate common fields
+        prod.name                   = product_data.product_name
+        prod.description            = product_data.description
+        prod.brand_name             = product_data.brand_name
+        prod.category_id            = category.id
+        prod.shopping_category_id   = shopping_cat_id
+        prod.price                  = product_data.price or 0.0
+        prod.sale_price             = product_data.sale_price or 0.0
+        prod.cost_price             = product_data.cost_price or 0.0
+        prod.quantity               = product_data.quantity or 0
+        prod.package_size_length    = product_data.package_size_length or 0.0
+        prod.package_size_width     = product_data.package_size_width or 0.0
+        prod.package_size_height    = product_data.package_size_height or 0.0
+        prod.product_weights        = product_data.product_weights or 0.0
+        prod.size_unit              = product_data.size_unit.upper() if product_data.size_unit else None
+        prod.weight_unit            = product_data.weight_unit.upper() if product_data.weight_unit else None
+        prod.return_policy_id       = rp.id
+        prod.return_type            = product_data.return_type
+        prod.return_fee_type        = product_data.return_fee_type
+        prod.time_period_return     = product_data.return_fee
+        prod.url                    = product_data.url or generate_slug(product_data.product_name)
+        prod.video_url              = product_data.video_url
+        prod.video_thumbnail_url    = product_data.video_thumbnail_url
+        prod.active                 = product_data.active
+        prod.ean                    = product_data.ean
+        prod.isbn                   = product_data.isbn
+        prod.keywords               = product_data.keywords
+        prod.mpn                    = product_data.mpn
+        prod.seo_description        = product_data.seo_description
+        prod.seo_title              = product_data.seo_title
+        prod.upc                    = product_data.upc
+        prod.is_child_item          = product_data.is_child_item
+
+        db.flush()  # ensure prod.id is available
+
+        # 7) Specifications (including Warehouse/Store)
         if not is_new:
             db.query(ProductSpecificationOrm).filter_by(product_id=prod.id).delete()
-        # include warehouse/store
         for name, val in [
-            ("Warehouse_Location", getattr(product_data, 'warehouse_location', None)),
-            ("Store_Location", getattr(product_data, 'store_location', None))
+            ("Warehouse_Location", getattr(product_data, "warehouse_location", None)),
+            ("Store_Location", getattr(product_data, "store_location", None))
         ]:
             if val is not None:
                 db.add(ProductSpecificationOrm(
                     product_id=prod.id,
                     name=name,
                     value=val,
-                    active='ACTIVE',
+                    active="ACTIVE",
                     created_by=user_id if is_new else None,
                     created_date=now_ms if is_new else None
                 ))
         for spec in parse_specifications(product_data.specifications):
             db.add(ProductSpecificationOrm(
                 product_id=prod.id,
-                name=spec['name'],
-                value=spec['value'],
-                active='ACTIVE',
+                name=spec["name"],
+                value=spec["value"],
+                active="ACTIVE",
                 created_by=user_id if is_new else None,
                 created_date=now_ms if is_new else None
             ))
-        # 6) Images
+
+        # 8) Images
         if not is_new:
             db.query(ProductImageOrm).filter_by(product_id=prod.id).delete()
         main_img: Optional[str] = None
         for img in parse_images(product_data.images):
             db.add(ProductImageOrm(
                 product_id=prod.id,
-                name=img['url'],
-                main_image=img['main_image'],
-                active='ACTIVE',
+                name=img["url"],
+                main_image=img["main_image"],
+                active="ACTIVE",
                 created_by=user_id if is_new else None,
                 created_date=now_ms if is_new else None
             ))
-            if img['main_image']:
-                main_img = img['url']
+            if img["main_image"]:
+                main_img = img["url"]
         prod.main_image_url = main_img
+
         return prod.id
+
     except (IntegrityError, DataError) as e:
         db.rollback()
         raise DataLoaderError(

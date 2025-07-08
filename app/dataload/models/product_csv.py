@@ -15,10 +15,9 @@ def generate_url_slug(name: Optional[str]) -> Optional[str]:
 class ProductCsvModel(BaseModel):
     product_name: str = Field(..., min_length=1)
     self_gen_product_id: str = Field(..., min_length=1)
-    business_details_id: int # Will be provided to the loader function, not from CSV per se for this field usually
     description: str = Field(..., min_length=1)
     brand_name: str = Field(..., min_length=1)
-    category_id: int # This is the ID from the categories table, expected to be in CSV
+    category_path: str = Field(..., min_length=1)
 
     shopping_category_name: Optional[str] = None
 
@@ -157,9 +156,15 @@ class ProductCsvModel(BaseModel):
 
         return self
 
+    @validator('category_path')
+    def clean_category_path(cls, v):
+        return '/'.join(
+            part.strip() for part in v.strip().split('/') if part.strip()
+        )
     class Config:
         anystr_strip_whitespace = True
         validate_assignment = True
+        extra = "forbid"
         # If business_details_id is always set programmatically and not from CSV:
         # exclude = {'business_details_id'} # Or handle it in the loader
         pass
