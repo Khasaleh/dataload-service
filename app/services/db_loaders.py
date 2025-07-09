@@ -159,6 +159,7 @@ def load_category_to_db(
                 logger.info(f"Created category '{full_path}' (ID={final_id})")
 
             # cache in Redis
+            logger.info(f"Caching category in Redis: session_id='{session_id}', business_details_id='{business_details_id}', key_path='{full_path}', category_id='{final_id}'")
             add_to_id_map(
                 session_id,
                 f"categories{DB_PK_MAP_SUFFIX}",

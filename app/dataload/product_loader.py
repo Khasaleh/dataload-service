@@ -6,7 +6,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, NoResultFound, DataError
 
 from app.utils.slug import generate_slug
-# ensure now_epoch_ms is available
 try:
     from app.utils.date_utils import now_epoch_ms
 except ImportError:
@@ -17,17 +16,17 @@ from app.db.models import (
     ProductOrm,
     ProductImageOrm,
     ProductSpecificationOrm,
-    ProductsPriceHistoryOrm, # Added for Price History
+    ProductsPriceHistoryOrm,
     BrandOrm,
     CategoryOrm,
     ReturnPolicyOrm,
 )
-from app.db.connection import get_session # Added for DB2 connection
+from app.db.connection import get_session
 from app.models.shopping_category import ShoppingCategoryOrm
 from app.dataload.models.product_csv import ProductCsvModel
 from app.exceptions import DataLoaderError
 from app.models.schemas import ErrorType
-from app.utils.redis_utils import add_to_id_map, DB_PK_MAP_SUFFIX, get_from_id_map # Added get_from_id_map
+from app.utils.redis_utils import add_to_id_map, DB_PK_MAP_SUFFIX, get_from_id_map
 
 logger = logging.getLogger(__name__)
 
@@ -81,19 +80,17 @@ def load_products_to_db(
     db_pk_redis_pipeline: Any = None,
     user_id: int = None,
 ) -> Dict[str, int]:
-    """
-    Upsert all products from the CSV into products (+ specs + images).
-    """
     logger.info(f"Starting load_products_to_db for {len(records_data)} records for business_id {business_details_id}, session_id {session_id}.")
     summary = {"inserted": 0, "updated": 0, "errors": 0}
 
-    for idx, raw in enumerate(records_data, start=2): # idx here is CSV row number if records_data is 1-to-1 with CSV rows after header
-        product_identifier_for_log = raw.get('self_gen_product_id', f"row_index_{idx-2}") # Use self_gen_product_id if available
+    for idx, raw in enumerate(records_data, start=2):
+        product_identifier_for_log = raw.get('self_gen_product_id', f"row_index_{idx-2}")
         try:
             logger.debug(f"[Product {product_identifier_for_log}] Raw data: {raw}")
             model = ProductCsvModel(**raw)
             logger.debug(f"[Product {model.self_gen_product_id}] Pydantic model created: {model.model_dump_json(indent=2)}")
-            prod_id = load_product_record_to_db(
+            # Use the refactored function
+            prod_id = load_product_record_to_db_refactored( 
                 db_session,
                 business_details_id,
                 model,
@@ -130,25 +127,23 @@ def load_products_to_db(
     return summary
 
 
-def load_product_record_to_db(
+def load_product_record_to_db_refactored( # Renamed for clarity during refactor
     db: Session,
     business_details_id: int,
     product_data: ProductCsvModel,
     session_id: str,
     user_id: int
 ) -> int:
-    """
-    Loads or updates a single product.
-    - On create: sets created_by/created_date via now_epoch_ms()
-    - On update : sets updated_by/updated_date, preserves created_* fields
-    """
-    log_prefix = f"[Product {product_data.self_gen_product_id}]" # self_gen_product_id is guaranteed by Pydantic model
-    logger.info(f"{log_prefix} Starting processing for business_id {business_details_id}.")
+    log_prefix = f"[Product {product_data.self_gen_product_id}]"
+    logger.info(f"{log_prefix} Starting 3-step processing for business_id {business_details_id}.")
     now_ms = now_epoch_ms()
 
+    # --- Step 1: Lookups & Validations First ---
     try:
+        logger.debug(f"{log_prefix} Step 1: Performing lookups and validations.")
+
+        # 1a. Brand lookup
         logger.debug(f"{log_prefix} Looking up brand: {product_data.brand_name}")
-        # 1) Brand lookup
         brand = db.query(BrandOrm).filter_by(
             name=product_data.brand_name,
             business_details_id=business_details_id
@@ -156,67 +151,43 @@ def load_product_record_to_db(
         if not brand:
             raise DataLoaderError(
                 message=f"Brand '{product_data.brand_name}' not found.",
-                error_type=ErrorType.LOOKUP,
-                field_name="brand_name",
-                offending_value=product_data.brand_name
+                error_type=ErrorType.LOOKUP, field_name="brand_name", offending_value=product_data.brand_name
             )
-        logger.debug(f"{log_prefix} Brand found: {brand.id if brand else 'None'}")
+        logger.debug(f"{log_prefix} Brand found: ID {brand.id}")
 
-        # 2) Category lookup by category_path (using Redis cache first)
+        # 1b. Category lookup (Redis cache then DB, including leaf node check)
         logger.debug(f"{log_prefix} Looking up category_id for path '{product_data.category_path}' from Redis cache.")
-        category_id_from_cache = get_from_id_map(
-            session_id,
-            f"categories{DB_PK_MAP_SUFFIX}",
-            product_data.category_path
-        )
-
+        category_id_from_cache = get_from_id_map(session_id, f"categories{DB_PK_MAP_SUFFIX}", product_data.category_path)
         if not category_id_from_cache:
             raise DataLoaderError(
                 message=f"Category ID for path '{product_data.category_path}' not found in Redis cache. Ensure categories are loaded first or path is correct.",
-                error_type=ErrorType.LOOKUP,
-                field_name="category_path",
-                offending_value=product_data.category_path
+                error_type=ErrorType.LOOKUP, field_name="category_path", offending_value=product_data.category_path
             )
         
         logger.debug(f"{log_prefix} Category ID from cache: {category_id_from_cache}. Fetching CategoryOrm object from DB.")
-        category = db.query(CategoryOrm).filter_by(
-            id=category_id_from_cache,
-            business_details_id=business_details_id # Ensure category belongs to this business
-        ).one_or_none()
-
+        category = db.query(CategoryOrm).filter_by(id=category_id_from_cache, business_details_id=business_details_id).one_or_none()
         if not category:
-            # This case implies inconsistency between Redis cache and DB, or wrong business_id for cached item.
             raise DataLoaderError(
                 message=f"Category with ID '{category_id_from_cache}' (from path '{product_data.category_path}') not found in DB for business {business_details_id}.",
-                error_type=ErrorType.LOOKUP, # Or potentially a different error type for inconsistency
-                field_name="category_path",
-                offending_value=product_data.category_path
+                error_type=ErrorType.LOOKUP, field_name="category_path", offending_value=product_data.category_path
             )
-        logger.debug(f"{log_prefix} CategoryOrm object fetched successfully: ID {category.id}, Name: {category.name}")
+        logger.debug(f"{log_prefix} CategoryOrm object fetched: ID {category.id}, Name: {category.name}")
 
-        # Check if the category is a leaf node (for the same business)
+        # Leaf node check for category
         logger.debug(f"{log_prefix} Checking if category '{category.name}' (ID: {category.id}) is a leaf node.")
-        is_parent_category = db.query(CategoryOrm.id).filter(
-            CategoryOrm.parent_id == category.id,
-            CategoryOrm.business_details_id == business_details_id # Ensure check is within the same business
-        ).first()
-
+        is_parent_category = db.query(CategoryOrm.id).filter(CategoryOrm.parent_id == category.id, CategoryOrm.business_details_id == business_details_id).first()
         if is_parent_category:
             raise DataLoaderError(
                 message=f"Category '{category.name}' (Path: '{product_data.category_path}') is not a leaf node. Products can only be assigned to leaf categories.",
-                error_type=ErrorType.VALIDATION,
-                field_name="category_path",
-                offending_value=product_data.category_path
+                error_type=ErrorType.VALIDATION, field_name="category_path", offending_value=product_data.category_path
             )
         logger.debug(f"{log_prefix} Category '{category.name}' is a leaf node.")
 
-        # 3) Shopping category (optional)
+        # 1c. Shopping category lookup (optional)
         shopping_cat_id: Optional[int] = None
         if product_data.shopping_category_name:
             logger.debug(f"{log_prefix} Looking up shopping category: {product_data.shopping_category_name}")
-            sc = db.query(ShoppingCategoryOrm).filter_by(
-                name=product_data.shopping_category_name
-            ).one_or_none()
+            sc = db.query(ShoppingCategoryOrm).filter_by(name=product_data.shopping_category_name).one_or_none()
             if sc:
                 shopping_cat_id = sc.id
                 logger.debug(f"{log_prefix} Shopping category found: {sc.id}")
@@ -225,9 +196,9 @@ def load_product_record_to_db(
         else:
             logger.debug(f"{log_prefix} No shopping category provided.")
 
-        # 4) Return policy lookup (from DB2 using policy_name)
+        # 1d. Return policy lookup (from DB2)
         return_policy_orm_from_db2: Optional[ReturnPolicyOrm] = None
-        if product_data.return_policy: # Only lookup if CSV provides a return_policy name
+        if product_data.return_policy:
             logger.debug(f"{log_prefix} Looking up return policy '{product_data.return_policy}' in DB2.")
             db2_session = None
             try:
@@ -235,16 +206,13 @@ def load_product_record_to_db(
                 logger.debug(f"{log_prefix} Obtained DB2 session for return policy lookup.")
                 return_policy_orm_from_db2 = db2_session.query(ReturnPolicyOrm).filter(
                     ReturnPolicyOrm.business_details_id == business_details_id,
-                    ReturnPolicyOrm.policy_name == product_data.return_policy # Use policy_name from CSV for lookup
+                    ReturnPolicyOrm.policy_name == product_data.return_policy
                 ).one_or_none()
                 logger.debug(f"{log_prefix} Return policy query executed. Found: {return_policy_orm_from_db2.id if return_policy_orm_from_db2 else 'None'}")
-
                 if not return_policy_orm_from_db2:
                     raise DataLoaderError(
                         message=f"Return policy '{product_data.return_policy}' not found in secondary database for business ID {business_details_id}.",
-                        error_type=ErrorType.LOOKUP,
-                        field_name="return_policy",
-                        offending_value=product_data.return_policy
+                        error_type=ErrorType.LOOKUP, field_name="return_policy", offending_value=product_data.return_policy
                     )
             finally:
                 if db2_session:
@@ -252,325 +220,175 @@ def load_product_record_to_db(
                     db2_session.close()
         else:
             logger.info(f"{log_prefix} No return_policy name provided in CSV. Product will not have a return policy linked.")
+        
+        logger.debug(f"{log_prefix} Step 1 completed successfully.")
 
-
-        # 5) Upsert ProductOrm
-        logger.debug(f"{log_prefix} Attempting to find existing product by self_gen_product_id: {product_data.self_gen_product_id}")
+        # --- Step 2: Product Core Data Load ---
+        logger.debug(f"{log_prefix} Step 2: Upserting ProductOrm and populating core fields.")
+        
         prod = db.query(ProductOrm).filter_by(
             self_gen_product_id=product_data.self_gen_product_id,
             business_details_id=business_details_id
         ).one_or_none()
-        logger.debug(f"{log_prefix} Existing product found: {prod.id if prod else 'None'}")
+        logger.debug(f"{log_prefix} Existing product found by self_gen_product_id: {prod.id if prod else 'None'}")
 
         is_new = prod is None
-        old_actual_price: Optional[float] = None # For price history
-        old_sale_price: Optional[float] = None # For price history
+        old_actual_price: Optional[float] = None
+        old_sale_price: Optional[float] = None
 
         if is_new:
             logger.info(f"{log_prefix} Creating new product.")
             prod = ProductOrm(
                 self_gen_product_id=product_data.self_gen_product_id,
                 business_details_id=business_details_id,
-                created_by=user_id,
-                created_date=now_ms,
-                updated_by=user_id,    # Also set updated_by for new products
-                updated_date=now_ms,   # Also set updated_date for new products
+                created_by=user_id, created_date=now_ms,
+                updated_by=user_id, updated_date=now_ms,
                 barcode=generate_slug(product_data.self_gen_product_id)
             )
-            logger.debug(f"{log_prefix} Adding new ProductOrm to session.")
             db.add(prod)
+            logger.debug(f"{log_prefix} New ProductOrm added to session.")
         else:
             logger.info(f"{log_prefix} Updating existing product ID: {prod.id}")
-            # Capture old prices before updating for price history
             old_actual_price = prod.price
             old_sale_price = prod.sale_price
             logger.debug(f"{log_prefix} Captured old prices for history - Actual: {old_actual_price}, Sale: {old_sale_price}")
             prod.updated_by = user_id
             prod.updated_date = now_ms
 
-        # 6) Populate common fields
-        logger.debug(f"{log_prefix} Populating common fields for product.")
-        prod.name                   = product_data.product_name
-        prod.description            = product_data.description
-        prod.brand_name             = product_data.brand_name
-        prod.category_id            = category.id
-        prod.shopping_category_id   = shopping_cat_id
-        prod.price                  = product_data.price # Pydantic model ensures this is float
-        prod.sale_price             = product_data.sale_price # Optional in model, nullable in DB
-        prod.cost_price             = product_data.cost_price # Optional in model, nullable in DB
-        prod.quantity               = product_data.quantity # Pydantic model ensures this is int
-        prod.package_size_length    = product_data.package_size_length # Pydantic model ensures this is float
-        prod.package_size_width     = product_data.package_size_width # Pydantic model ensures this is float
-        prod.package_size_height    = product_data.package_size_height # Pydantic model ensures this is float
-        prod.product_weights        = product_data.product_weights # Pydantic model ensures this is float
-        prod.size_unit              = product_data.size_unit.upper()
-        prod.weight_unit            = product_data.weight_unit.upper()
+        # Populate core fields
+        prod.name = product_data.product_name
+        prod.description = product_data.description
+        prod.brand_name = product_data.brand_name # Uses brand_name string as per requirement
+        prod.category_id = category.id # From Step 1b
+        prod.shopping_category_id = shopping_cat_id # From Step 1c
+        prod.price = product_data.price
+        prod.sale_price = product_data.sale_price
+        prod.cost_price = product_data.cost_price
+        prod.quantity = product_data.quantity
+        prod.package_size_length = product_data.package_size_length
+        prod.package_size_width = product_data.package_size_width
+        prod.package_size_height = product_data.package_size_height
+        prod.product_weights = product_data.product_weights
+        prod.size_unit = product_data.size_unit.upper() if product_data.size_unit else None
+        prod.weight_unit = product_data.weight_unit.upper() if product_data.weight_unit else None
         
-        # Assign return_policy_id if found, otherwise it remains None (or its previous value on update)
-        if return_policy_orm_from_db2:
+        if return_policy_orm_from_db2: # From Step 1d
             prod.return_policy_id = return_policy_orm_from_db2.id
-        elif product_data.return_policy: # If a name was given but not found, error would have been raised.
-                                         # This path means no name was given. Set to None if new.
-            if is_new:
-                 prod.return_policy_id = None
-        # If not new and no policy name given, retain existing prod.return_policy_id
+        elif product_data.return_policy: # Should have failed in Step 1d if name provided but not found
+             pass # This case implies error logic in Step 1d was bypassed or name was empty
+        elif is_new: # No policy name provided, and it's a new product
+             prod.return_policy_id = None
+        # If not new and no policy name given, existing prod.return_policy_id is preserved.
 
-        prod.return_type            = product_data.return_type
-        prod.return_fee_type        = product_data.return_fee_type
-        # The field 'time_period_return' in ProductOrm seems to be 'return_fee' from ProductCsvModel
-        # based on the original code. Let's verify this mapping.
-        # Assuming 'return_fee' from CSV maps to 'time_period_return' in DB for now.
-        # The table definition for products.return_fee exists, and product_data.return_fee also exists.
-        # The original code had: prod.time_period_return = product_data.return_fee
-        # The product table has: return_fee real, return_fee_type character varying(255)
-        # It does NOT have time_period_return.
-        # It does have return_policy_id.
-        # Let's assume product_data.return_fee maps to ProductOrm.return_fee
-        # It does NOT have time_period_return.
-        # It does have return_policy_id.
-        # Let's assume product_data.return_fee maps to ProductOrm.return_fee
-        prod.return_fee             = product_data.return_fee
+        prod.return_type = product_data.return_type
+        prod.return_fee_type = product_data.return_fee_type
+        prod.return_fee = product_data.return_fee
+        prod.url = product_data.url or generate_slug(product_data.product_name)
+        prod.video_url = product_data.video_url
+        prod.thumbnail_url = product_data.video_thumbnail_url
+        prod.active = product_data.active
+        prod.ean = product_data.ean
+        prod.isbn = product_data.isbn
+        prod.keywords = product_data.keywords
+        prod.mpn = product_data.mpn
+        prod.seo_description = product_data.seo_description
+        prod.seo_title = product_data.seo_title
+        prod.upc = product_data.upc
+        prod.is_child_item = product_data.is_child_item
+        
+        logger.debug(f"{log_prefix} Core product fields populated. Attempting flush to get/confirm product ID.")
+        db.flush()
+        logger.info(f"{log_prefix} Product ID after flush: {prod.id}")
+        logger.debug(f"{log_prefix} Step 2 completed successfully.")
 
-        prod.url                    = product_data.url or generate_slug(product_data.product_name)
-        prod.video_url              = product_data.video_url
-        prod.thumbnail_url          = product_data.video_thumbnail_url # Corrected mapping
-        prod.active                 = product_data.active
-        prod.ean                    = product_data.ean
-        prod.isbn                   = product_data.isbn
-        prod.keywords               = product_data.keywords
-        prod.mpn                    = product_data.mpn
-        prod.seo_description        = product_data.seo_description
-        prod.seo_title              = product_data.seo_title
-        prod.upc                    = product_data.upc
-        prod.is_child_item          = product_data.is_child_item
-        logger.debug(f"{log_prefix} Common fields populated. Attempting to flush session to get product ID.")
-        db.flush()  # ensure prod.id is populated
-        logger.info(f"{log_prefix} Product ID after flush: {prod.id if prod else 'N/A'}")
+        # --- Step 3: Load Dependent Data ---
+        logger.debug(f"{log_prefix} Step 3: Loading dependent data for product ID {prod.id}.")
 
-        # 7) ProductSpecifications
+        # ProductSpecifications
         logger.debug(f"{log_prefix} Processing product specifications.")
-        if not is_new:
-            logger.debug(f"{log_prefix} Deleting existing specifications for product ID {prod.id}.")
+        if not is_new: # Delete existing only if product was not new
+            logger.debug(f"{log_prefix} Deleting existing specifications for updated product.")
             db.query(ProductSpecificationOrm).filter_by(product_id=prod.id).delete()
-
-        # mandatory Warehouse/Store
+        
         # Warehouse Location
         if product_data.warehouse_location is not None:
-            db.add(ProductSpecificationOrm(
-                product_id=prod.id,
-                name="Warehouse Location", # Corrected name
-                value=product_data.warehouse_location,
-                active='ACTIVE',
-                created_by=user_id,    # Always set for specs being loaded
-                created_date=now_ms,   # Always set for specs being loaded
-                updated_by=user_id,    # Always set for specs being loaded
-                updated_date=now_ms    # Always set for specs being loaded
-            ))
+            db.add(ProductSpecificationOrm(product_id=prod.id, name="Warehouse Location", value=product_data.warehouse_location, active='ACTIVE', created_by=user_id, created_date=now_ms, updated_by=user_id, updated_date=now_ms))
             logger.debug(f"{log_prefix} Added Warehouse Location spec: {product_data.warehouse_location}")
-        
         # Store Location
         if product_data.store_location is not None:
-            db.add(ProductSpecificationOrm(
-                product_id=prod.id,
-                name="Store Location", # Corrected name
-                value=product_data.store_location,
-                active='ACTIVE',
-                created_by=user_id,
-                created_date=now_ms,
-                updated_by=user_id,
-                updated_date=now_ms
-            ))
+            db.add(ProductSpecificationOrm(product_id=prod.id, name="Store Location", value=product_data.store_location, active='ACTIVE', created_by=user_id, created_date=now_ms, updated_by=user_id, updated_date=now_ms))
             logger.debug(f"{log_prefix} Added Store Location spec: {product_data.store_location}")
-
         # CSV specifications
         parsed_csv_specs = parse_specifications(product_data.specifications)
-        logger.debug(f"{log_prefix} Parsed {len(parsed_csv_specs)} specs from CSV column: {parsed_csv_specs}")
+        logger.debug(f"{log_prefix} Parsed {len(parsed_csv_specs)} specs from CSV column.")
         for spec in parsed_csv_specs:
-            db.add(ProductSpecificationOrm(
-                product_id=prod.id,
-                name=spec["name"],
-                value=spec["value"],
-                active='ACTIVE',
-                created_by=user_id,    # Always set for specs being loaded
-                created_date=now_ms,   # Always set for specs being loaded
-                updated_by=user_id,    # Always set for specs being loaded
-                updated_date=now_ms    # Always set for specs being loaded
-            ))
+            db.add(ProductSpecificationOrm(product_id=prod.id, name=spec["name"], value=spec["value"], active='ACTIVE', created_by=user_id, created_date=now_ms, updated_by=user_id, updated_date=now_ms))
             logger.debug(f"{log_prefix} Added CSV spec: {spec['name']} = {spec['value']}")
 
-        # 8) ProductImages
+        # ProductImages
         logger.debug(f"{log_prefix} Processing product images.")
-        if not is_new:
-            logger.debug(f"{log_prefix} Deleting existing images for product ID {prod.id}.")
+        if not is_new: # Delete existing only if product was not new
+            logger.debug(f"{log_prefix} Deleting existing images for updated product.")
             db.query(ProductImageOrm).filter_by(product_id=prod.id).delete()
-
-        main_img: Optional[str] = None
+        
+        main_img_url: Optional[str] = None
         parsed_imgs = parse_images(product_data.images)
-        logger.debug(f"{log_prefix} Parsed {len(parsed_imgs)} images from CSV column: {parsed_imgs}")
-        for img in parsed_imgs:
-            db.add(ProductImageOrm(
-                product_id=prod.id,
-                name=img["url"],
-                main_image=img["main_image"],
-                active='ACTIVE',
-                created_by=user_id,     # Always set for images being loaded
-                created_date=now_ms,    # Always set for images being loaded
-                updated_by=user_id,     # Always set for images being loaded
-                updated_date=now_ms     # Always set for images being loaded
-            ))
-            logger.debug(f"{log_prefix} Added image: {img['url']}, main: {img['main_image']}")
-            if img["main_image"]:
-                main_img = img["url"]
+        logger.debug(f"{log_prefix} Parsed {len(parsed_imgs)} images from CSV column.")
+        for img_data in parsed_imgs:
+            db.add(ProductImageOrm(product_id=prod.id, name=img_data["url"], main_image=img_data["main_image"], active='ACTIVE', created_by=user_id, created_date=now_ms, updated_by=user_id, updated_date=now_ms))
+            if img_data["main_image"]:
+                main_img_url = img_data["url"]
+            logger.debug(f"{log_prefix} Added image: {img_data['url']}, main: {img_data['main_image']}")
+        prod.main_image_url = main_img_url
+        logger.debug(f"{log_prefix} Set main_image_url to: {main_img_url}")
 
-        prod.main_image_url = main_img
-        logger.debug(f"{log_prefix} Set main_image_url to: {main_img}")
-
-        # 9) Price History Logic
-        logger.debug(f"{log_prefix} Processing price history logic. is_new: {is_new}, old_actual_price: {old_actual_price}, old_sale_price: {old_sale_price}, new_price: {prod.price}, new_sale_price: {prod.sale_price}")
-        # Needs to be done after prod.price and prod.sale_price are updated with new values
-        # and prod.id is available.
-        # 'old_price_value_for_history' will store the specific old price that changed.
-        create_history_record = False
-        old_price_value_for_history: Optional[float] = None
-
-        if is_new:
-            create_history_record = True
-            # For new products, old_price is typically null or not applicable for the first entry.
-            # The schema for products_price_history has 'old_price real'.
-            # We'll set it to None for the initial price record.
-            old_price_value_for_history = None
-        else:
-            # This is an update. We need to compare current prod.price/sale_price (which are now the *new* values)
-            # with what they were *before* this transaction began.
-            # To do this accurately, we would need to query the product's price *before* assigning new values.
-            # The current 'prod' object is already updated with product_data values.
-            # A simple way is to check if the new price from CSV differs from what was just set,
-            # but this requires having the original values.
-            # Let's assume for now that if it's an update, we need to query the values as they were.
-            # However, the 'prod' object is already updated in memory.
-            # A more robust way: query the DB for the current committed values if not new.
-            # For now, we'll rely on the fact that 'prod' was just updated.
-            # This means we need to capture old values *before* they are updated on 'prod'.
-            # This section needs to be moved before prod.price and prod.sale_price are updated.
-
-            # --- THIS LOGIC IS MOVED EARLIER ---
-            # This block will be moved before step #6 (Populate common fields)
-            # This comment is now outdated as old_actual_price and old_sale_price are captured earlier.
-            pass
-
-
-        # The actual price history creation will be done after common fields are populated.
-        # This ensures we use the final state of prod.price and prod.sale_price for the history record.
-
-        # db.flush() # Ensure prod.id is populated if it wasn't (e.g. if logic moved before initial flush)
-        # This flush was already done after populating common fields and before specs/images.
-        # prod.id is guaranteed to be available here.
-        logger.debug(f"{log_prefix} Product ID for price history: {prod.id}")
-
-
-        # --- Price History Creation (actual) ---
-        # This part is placed *after* prod object is updated and flushed.
-        # The decision to create (create_history_record) and the old_price_value_for_history
-        # must be determined *before* prod.price and prod.sale_price are updated.
-        # This requires a significant re-ordering or querying old state.
-
-        # Let's adjust the plan: price history logic will be more involved.
-        # For now, I'll put a placeholder and refine it.
-        # The challenge: `is_new` is known. If `not is_new`, we need old price.
-        # `prod` object is updated with `product_data` values *before* this point in the original flow.
-
-        # Correct approach:
-        # 1. If new product: always add to history, old_price = None.
-        # 2. If existing product:
-        #    Capture `prod.price` and `prod.sale_price` *before* they are updated by `product_data`.
-        #    Then, after `prod.price` and `prod.sale_price` are updated with `product_data` values,
-        #    compare the new `prod.price` with captured old `prod.price`,
-        #    and new `prod.sale_price` with captured old `prod.sale_price`.
-        #    If either changed, add to history. `old_price` in history will be the specific price that changed.
-
-        # This means the price history check needs to straddle the update of prod.price/sale_price.
-        # Let's implement this correctly. (This will involve changes higher up)
-
-        # For now, let's assume 'old_actual_price' and 'old_sale_price' were captured before prod was updated.
-        # This means I need to modify the code higher up first.
-        # I will defer the full implementation of price history to a subsequent step
-        # after refactoring to capture old prices.
-        # For now, I will add a placeholder comment.
-
-        # Placeholder for price history logic - will be fully implemented after refactoring
-        # to capture old prices before update.
-
-        # --- Actual Price History Creation ---
+        # Price History
+        logger.debug(f"{log_prefix} Processing price history. is_new: {is_new}, old_actual: {old_actual_price}, old_sale: {old_sale_price}, new_actual: {prod.price}, new_sale: {prod.sale_price}")
         needs_price_history_entry = False
         final_old_price_for_history: Optional[float] = None
-
         if is_new:
             needs_price_history_entry = True
-            final_old_price_for_history = None # No old price for a new product entry
+            final_old_price_for_history = None
         else:
-            # Existing product, check if prices changed
-            price_changed = (old_actual_price is None and product_data.price is not None) or \
-                            (old_actual_price is not None and product_data.price is None) or \
-                            (old_actual_price != product_data.price)
-            
-            sale_price_changed = (old_sale_price is None and product_data.sale_price is not None) or \
-                                 (old_sale_price is not None and product_data.sale_price is None) or \
-                                 (old_sale_price != product_data.sale_price)
-
+            price_changed = old_actual_price != prod.price 
+            sale_price_changed = old_sale_price != prod.sale_price
             if price_changed or sale_price_changed:
                 needs_price_history_entry = True
-                if price_changed:
-                    final_old_price_for_history = old_actual_price
-                else: # Only sale_price changed
-                    final_old_price_for_history = old_sale_price
+                final_old_price_for_history = old_actual_price if price_changed else old_sale_price
         
         if needs_price_history_entry:
             current_time = datetime.utcnow()
             price_history_entry = ProductsPriceHistoryOrm(
-                product_id=prod.id,
-                price=prod.price, # This is the new price from product_data, already set on prod
-                sale_price=prod.sale_price, # This is the new sale_price from product_data, already set on prod
+                product_id=prod.id, price=prod.price, sale_price=prod.sale_price,
                 old_price=final_old_price_for_history,
-                month=current_time.strftime("%B"),
-                year=current_time.year
+                month=current_time.strftime("%B"), year=current_time.year
             )
             logger.debug(f"{log_prefix} Adding price history entry: {price_history_entry.__dict__}")
             db.add(price_history_entry)
         else:
-            logger.debug(f"{log_prefix} No price change detected, skipping price history entry.")
-
+            logger.debug(f"{log_prefix} No price change detected or not applicable, skipping price history.")
+        
+        logger.debug(f"{log_prefix} Step 3 completed successfully.")
         logger.info(f"{log_prefix} Successfully processed product ID {prod.id}.")
         return prod.id
 
     except (IntegrityError, DataError) as e:
         logger.error(f"{log_prefix} Database integrity or data error: {e}", exc_info=True)
         db.rollback()
-        raise DataLoaderError(
-            message=str(e.orig),
-            error_type=ErrorType.DATABASE,
-            offending_value=product_data.self_gen_product_id,
-            original_exception=e
-        )
+        raise DataLoaderError(message=str(e.orig), error_type=ErrorType.DATABASE, offending_value=product_data.self_gen_product_id, original_exception=e)
     except NoResultFound as e:
         logger.error(f"{log_prefix} Lookup error (NoResultFound): {e}", exc_info=True)
         db.rollback()
-        raise DataLoaderError(
-            message=str(e),
-            error_type=ErrorType.LOOKUP,
-            offending_value=product_data.self_gen_product_id,
-            original_exception=e
-        )
-    except DataLoaderError as e: # Catch specific DataLoaderErrors raised internally
-        logger.error(f"{log_prefix} DataLoaderError occurred: {e}", exc_info=True)
-        db.rollback() # Ensure rollback even for internally raised DataLoaderErrors
-        raise # Re-raise it to be caught by load_products_to_db
-    except Exception as e:
-        logger.error(f"{log_prefix} Unexpected error during product record processing: {e}", exc_info=True)
+        raise DataLoaderError(message=str(e), error_type=ErrorType.LOOKUP, offending_value=product_data.self_gen_product_id, original_exception=e)
+    except DataLoaderError as e:
+        logger.error(f"{log_prefix} DataLoaderError occurred: {e.message}", exc_info=True) # Log full error
         db.rollback()
-        # Re-raise as DataLoaderError so it's counted by the calling function load_products_to_db
-        raise DataLoaderError(
-            message=f"Unexpected error for product {product_data.self_gen_product_id}: {str(e)}",
-            error_type=ErrorType.UNEXPECTED_ROW_ERROR,
-            offending_value=product_data.self_gen_product_id,
-            original_exception=e
-        )
+        raise
+    except Exception as e:
+        logger.error(f"{log_prefix} Unexpected error: {e}", exc_info=True)
+        db.rollback()
+        raise DataLoaderError(message=f"Unexpected error for product {product_data.self_gen_product_id}: {str(e)}", error_type=ErrorType.UNEXPECTED_ROW_ERROR, offending_value=product_data.self_gen_product_id, original_exception=e)
+
+# Remove or comment out the old function if the refactored one is complete and tested.
+# For now, I'm keeping the old one commented out below for reference.
+# def load_product_record_to_db(...): ...
