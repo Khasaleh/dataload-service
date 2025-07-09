@@ -29,7 +29,7 @@ from app.services.db_loaders import (
     load_category_to_db,
     load_price_to_db,
 )
-from app.dataload.product_loader import load_product_record_to_db
+# from app.dataload.product_loader import load_product_record_to_db # Unused and causes ImportError
 from app.dataload.meta_tags_loader import load_meta_tags_from_csv
 from app.models import UploadJobStatus, ErrorDetailModel, ErrorType
 import csv
