@@ -166,21 +166,22 @@ def load_products_to_db(
                 user_id,
                 pre_resolved_category_obj # Pass the pre-fetched CategoryOrm object (or None)
             )
-            # Rest of product ID mapping logic...
-            prev = add_to_id_map(
-                session_id, 
+            # Check if product was already in this session's Redis map to count for summary.
+            # This reflects Redis state for the session, not necessarily DB state (is_new).
+            prev_redis_val = get_from_id_map( # Corrected: use get_from_id_map to check existence
+                session_id,
                 f"products{DB_PK_MAP_SUFFIX}",
                 model.self_gen_product_id,
-                prod_id,
-                pipeline=db_pk_redis_pipeline,
-                read_only=True
+                pipeline=db_pk_redis_pipeline
             )
-            if prev is None:
-                summary["inserted"] += 1
+
+            if prev_redis_val is None: # If it wasn't in Redis for this session before
+                summary["inserted"] += 1 
             else:
                 summary["updated"] += 1
-
-            add_to_id_map(
+            
+            # Actual update to the Redis map for the product
+            add_to_id_map( 
                 session_id,
                 f"products{DB_PK_MAP_SUFFIX}",
                 model.self_gen_product_id,
