@@ -194,6 +194,22 @@ def load_product_record_to_db(
             )
         logger.debug(f"{log_prefix} CategoryOrm object fetched successfully: ID {category.id}, Name: {category.name}")
 
+        # Check if the category is a leaf node (for the same business)
+        logger.debug(f"{log_prefix} Checking if category '{category.name}' (ID: {category.id}) is a leaf node.")
+        is_parent_category = db.query(CategoryOrm.id).filter(
+            CategoryOrm.parent_id == category.id,
+            CategoryOrm.business_details_id == business_details_id # Ensure check is within the same business
+        ).first()
+
+        if is_parent_category:
+            raise DataLoaderError(
+                message=f"Category '{category.name}' (Path: '{product_data.category_path}') is not a leaf node. Products can only be assigned to leaf categories.",
+                error_type=ErrorType.VALIDATION,
+                field_name="category_path",
+                offending_value=product_data.category_path
+            )
+        logger.debug(f"{log_prefix} Category '{category.name}' is a leaf node.")
+
         # 3) Shopping category (optional)
         shopping_cat_id: Optional[int] = None
         if product_data.shopping_category_name:
