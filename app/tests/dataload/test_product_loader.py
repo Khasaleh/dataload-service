@@ -399,16 +399,20 @@ def test_load_product_refactored_new_product_success(
         # --- Mocking ID generation on flush ---
         # ProductOrm instance will be created. Mock 'add' to capture it.
         # Then, on 'flush', assign an ID to the captured instance.
-        created_product_orm_instance = None
-        def capture_product_add(instance):
-            nonlocal created_product_orm_instance
-            if isinstance(instance, ProductOrm):
-                created_product_orm_instance = instance
-        mock_db_session_for_loader.add.side_effect = capture_product_add
+        created_product_orm_instance_ref = {} # Use a dict to pass by reference effectively
 
+        def capture_product_add(instance):
+            if isinstance(instance, ProductOrm):
+                created_product_orm_instance_ref['instance'] = instance
+                # Assert placeholder values immediately after instantiation and before flush simulation
+                assert instance.barcode == "TEMP_BARCODE_PENDING_ID"
+                assert instance.mobile_barcode == "TEMP_MBARCODE_PENDING_ID"
+                assert instance.self_gen_product_id.startswith("TEMP_SGPI_")
+        mock_db_session_for_loader.add.side_effect = capture_product_add
+        
         def assign_id_on_flush():
-            if created_product_orm_instance:
-                created_product_orm_instance.id = 999 # Assign a mock ID
+            if 'instance' in created_product_orm_instance_ref:
+                created_product_orm_instance_ref['instance'].id = 999 # Assign a mock ID
         mock_db_session_for_loader.flush.side_effect = assign_id_on_flush
         
         # --- Mocking barcode_helper ---
@@ -429,11 +433,13 @@ def test_load_product_refactored_new_product_success(
     assert product_id == 999
     mock_db_session_for_loader.add.assert_called() # Check add was called multiple times (product, specs, images, price history)
     
-    # Assert ProductOrm instance fields (captured_product_orm_instance)
+    # Assert ProductOrm instance fields (captured_product_orm_instance_ref['instance'])
+    created_product_orm_instance = created_product_orm_instance_ref.get('instance')
     assert created_product_orm_instance is not None
-    # assert created_product_orm_instance.product_lookup_key == mock_product_csv_model.product_lookup_key # Removed
+    
     assert created_product_orm_instance.name == mock_product_csv_model.product_name
-    assert created_product_orm_instance.self_gen_product_id == "000000999" # 999 zfilled to 9 digits
+    # Final values after ID generation and update logic
+    assert created_product_orm_instance.self_gen_product_id == "000000999" 
     assert created_product_orm_instance.mobile_barcode == "P999"
     assert created_product_orm_instance.barcode == "FakeBase64String=="
     
@@ -451,8 +457,8 @@ def test_load_product_refactored_new_product_success(
         assert created_product_orm_instance.return_fee_type == mock_product_csv_model.return_fee_type
         assert created_product_orm_instance.return_fee == mock_product_csv_model.return_fee
         
-    assert created_product_orm_instance.size_unit == mock_product_csv_model.size_unit # Already transformed by Pydantic
-    assert created_product_orm_instance.weight_unit == mock_product_csv_model.weight_unit # Already transformed
+    assert created_product_orm_instance.size_unit == mock_product_csv_model.size_unit 
+    assert created_product_orm_instance.weight_unit == mock_product_csv_model.weight_unit 
     assert created_product_orm_instance.is_child_item == mock_product_csv_model.is_child_item
     assert created_product_orm_instance.order_limit == mock_product_csv_model.order_limit
 

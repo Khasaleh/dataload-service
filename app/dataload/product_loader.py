@@ -313,15 +313,17 @@ def load_product_record_to_db_refactored(
             # self_gen_product_id initialized with a temporary placeholder
             temp_self_gen_id = f"TEMP_SGPI_{uuid.uuid4().hex[:16]}" 
             prod = ProductOrm(
-                # product_lookup_key removed
-                name=product_data.product_name, # Name is set here
-                self_gen_product_id=temp_self_gen_id, # Placeholder for self_gen_product_id
+                name=product_data.product_name, 
+                self_gen_product_id=temp_self_gen_id, 
                 business_details_id=business_details_id,
                 created_by=user_id, created_date=now_ms,
-                # barcode will be generated after ID, and other fields populated below
+                # Initialize NOT NULL text fields that are generated post-ID with placeholders
+                barcode="TEMP_BARCODE_PENDING_ID",          # Placeholder for barcode
+                mobile_barcode="TEMP_MBARCODE_PENDING_ID",  # Placeholder for mobile_barcode
+                # Other fields will be populated below or are nullable
             )
             db.add(prod)
-            logger.debug(f"{log_prefix} New ProductOrm (ID pending) added to session with temp self_gen_product_id: {temp_self_gen_id}.")
+            logger.debug(f"{log_prefix} New ProductOrm (ID pending) added to session with temp placeholders for self_gen_product_id, barcode, mobile_barcode.")
         else:
             logger.info(f"{log_prefix} Updating existing product ID: {prod.id}. Name: {prod.name}")
             # For updates, product_name from CSV should match existing prod.name.
