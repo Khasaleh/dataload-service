@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, validator, constr, root_validator
+from pydantic import BaseModel, Field, validator, constr, root_validator,HttpUrl
 from typing import Optional, List, Any
 from datetime import datetime
 from enum import Enum
@@ -213,16 +213,90 @@ class ProductPriceModel(BaseModel):
         if v is not None and v <= 0:
             raise ValueError('offer_price must be positive if provided')
         return v
-
 class ProductCsvModel(BaseModel):
-    # Add the necessary fields for ProductCsvModel
-    product_name: str
-    category_path: str
-    price: float
-    quantity: int
-
+    """Pydantic model for validating and normalizing product CSV rows."""
+    self_gen_product_id: constr(strip_whitespace=True, min_length=1)
+    product_name: constr(strip_whitespace=True, min_length=1)
+    description: Optional[str] = None
+    quantity: Optional[int] = Field(default=0, ge=0)
+    brand_name: constr(strip_whitespace=True, min_length=1)
+    category_path: constr(strip_whitespace=True, min_length=1)
+    warehouse_location: Optional[str] = None  # NEW: location in warehouse
+    store_location: Optional[str] = None      # NEW: location in store
+    shopping_category_name: Optional[str] = None
+    price: Optional[float] = Field(default=0.0, ge=0)
+    sale_price: Optional[float] = Field(default=0.0, ge=0)
+    cost_price: Optional[float] = Field(default=0.0, ge=0)
+    package_size_length: Optional[float] = Field(default=0.0, ge=0)
+    package_size_width: Optional[float] = Field(default=0.0, ge=0)
+    package_size_height: Optional[float] = Field(default=0.0, ge=0)
+    product_weights: Optional[float] = Field(default=0.0, ge=0)
+    size_unit: Optional[str] = None
+    weight_unit: Optional[str] = None
+    return_type: constr(strip_whitespace=True, min_length=1)
+    return_fee_type: Optional[constr(strip_whitespace=True)] = None
+    return_fee: Optional[float] = None
+    active: Optional[str] = Field(default='ACTIVE')
+    url: Optional[str] = None
+    video_url: Optional[HttpUrl] = None
+    video_thumbnail_url: Optional[HttpUrl] = None
+    images: Optional[str] = None  # pipe-separated URL|flag
+    specifications: Optional[str] = None  # pipe-separated name:value
+    is_child_item: Optional[int] = Field(default=0, ge=0)
+    ean: Optional[str] = None
+    isbn: Optional[str] = None
+    keywords: Optional[str] = None
+    mpn: Optional[str] = None
+    seo_description: Optional[str] = None
+    seo_title: Optional[str] = None
+    upc: Optional[str] = None
+    size_chart_img: Optional[str] = None
+    business_details_id: Optional[int] = None
+    category_id: Optional[int] = None
     class Config:
         anystr_strip_whitespace = True
+        extra = 'ignore'
+
+    @validator('*', pre=True)
+    def empty_str_to_none(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @validator('quantity', 'is_child_item', pre=True, always=True)
+    def parse_ints(cls, v):
+        if v is None:
+            return 0
+        try:
+            return int(v)
+        except:
+            raise ValueError('must be an integer')
+
+    @validator(
+        'price', 'sale_price', 'cost_price', 'package_size_length',
+        'package_size_width', 'package_size_height', 'product_weights',
+        'return_fee', pre=True, always=True
+    )
+    def parse_floats(cls, v):
+        if v is None:
+            return 0.0
+        try:
+            return float(v)
+        except:
+            raise ValueError('must be a number')
+
+    @validator('active', pre=True, always=True)
+    def normalize_active(cls, v):
+        if isinstance(v, str) and v.strip().upper() == 'INACTIVE':
+            return 'INACTIVE'
+        return 'ACTIVE'
+
+    @validator('url', always=True)
+    def gen_url(cls, v, values):
+        if v:
+            return v.strip().lower().replace(' ', '-')
+        name = values.get('product_name', '')
+        return generate_slug(name)
 
 class ProductItemModel(BaseModel):
     product_name: str
@@ -266,6 +340,7 @@ class ErrorType(str, Enum):
     UNEXPECTED_ROW_ERROR = "UNEXPECTED_ROW_ERROR"
     TASK_EXCEPTION = "TASK_EXCEPTION"
     CONFIGURATION = "CONFIGURATION"
+    BATCH_PROCESSING_ERROR = "BATCH_PROCESSING_ERROR" # Added new error type
     UNKNOWN = "UNKNOWN"
 
 class ErrorDetailModel(BaseModel):

@@ -2,162 +2,274 @@ import pytest
 from pydantic import ValidationError
 from typing import Dict, Any
 
-from app.dataload.models.product_csv import ProductCsvModel, generate_url_slug
-from app.dataload.product_loader import load_product_record_to_db, parse_images, parse_specifications
+from app.dataload.models.product_csv import ProductCsvModel # generate_url_slug is internal to model
+from app.dataload.product_loader import (
+    load_product_record_to_db_refactored, # Target function for new tests
+    parse_images, 
+    parse_specifications,
+    get_category_by_full_path_from_db # Might need to mock or use for setup
+)
+from app.db.models import (
+    ProductOrm, BrandOrm, CategoryOrm, ReturnPolicyOrm, ShoppingCategoryOrm,
+    ProductImageOrm, ProductSpecificationOrm, ProductsPriceHistoryOrm
+)
+from app.services.db_loaders import ErrorType # For DataLoaderError
+from app.exceptions import DataLoaderError
+from sqlalchemy.orm import Session
+from unittest.mock import MagicMock, patch
+
 
 # Assuming a test database session fixture `db_session` is available from a conftest.py
+# For loader tests, we'll often mock the session and its query results.
 # from app.db.models import BrandOrm, CategoryOrm, ReturnPolicyOrm, ShoppingCategoryOrm, ProductOrm, ProductImageOrm, ProductSpecificationOrm
 # from sqlalchemy.orm import Session
 
 # --- Unit Tests for Pydantic Model (ProductCsvModel) ---
 
-def get_valid_product_data(**overrides: Any) -> Dict[str, Any]:
+def get_valid_product_csv_data(**overrides: Any) -> Dict[str, Any]:
+    """ Provides valid raw data for ProductCsvModel, reflecting new structure """
     data = {
-        "product_name": "Test Product Alpha",
-        "self_gen_product_id": "SKU-ALPHA-001",
-        "business_details_id": 10, # Expected by model, though usually injected by loader task
-        "description": "A great product for testing.",
-        "brand_name": "AlphaBrand",
-        "category_id": 101,
-        "shopping_category_name": "ElectronicsTest",
-        "price": 199.99,
-        "sale_price": 179.99,
-        "cost_price": 100.00,
-        "quantity": 50,
-        "package_size_length": 30.5,
-        "package_size_width": 20.0,
-        "package_size_height": 10.2,
-        "product_weights": 2.5,
-        "size_unit": "CM",
-        "weight_unit": "KG",
+        "product_lookup_key": "LOOKUP-KEY-001", # New field
+        "product_name": "Test Product Omega",
+        "description": "A fantastic omega product for testing.",
+        "brand_name": "OmegaBrand",
+        "category_path": "Electronics / Gadgets / Testers", # For path-based lookup
+        "shopping_category_name": "Test Gizmos",
+        "price": 299.99,
+        "sale_price": 279.99,
+        "cost_price": 150.00,
+        "quantity": 75,
+        "package_size_length": 35.0,
+        "package_size_width": 25.5,
+        "package_size_height": 15.0,
+        "product_weights": 3.0,
+        "size_unit": "cm", # Use abbreviation for testing validator
+        "weight_unit": "kg", # Use abbreviation
         "active": "ACTIVE",
         "return_type": "SALES_RETURN_ALLOWED",
-        "return_fee_type": "FIXED",
-        "return_fee": 10.00,
-        "url": None, # To test auto-generation
-        "video_url": "https://example.com/video.mp4",
-        "images": "https://example.com/img1.jpg|main_image:true|https://example.com/img2.jpg|main_image:false",
-        "specifications": "Color:Red|Material:Metal",
-        "is_child_item": 0,
-        "ean": "1234567890123",
-        "keywords": "test, product, alpha",
+        "return_fee_type": "FREE", # To test specific logic
+        "return_fee": 0.0, # Pydantic model will handle if None and type is FREE
+        "warehouse_location": "A1-R2-S3",
+        "store_location": "Shelf 5, Aisle 3",
+        "return_policy": "Standard 30 Day", # Name of policy for DB2 lookup
+        "size_chart_img": "https://example.com/size_chart.png",
+        "url": None, # Test auto-generation
+        "video_url": "https://example.com/vid.mp4",
+        "video_thumbnail_url": "https://example.com/vid_thumb.jpg",
+        "images": "https://example.com/imgA.jpg|main_image:true|https://example.com/imgB.jpg|main_image:false",
+        "specifications": "Feature:Awesome|Range:100m",
+        "is_child_item": 0, # Test with 0, 1, and None
+        "order_limit": 10, # New field
+        "ean": "9876543210987",
+        "isbn": "978-3-16-148410-0",
+        "keywords": "omega, test, product",
+        "mpn": "OMEGA-MPN-001",
+        "seo_description": "Best omega testing product available.",
+        "seo_title": "Omega Test Product - The Best",
+        "upc": "192837465012",
     }
     data.update(overrides)
     return data
 
 def test_product_csv_model_valid_data():
-    data = get_valid_product_data()
+    data = get_valid_product_csv_data()
     model = ProductCsvModel(**data)
-    assert model.product_name == "Test Product Alpha"
+    assert model.product_name == "Test Product Omega"
+    assert model.product_lookup_key == "LOOKUP-KEY-001"
     assert model.active == "ACTIVE"
-    assert model.url == "test-product-alpha" # Auto-generated
-    assert model.return_fee == 10.00
+    assert model.url == "test-product-omega" # Auto-generated
+    assert model.return_fee_type == "FREE" # Stays FREE in model
+    assert model.return_fee == 0.0 # Normalized by model if type is FREE
+    assert model.size_unit == "CENTIMETERS" # Validated and transformed
+    assert model.weight_unit == "KILOGRAMS" # Validated and transformed
+    assert model.order_limit == 10
+    assert model.is_child_item == 0
+
+def test_product_csv_model_optional_fields_not_provided():
+    data = get_valid_product_csv_data(
+        sale_price=None,
+        cost_price=None,
+        shopping_category_name=None,
+        return_fee_type=None, # Requires return_type SALES_ARE_FINAL or careful handling
+        return_fee=None,
+        warehouse_location=None,
+        store_location=None,
+        return_policy=None,
+        size_chart_img="", # Test empty string becoming None
+        video_url="",
+        video_thumbnail_url=None, # Test None directly
+        images=None,
+        specifications="",
+        is_child_item=None, # Test None
+        order_limit=None,
+        ean=None, isbn=None, keywords=None, mpn=None, seo_description=None, seo_title=None, upc=None,
+        # For return_fee_type=None, need to ensure return_type allows it
+        return_type="SALES_ARE_FINAL" 
+    )
+    model = ProductCsvModel(**data)
+    assert model.sale_price is None
+    assert model.size_chart_img is None
+    assert model.video_url is None
+    assert model.specifications is None
+    assert model.is_child_item is None
+    assert model.order_limit is None
 
 def test_product_csv_model_url_provided_and_valid():
-    data = get_valid_product_data(url="my-custom-slug")
+    data = get_valid_product_csv_data(url="my-custom-slug")
     model = ProductCsvModel(**data)
     assert model.url == "my-custom-slug"
 
 def test_product_csv_model_url_provided_invalid():
     with pytest.raises(ValidationError, match="Provided URL is not a valid slug"):
-        ProductCsvModel(**get_valid_product_data(url="My Custom Slug!"))
+        ProductCsvModel(**get_valid_product_csv_data(url="My Custom Slug!"))
 
 def test_product_csv_model_active_status_invalid():
     with pytest.raises(ValidationError, match="Status must be 'ACTIVE' or 'INACTIVE'"):
-        ProductCsvModel(**get_valid_product_data(active="Pending"))
+        ProductCsvModel(**get_valid_product_csv_data(active="Pending"))
 
 def test_product_csv_model_return_type_invalid():
     with pytest.raises(ValidationError, match="return_type must be 'SALES_RETURN_ALLOWED' or 'SALES_ARE_FINAL'"):
-        ProductCsvModel(**get_valid_product_data(return_type="MAYBE_RETURN"))
+        ProductCsvModel(**get_valid_product_csv_data(return_type="MAYBE_RETURN"))
 
-# Return Policy Logic Tests
+# Return Policy Logic Tests (largely unchanged, just use new data getter)
 def test_product_csv_model_return_sales_are_final_valid():
-    data = get_valid_product_data(return_type="SALES_ARE_FINAL", return_fee_type=None, return_fee=None)
-    model = ProductCsvModel(**data)
+    data = get_valid_product_csv_data(return_type="SALES_ARE_FINAL", return_fee_type=None, return_fee=None)
+    model = ProductCsvModel(**data) # This will fail if other fields are not compatible with SALES_ARE_FINAL
     assert model.return_type == "SALES_ARE_FINAL"
     assert model.return_fee_type is None
     assert model.return_fee is None
 
 def test_product_csv_model_return_sales_are_final_with_fee_type():
-    # The model validator will catch this as a broader condition violation
     with pytest.raises(ValidationError, match="return_fee_type and return_fee must be null or empty when return_type is 'SALES_ARE_FINAL'"):
-        ProductCsvModel(**get_valid_product_data(return_type="SALES_ARE_FINAL", return_fee_type="FIXED", return_fee=None))
+        ProductCsvModel(**get_valid_product_csv_data(return_type="SALES_ARE_FINAL", return_fee_type="FIXED", return_fee=None))
 
 def test_product_csv_model_return_sales_are_final_with_fee():
-    # This specific check is more robust in the root_validator
     with pytest.raises(ValidationError, match="return_fee_type and return_fee must be null or empty when return_type is 'SALES_ARE_FINAL'"):
-        ProductCsvModel(**get_valid_product_data(return_type="SALES_ARE_FINAL", return_fee_type=None, return_fee=5.0))
+        ProductCsvModel(**get_valid_product_csv_data(return_type="SALES_ARE_FINAL", return_fee_type=None, return_fee=5.0))
 
 def test_product_csv_model_return_allowed_no_fee_type():
     with pytest.raises(ValidationError, match="return_fee_type is required"):
-        ProductCsvModel(**get_valid_product_data(return_type="SALES_RETURN_ALLOWED", return_fee_type=None))
+        ProductCsvModel(**get_valid_product_csv_data(return_type="SALES_RETURN_ALLOWED", return_fee_type=None))
 
 def test_product_csv_model_return_allowed_invalid_fee_type():
-    with pytest.raises(ValidationError, match="return_fee_type, if provided, must be 'FIXED', 'PERCENTAGE', or 'FREE'"): # Adjusted match
-        ProductCsvModel(**get_valid_product_data(return_type="SALES_RETURN_ALLOWED", return_fee_type="SOMETHING"))
+    with pytest.raises(ValidationError, match="return_fee_type, if provided, must be 'FIXED', 'PERCENTAGE', or 'FREE'"):
+        ProductCsvModel(**get_valid_product_csv_data(return_type="SALES_RETURN_ALLOWED", return_fee_type="SOMETHING"))
 
 def test_product_csv_model_return_allowed_free_fee_normalization():
-    data = get_valid_product_data(return_type="SALES_RETURN_ALLOWED", return_fee_type="FREE", return_fee=None)
+    data = get_valid_product_csv_data(return_type="SALES_RETURN_ALLOWED", return_fee_type="FREE", return_fee=None)
     model = ProductCsvModel(**data)
     assert model.return_fee == 0.0
 
-    data_with_fee_zero = get_valid_product_data(return_type="SALES_RETURN_ALLOWED", return_fee_type="FREE", return_fee=0.0)
+    data_with_fee_zero = get_valid_product_csv_data(return_type="SALES_RETURN_ALLOWED", return_fee_type="FREE", return_fee=0.0)
     model_zero = ProductCsvModel(**data_with_fee_zero)
     assert model_zero.return_fee == 0.0
 
 def test_product_csv_model_return_allowed_free_fee_invalid():
     with pytest.raises(ValidationError, match="return_fee must be 0 or null/empty if return_fee_type is 'FREE'"):
-        ProductCsvModel(**get_valid_product_data(return_type="SALES_RETURN_ALLOWED", return_fee_type="FREE", return_fee=5.0))
+        ProductCsvModel(**get_valid_product_csv_data(return_type="SALES_RETURN_ALLOWED", return_fee_type="FREE", return_fee=5.0))
 
 def test_product_csv_model_return_allowed_fixed_no_fee():
     with pytest.raises(ValidationError, match="return_fee must be provided and non-negative if return_fee_type is 'FIXED'"):
-        ProductCsvModel(**get_valid_product_data(return_type="SALES_RETURN_ALLOWED", return_fee_type="FIXED", return_fee=None))
+        ProductCsvModel(**get_valid_product_csv_data(return_type="SALES_RETURN_ALLOWED", return_fee_type="FIXED", return_fee=None))
 
 def test_product_csv_model_return_allowed_fixed_negative_fee():
-    with pytest.raises(ValidationError, match="Price/fee fields, if provided, must be non-negative"):
-        ProductCsvModel(**get_valid_product_data(return_type="SALES_RETURN_ALLOWED", return_fee_type="FIXED", return_fee=-5.0))
+    with pytest.raises(ValidationError, match="Price/fee fields, if provided, must be non-negative"): # This is a general validator for price fields
+        ProductCsvModel(**get_valid_product_csv_data(return_type="SALES_RETURN_ALLOWED", return_fee_type="FIXED", return_fee=-5.0))
 
-def test_product_csv_model_is_child_item_invalid():
-    with pytest.raises(ValidationError, match="is_child_item must be 0 or 1"):
-        ProductCsvModel(**get_valid_product_data(is_child_item=2))
+def test_product_csv_model_is_child_item_invalid_value():
+    with pytest.raises(ValidationError, match="is_child_item must be 0 or 1 if provided"):
+        ProductCsvModel(**get_valid_product_csv_data(is_child_item=2))
+
+def test_product_csv_model_is_child_item_valid_optional():
+    model = ProductCsvModel(**get_valid_product_csv_data(is_child_item=None))
+    assert model.is_child_item is None
+    model = ProductCsvModel(**get_valid_product_csv_data(is_child_item=1))
+    assert model.is_child_item == 1
+
+
+# --- New tests for unit and order_limit ---
+@pytest.mark.parametrize("unit_input, expected_unit", [
+    ("cm", "CENTIMETERS"), ("CM", "CENTIMETERS"), (" centimeters ", "CENTIMETERS"),
+    ("m", "METERS"), ("M", "METERS"),
+    ("ft", "FOOTS"), ("FT", "FOOTS"), ("foot", "FOOTS"),
+    ("in", "INCHES"),
+    ("mm", "MILLIMETERS"),
+    ("METERS", "METERS"), # Already correct case
+])
+def test_product_csv_model_size_unit_validation(unit_input, expected_unit):
+    model = ProductCsvModel(**get_valid_product_csv_data(size_unit=unit_input))
+    assert model.size_unit == expected_unit
+
+def test_product_csv_model_invalid_size_unit():
+    with pytest.raises(ValidationError, match="Invalid size_unit: 'yards'"):
+        ProductCsvModel(**get_valid_product_csv_data(size_unit="yards"))
+
+@pytest.mark.parametrize("unit_input, expected_unit", [
+    ("kg", "KILOGRAMS"), ("KG", "KILOGRAMS"), (" kilograms ", "KILOGRAMS"),
+    ("g", "GRAMS"),
+    ("lb", "POUNDS"),
+    ("oz", "OUNCES"),
+    ("mg", "MILLIGRAM"), # Ensure maps to MILLIGRAM (singular)
+    ("t", "METRIC_TON"), ("tonne", "METRIC_TON"),
+    ("ton", "TON"), # Test 'ton' maps to 'TON'
+    ("KILOGRAMS", "KILOGRAMS"),
+    ("METRIC_TON", "METRIC_TON"),
+])
+def test_product_csv_model_weight_unit_validation(unit_input, expected_unit):
+    model = ProductCsvModel(**get_valid_product_csv_data(weight_unit=unit_input))
+    assert model.weight_unit == expected_unit
+
+def test_product_csv_model_invalid_weight_unit():
+    with pytest.raises(ValidationError, match="Invalid weight_unit: 'stones'"):
+        ProductCsvModel(**get_valid_product_csv_data(weight_unit="stones"))
+
+def test_product_csv_model_order_limit():
+    model = ProductCsvModel(**get_valid_product_csv_data(order_limit=50))
+    assert model.order_limit == 50
+    model_none = ProductCsvModel(**get_valid_product_csv_data(order_limit=None))
+    assert model_none.order_limit is None
+    # Pydantic automatically handles type conversion for int if it's a valid number string,
+    # or raises error if it's not a valid int. Empty string for Optional[int] might need a pre-validator if not handled by default.
+    model_empty_str = ProductCsvModel(**get_valid_product_csv_data(order_limit="")) 
+    assert model_empty_str.order_limit is None # Validator should handle "" -> None
+    
+    with pytest.raises(ValidationError): # Test that invalid string for int fails
+         ProductCsvModel(**get_valid_product_csv_data(order_limit="not-an-int"))
+
 
 # Image and Specification String Parsing Tests (using the helper functions for direct unit testing)
-def test_parse_images_valid():
+# These tests are for parse_images and parse_specifications which are used by the model.
+# They should largely remain the same, just ensuring they are called with get_valid_product_csv_data
+def test_parse_images_valid_new_data(): # Renamed to avoid conflict if old tests are kept temporarily
     img_str = "http://a.com/1.jpg|main_image:true|http://b.com/2.png|main_image:false"
+    # parse_images now returns dicts with "url" and "main_image"
     parsed = parse_images(img_str)
     assert len(parsed) == 2
-    assert parsed[0] == {"name": "http://a.com/1.jpg", "main_image": True}
-    assert parsed[1] == {"name": "http://b.com/2.png", "main_image": False}
+    assert parsed[0] == {"url": "http://a.com/1.jpg", "main_image": True} # Corrected key to "url"
+    assert parsed[1] == {"url": "http://b.com/2.png", "main_image": False} # Corrected key to "url"
 
-def test_parse_images_invalid_url():
+def test_parse_images_invalid_url_new_data():
     img_str = "not_a_url|main_image:true"
-    # The Pydantic model validator for images string calls parse_images,
-    # but parse_images itself logs warnings and continues. The Pydantic validator will raise error.
-    # Here, we test parse_images directly.
-    parsed = parse_images(img_str) # parse_images itself doesn't raise error, logs and skips
+    parsed = parse_images(img_str) 
     assert len(parsed) == 0
-    # Test through Pydantic model for actual validation error
     with pytest.raises(ValidationError, match="Image URL 'not_a_url' must be a valid URL"):
-        ProductCsvModel(**get_valid_product_data(images=img_str))
+        ProductCsvModel(**get_valid_product_csv_data(images=img_str))
 
-
-def test_parse_images_invalid_flag():
+def test_parse_images_invalid_flag_new_data():
     img_str = "http://a.com/1.jpg|main_image:maybe"
-    parsed = parse_images(img_str) # parse_images itself logs warnings and skips
+    parsed = parse_images(img_str)
     assert len(parsed) == 0
     with pytest.raises(ValidationError, match="Image flag 'main_image:maybe' must be 'main_image:true' or 'main_image:false'"):
-        ProductCsvModel(**get_valid_product_data(images=img_str))
+        ProductCsvModel(**get_valid_product_csv_data(images=img_str))
 
-
-def test_parse_images_odd_parts():
-    img_str = "http://a.com/1.jpg|main_image:true|http://b.com/2.png" # Missing flag for last image
-    parsed = parse_images(img_str) # parse_images itself logs warnings and returns empty
+def test_parse_images_odd_parts_new_data():
+    img_str = "http://a.com/1.jpg|main_image:true|http://b.com/2.png"
+    parsed = parse_images(img_str)
     assert len(parsed) == 0
     with pytest.raises(ValidationError, match="Images string must have pairs of url and main_image flag"):
-        ProductCsvModel(**get_valid_product_data(images=img_str))
+        ProductCsvModel(**get_valid_product_csv_data(images=img_str))
 
-
-def test_parse_specifications_valid():
+def test_parse_specifications_valid_new_data():
     spec_str = "Color:Red| Size : Large |Material:Cotton Blend"
     parsed = parse_specifications(spec_str)
     assert len(parsed) == 3
@@ -165,222 +277,378 @@ def test_parse_specifications_valid():
     assert parsed[1] == {"name": "Size", "value": "Large"}
     assert parsed[2] == {"name": "Material", "value": "Cotton Blend"}
 
-def test_parse_specifications_malformed_pair_no_colon():
+def test_parse_specifications_malformed_pair_no_colon_new_data():
     spec_str = "ColorRed|Size:Large"
-    parsed = parse_specifications(spec_str) # parse_specifications logs warning and skips malformed
+    parsed = parse_specifications(spec_str) 
     assert len(parsed) == 1
     assert parsed[0] == {"name": "Size", "value": "Large"}
-    # Test through Pydantic model
     with pytest.raises(ValidationError, match="Specification entry 'ColorRed' must be in 'Name:Value' format"):
-         ProductCsvModel(**get_valid_product_data(specifications=spec_str))
+         ProductCsvModel(**get_valid_product_csv_data(specifications=spec_str))
 
-
-def test_parse_specifications_empty_name_or_value():
-    spec_str = ":Value|Name:|Name2:Value2" # First two are malformed
-    parsed = parse_specifications(spec_str) # parse_specifications logs warning and skips
+def test_parse_specifications_empty_name_or_value_new_data():
+    spec_str = ":Value|Name:|Name2:Value2" 
+    parsed = parse_specifications(spec_str) 
     assert len(parsed) == 1
     assert parsed[0] == {"name": "Name2", "value": "Value2"}
-    # Test through Pydantic model
     with pytest.raises(ValidationError, match="Specification entry ':Value' must be in 'Name:Value' format and both Name and Value must be non-empty."):
-         ProductCsvModel(**get_valid_product_data(specifications=":Value|Name2:Value2"))
+         ProductCsvModel(**get_valid_product_csv_data(specifications=":Value|Name2:Value2"))
     with pytest.raises(ValidationError, match="Specification entry 'Name:' must be in 'Name:Value' format and both Name and Value must be non-empty."):
-         ProductCsvModel(**get_valid_product_data(specifications="Name:|Name2:Value2"))
+         ProductCsvModel(**get_valid_product_csv_data(specifications="Name:|Name2:Value2"))
 
 
-# --- Unit Tests for load_product_record_to_db ---
+# --- Unit Tests for load_product_record_to_db_refactored ---
+# (These will be new or heavily modified from old loader tests)
 
 @pytest.fixture
-def mock_product_csv_model_data(request):
-    # Allows overriding parts of get_valid_product_data for different test cases
-    # Example: @pytest.mark.parametrize("mock_product_csv_model_data", [{"brand_name": "NonExistent"}], indirect=True)
-    overrides = {}
-    if hasattr(request, "param"):
-        overrides = request.param
+def mock_db_session_for_loader():
+    """Mocks an SQLAlchemy Session and its query capabilities."""
+    session = MagicMock(spec=Session)
+    
+    # Mock query chain: session.query(Model).filter_by(...).one_or_none() / .all() / .first()
+    mock_query_obj = MagicMock()
+    session.query.return_value = mock_query_obj
+    mock_query_obj.filter_by.return_value = mock_query_obj
+    mock_query_obj.filter.return_value = mock_query_obj # For general filters
+    
+    # Specific return values will be set per test
+    mock_query_obj.one_or_none.return_value = None 
+    mock_query_obj.all.return_value = []
+    mock_query_obj.first.return_value = None
+    
+    # Mock add, flush, delete, commit, rollback
+    session.add = MagicMock()
+    session.flush = MagicMock()
+    session.delete = MagicMock()
+    session.commit = MagicMock()
+    session.rollback = MagicMock()
+    return session
 
-    valid_data = get_valid_product_data(**overrides)
-    # Ensure business_details_id is present as ProductCsvModel expects it,
-    # even if it's usually injected by the task in real flow.
-    # The loader itself receives it as a separate arg, but model might be created with it.
-    if 'business_details_id' not in valid_data: # Should be in get_valid_product_data
-        valid_data['business_details_id'] = 10 # Default if not in get_valid_product_data
+@pytest.fixture
+def mock_product_csv_model(request):
+    """Creates a ProductCsvModel instance from potentially overridden data."""
+    overrides = getattr(request, "param", {})
+    data = get_valid_product_csv_data(**overrides)
+    # Remove fields not expected directly by ProductCsvModel if they were just for raw data
+    # For example, business_details_id is passed directly to loader, not part of CSV model itself.
+    # However, my get_valid_product_csv_data does not include business_details_id.
+    return ProductCsvModel(**data)
 
-    return ProductCsvModel(**valid_data)
+@pytest.fixture
+def mock_pre_resolved_category():
+    """Provides a mock pre-resolved CategoryOrm object."""
+    category = MagicMock(spec=CategoryOrm)
+    category.id = 123
+    category.name = "Mock Pre-resolved Category"
+    # Add other attributes if load_product_record_to_db_refactored uses them (e.g. for leaf node check)
+    return category
+
+# Example of a test for the loader (will need many more)
+@patch('app.dataload.product_loader.barcode_helper') # Mock the entire barcode_helper module
+def test_load_product_refactored_new_product_success(
+    mock_barcode_helper,
+    mock_db_session_for_loader: Session, 
+    mock_product_csv_model: ProductCsvModel,
+    mock_pre_resolved_category: CategoryOrm
+):
+    business_details_id = 1
+    user_id = 100
+
+    # --- Mocking DB Lookups ---
+    # 1. Brand lookup: Assume brand exists
+    mock_brand = BrandOrm(id=1, name=mock_product_csv_model.brand_name, business_details_id=business_details_id)
+    # How queries are mocked depends on mock_db_session_for_loader setup
+    # If filter_by returns the query object, then one_or_none is on that:
+    mock_db_session_for_loader.query(BrandOrm).filter_by().one_or_none.return_value = mock_brand
+    
+    # 2. Category is pre-resolved (mock_pre_resolved_category)
+    #    Leaf node check for category: Assume it's a leaf node
+    mock_db_session_for_loader.query(CategoryOrm.id).filter().first.return_value = None 
+
+    # 3. Shopping category lookup (optional): Assume it exists or is None
+    if mock_product_csv_model.shopping_category_name:
+        mock_sc = ShoppingCategoryOrm(id=1, name=mock_product_csv_model.shopping_category_name)
+        mock_db_session_for_loader.query(ShoppingCategoryOrm).filter_by().one_or_none.return_value = mock_sc
+    else:
+        mock_db_session_for_loader.query(ShoppingCategoryOrm).filter_by().one_or_none.return_value = None
+        
+    # 4. Return policy lookup (DB2): Mock get_session for DB2 and the subsequent query
+    mock_db2_session = MagicMock(spec=Session)
+    mock_db2_query_obj = MagicMock()
+    mock_db2_session.query.return_value = mock_db2_query_obj
+    mock_db2_query_obj.filter.return_value = mock_db2_query_obj
+
+    if mock_product_csv_model.return_policy:
+        mock_rp = ReturnPolicyOrm(id=1, policy_name=mock_product_csv_model.return_policy, business_details_id=business_details_id)
+        mock_db2_query_obj.one_or_none.return_value = mock_rp
+    else:
+        mock_db2_query_obj.one_or_none.return_value = None
+
+    # Patch get_session to return our mock_db2_session when db_key="DB2"
+    # This requires knowing how get_session is called or patching it globally if it's complex
+    # For simplicity here, let's assume it's patchable directly in the loader's module:
+    with patch('app.dataload.product_loader.get_session') as mock_get_db2_session:
+        mock_get_db2_session.return_value = mock_db2_session
+
+        # 5. Product lookup (for upsert): Assume product does not exist (is_new = True)
+        # Lookup is by name and business_details_id
+        mock_db_session_for_loader.query(ProductOrm).filter_by(
+            name=mock_product_csv_model.product_name, # Changed to name
+            business_details_id=business_details_id
+        ).one_or_none.return_value = None
+
+        # --- Mocking ID generation on flush ---
+        # ProductOrm instance will be created. Mock 'add' to capture it.
+        # Then, on 'flush', assign an ID to the captured instance.
+        created_product_orm_instance_ref = {} # Use a dict to pass by reference effectively
+
+        def capture_product_add(instance):
+            if isinstance(instance, ProductOrm):
+                created_product_orm_instance_ref['instance'] = instance
+                # Assert placeholder values immediately after instantiation and before flush simulation
+                assert instance.barcode == "TEMP_BARCODE_PENDING_ID"
+                assert instance.mobile_barcode == "TEMP_MBARCODE_PENDING_ID"
+                assert instance.self_gen_product_id.startswith("TEMP_SGPI_")
+        mock_db_session_for_loader.add.side_effect = capture_product_add
+        
+        def assign_id_on_flush():
+            if 'instance' in created_product_orm_instance_ref:
+                created_product_orm_instance_ref['instance'].id = 999 # Assign a mock ID
+        mock_db_session_for_loader.flush.side_effect = assign_id_on_flush
+        
+        # --- Mocking barcode_helper ---
+        mock_barcode_helper.generate_barcode_image.return_value = b"fake_barcode_bytes"
+        mock_barcode_helper.encode_barcode_to_base64.return_value = "FakeBase64String=="
+
+        # --- Call the function under test ---
+        product_id = load_product_record_to_db_refactored(
+            db=mock_db_session_for_loader,
+            business_details_id=business_details_id,
+            product_data=mock_product_csv_model,
+            session_id="test_session_123", # session_id is not used by this specific function for core logic
+            user_id=user_id,
+            pre_resolved_category=mock_pre_resolved_category
+        )
+
+    # --- Assertions ---
+    assert product_id == 999
+    mock_db_session_for_loader.add.assert_called() # Check add was called multiple times (product, specs, images, price history)
+    
+    # Assert ProductOrm instance fields (captured_product_orm_instance_ref['instance'])
+    created_product_orm_instance = created_product_orm_instance_ref.get('instance')
+    assert created_product_orm_instance is not None
+    
+    assert created_product_orm_instance.name == mock_product_csv_model.product_name
+    # Final values after ID generation and update logic
+    assert created_product_orm_instance.self_gen_product_id == "000000999" 
+    assert created_product_orm_instance.mobile_barcode == "P999"
+    assert created_product_orm_instance.barcode == "FakeBase64String=="
+    
+    if mock_product_csv_model.active == "ACTIVE":
+        assert created_product_orm_instance.product_type_status == 1
+        assert created_product_orm_instance.active == "ACTIVE"
+    else: # INACTIVE
+        assert created_product_orm_instance.product_type_status == 2
+        assert created_product_orm_instance.active == "INACTIVE"
+
+    if mock_product_csv_model.return_fee_type == "FREE":
+        assert created_product_orm_instance.return_fee_type == "FIXED"
+        assert created_product_orm_instance.return_fee == 0.0
+    else:
+        assert created_product_orm_instance.return_fee_type == mock_product_csv_model.return_fee_type
+        assert created_product_orm_instance.return_fee == mock_product_csv_model.return_fee
+        
+    assert created_product_orm_instance.size_unit == mock_product_csv_model.size_unit 
+    assert created_product_orm_instance.weight_unit == mock_product_csv_model.weight_unit 
+    assert created_product_orm_instance.is_child_item == mock_product_csv_model.is_child_item
+    assert created_product_orm_instance.order_limit == mock_product_csv_model.order_limit
+
+    mock_barcode_helper.generate_barcode_image.assert_called_once_with("P999", 350, 100)
+    mock_barcode_helper.encode_barcode_to_base64.assert_called_once_with(b"fake_barcode_bytes")
+
+    # Check if dependent data (images, specs, price history) was added
+    # This requires checking the arguments to session.add for ProductImageOrm, ProductSpecificationOrm etc.
+    # Example for image:
+    if mock_product_csv_model.images:
+        parsed_imgs_from_csv = parse_images(mock_product_csv_model.images)
+        add_calls = mock_db_session_for_loader.add.call_args_list
+        image_add_calls = [call for call in add_calls if isinstance(call[0][0], ProductImageOrm)]
+        assert len(image_add_calls) == len(parsed_imgs_from_csv)
+        # Further check attributes of added ProductImageOrm instances
+        # Example: Check the first image added
+        if parsed_imgs_from_csv:
+            added_img_orm = image_add_calls[0][0][0] # The ProductImageOrm instance
+            assert added_img_orm.product_id == 999
+            assert added_img_orm.name == parsed_imgs_from_csv[0]['url']
+            assert added_img_orm.main_image == parsed_imgs_from_csv[0]['main_image']
+            assert created_product_orm_instance.main_image_url == parsed_imgs_from_csv[0]['url'] # Assuming first is main if true
+
+    # Check if price history was added (since it's a new product)
+    price_history_add_calls = [call for call in add_calls if isinstance(call[0][0], ProductsPriceHistoryOrm)]
+    assert len(price_history_add_calls) == 1
+    added_price_history_orm = price_history_add_calls[0][0][0]
+    assert added_price_history_orm.product_id == 999
+    assert added_price_history_orm.price == mock_product_csv_model.price
+    assert added_price_history_orm.sale_price == mock_product_csv_model.sale_price
+    assert added_price_history_orm.old_price is None # For new product
 
 
-def test_load_product_brand_lookup_fails(mock_db_session, mock_product_csv_model_data):
-    mock_db_session.query(BrandOrm).filter().one_or_none.return_value = None # Simulate brand not found
+# --- Test for Product Update ---
 
-    with pytest.raises(DataLoaderError) as excinfo:
-        load_product_record_to_db(mock_db_session, 10, mock_product_csv_model_data, "test_session_brand_fail")
+def get_valid_product_csv_data_for_update_test(**overrides: Any) -> Dict[str, Any]:
+    """ Provides valid raw data for ProductCsvModel for update scenarios. """
+    data = {
+        "product_name": "Test Product Omega", # This name will be used for lookup
+        "description": "Updated fantastic omega product.",
+        "brand_name": "OmegaBrand", 
+        "category_path": "Electronics / Gadgets / Testers",
+        "price": 309.99, # Updated price
+        "quantity": 60, # Updated quantity
+        "size_unit": "cm", 
+        "weight_unit": "kg",
+        "active": "ACTIVE",
+        "return_type": "SALES_RETURN_ALLOWED",
+        "return_fee_type": "FIXED", 
+        "return_fee": 5.0,
+        "package_size_length": 35.0,
+        "package_size_width": 25.5,
+        "package_size_height": 15.0,
+        "product_weights": 3.0,
+        "shopping_category_name": None,
+        "warehouse_location": "WH-Updated", 
+        "store_location": "Store-Updated", 
+        "return_policy": "Standard 30 Day",
+        "size_chart_img": None,
+        "url": "test-product-omega-updated", 
+        "video_url": None,
+        "video_thumbnail_url": None,
+        "images": "https://example.com/imgC.jpg|main_image:true", 
+        "specifications": "Feature:Upgraded", 
+        "is_child_item": 0, 
+        "order_limit": 20, # Updated
+        "ean": "9876543210988", # Updated EAN
+        "isbn": None, 
+        "keywords": "omega, updated", 
+        "mpn": "OMEGA-MPN-001", # Usually stable for lookup if used
+        "seo_description": "Updated SEO Desc.", 
+        "seo_title": "Updated SEO Title", 
+        "upc": "192837465013", # Updated UPC
+    }
+    data.update(overrides)
+    return data
 
-    assert excinfo.value.error_type == ErrorType.LOOKUP
-    assert excinfo.value.field_name == "brand_name"
-    assert excinfo.value.offending_value == mock_product_csv_model_data.brand_name
-    assert f"Brand '{mock_product_csv_model_data.brand_name}' not found" in excinfo.value.message
+@patch('app.dataload.product_loader.barcode_helper') 
+@patch('app.dataload.product_loader.get_session')    
+def test_load_product_refactored_update_product_no_id_change(
+    mock_get_db2_session, 
+    mock_barcode_helper,
+    mock_db_session_for_loader: Session, 
+    mock_pre_resolved_category: CategoryOrm
+):
+    business_details_id = 1
+    user_id = 101
+    
+    original_product_name = "Test Product Omega" 
+    original_product_id = 555
+    original_self_gen_id = str(original_product_id).zfill(9) 
+    original_mobile_barcode = f"P{original_product_id}"       
+    original_barcode_base64 = "OriginalBase64String=="
+    initial_price = 290.0 # Different from update to trigger price history
 
-def test_load_product_category_lookup_fails(mock_db_session, mock_product_csv_model_data):
-    # Setup successful brand lookup
-    mock_db_session.query(BrandOrm).filter().one_or_none.return_value = MagicMock(spec=BrandOrm)
-    # Simulate category not found
-    mock_db_session.query(CategoryOrm).filter().one_or_none.return_value = None
+    existing_product_orm = ProductOrm(
+        id=original_product_id,
+        name=original_product_name,
+        business_details_id=business_details_id,
+        self_gen_product_id=original_self_gen_id,
+        mobile_barcode=original_mobile_barcode,
+        barcode=original_barcode_base64,
+        description="Initial description",
+        price=initial_price, # Initial price
+        sale_price = None,
+        quantity=75,
+        product_type_status=1, 
+        active="ACTIVE",
+        brand_name="OmegaBrand",
+        category_id=mock_pre_resolved_category.id, 
+        url="test-product-omega-initial",
+        created_by=user_id-1, # Different user created
+        created_date=1600000000, 
+        updated_by=user_id-1,
+        updated_date=1600000000,
+         # Fill other NOT NULL fields from ProductOrm DDL
+        package_size_length=35.0,
+        package_size_width=25.5,
+        package_size_height=15.0,
+        product_weights=3.0,
+        size_unit = "CENTIMETERS",
+        weight_unit = "KILOGRAMS",
+        return_type = "SALES_RETURN_ALLOWED", # Example
+    )
 
-    with pytest.raises(DataLoaderError) as excinfo:
-        load_product_record_to_db(mock_db_session, 10, mock_product_csv_model_data, "test_session_cat_fail")
+    # Mock DB Lookups
+    mock_brand = BrandOrm(id=1, name="OmegaBrand", business_details_id=business_details_id)
+    mock_db_session_for_loader.query(BrandOrm).filter_by().one_or_none.return_value = mock_brand
+    mock_db_session_for_loader.query(CategoryOrm.id).filter().first.return_value = None 
+    mock_db_session_for_loader.query(ShoppingCategoryOrm).filter_by().one_or_none.return_value = None
+        
+    mock_db2_session = MagicMock(spec=Session)
+    mock_db2_query_obj = MagicMock()
+    mock_db2_session.query.return_value = mock_db2_query_obj
+    mock_rp = ReturnPolicyOrm(id=1, policy_name="Standard 30 Day", business_details_id=business_details_id)
+    mock_db2_query_obj.filter.return_value.one_or_none.return_value = mock_rp
+    mock_get_db2_session.return_value = mock_db2_session
 
-    assert excinfo.value.error_type == ErrorType.LOOKUP
-    assert excinfo.value.field_name == "category_id"
-    assert excinfo.value.offending_value == mock_product_csv_model_data.category_id
-    assert f"Category with id '{mock_product_csv_model_data.category_id}' not found" in excinfo.value.message
+    mock_db_session_for_loader.query(ProductOrm).filter_by(
+        name=original_product_name, 
+        business_details_id=business_details_id
+    ).one_or_none.return_value = existing_product_orm
 
-def test_load_product_return_policy_lookup_fails(mock_db_session, mock_product_csv_model_data):
-    mock_db_session.query(BrandOrm).filter().one_or_none.return_value = MagicMock(spec=BrandOrm)
-    mock_db_session.query(CategoryOrm).filter().one_or_none.return_value = MagicMock(spec=CategoryOrm)
-    if mock_product_csv_model_data.shopping_category_name: # If shopping category is part of test data
-        mock_db_session.query(ShoppingCategoryOrm).filter().one_or_none.return_value = MagicMock(spec=ShoppingCategoryOrm)
+    update_csv_data_dict = get_valid_product_csv_data_for_update_test(
+        product_name=original_product_name, 
+        description="Updated fantastic omega product.",
+        price=309.99, # Price changed
+        quantity=60,
+        return_fee_type="FIXED", 
+        return_fee=5.0,        
+        images="https://example.com/imgC.jpg|main_image:true", 
+        specifications="Feature:Upgraded", 
+        order_limit=20 
+    )
+    product_csv_model_for_update = ProductCsvModel(**update_csv_data_dict)
 
-    # Simulate return policy not found
-    mock_db_session.query(ReturnPolicyOrm).filter().one_or_none.return_value = None
+    updated_product_id = load_product_record_to_db_refactored(
+        db=mock_db_session_for_loader,
+        business_details_id=business_details_id,
+        product_data=product_csv_model_for_update,
+        session_id="test_session_update_123",
+        user_id=user_id, 
+        pre_resolved_category=mock_pre_resolved_category
+    )
 
-    with pytest.raises(DataLoaderError) as excinfo:
-        load_product_record_to_db(mock_db_session, 10, mock_product_csv_model_data, "test_session_rp_fail")
+    assert updated_product_id == original_product_id 
 
-    assert excinfo.value.error_type == ErrorType.LOOKUP
-    assert excinfo.value.field_name == "return_type" # As per current loader logic
-    assert "No matching ReturnPolicy found" in excinfo.value.message
+    # Key Assertions: Generated fields are NOT changed
+    assert existing_product_orm.self_gen_product_id == original_self_gen_id
+    assert existing_product_orm.mobile_barcode == original_mobile_barcode
+    assert existing_product_orm.barcode == original_barcode_base64
+    mock_barcode_helper.generate_barcode_image.assert_not_called()
+    mock_barcode_helper.encode_barcode_to_base64.assert_not_called()
 
-def test_load_product_new_id_flush_fails(mock_db_session, mock_product_csv_model_data):
-    mock_db_session.query(BrandOrm).filter().one_or_none.return_value = MagicMock(spec=BrandOrm)
-    mock_db_session.query(CategoryOrm).filter().one_or_none.return_value = MagicMock(spec=CategoryOrm)
-    if mock_product_csv_model_data.shopping_category_name:
-        mock_db_session.query(ShoppingCategoryOrm).filter().one_or_none.return_value = MagicMock(spec=ShoppingCategoryOrm)
-    mock_db_session.query(ReturnPolicyOrm).filter().one_or_none.return_value = MagicMock(spec=ReturnPolicyOrm)
-
-    # Simulate creating a new product (product_orm_instance is None initially)
-    mock_db_session.query(ProductOrm).filter().one_or_none.return_value = None
-
-    # Simulate flush not setting an ID
-    def mock_add_and_flush(instance):
-        if isinstance(instance, ProductOrm):
-            instance.id = None # Simulate ID not being set by flush
-    mock_db_session.add.side_effect = mock_add_and_flush
-    # No need to mock flush itself to raise error, just check if id is None after
-
-    with pytest.raises(DataLoaderError) as excinfo:
-        load_product_record_to_db(mock_db_session, 10, mock_product_csv_model_data, "test_session_flush_fail")
-
-    assert excinfo.value.error_type == ErrorType.DATABASE
-    assert excinfo.value.field_name == "self_gen_product_id"
-    assert "DB flush failed to return an ID" in excinfo.value.message
-
-def test_load_product_integrity_error_on_save(mock_db_session, mock_product_csv_model_data):
-    mock_db_session.query(BrandOrm).filter().one_or_none.return_value = MagicMock(spec=BrandOrm)
-    # ... other successful lookups ...
-    mock_db_session.query(CategoryOrm).filter().one_or_none.return_value = MagicMock(spec=CategoryOrm)
-    mock_db_session.query(ReturnPolicyOrm).filter().one_or_none.return_value = MagicMock(spec=ReturnPolicyOrm)
-
-    mock_db_session.query(ProductOrm).filter().one_or_none.return_value = None # New product
-
-    # Simulate IntegrityError on flush (could happen after add or during spec/image adds if complex)
-    mock_db_session.flush.side_effect = IntegrityError("mock integrity error", params={}, orig=Exception("DB constraint violation"))
-
-    with pytest.raises(DataLoaderError) as excinfo:
-        load_product_record_to_db(mock_db_session, 10, mock_product_csv_model_data, "test_session_integrity_err")
-
-    assert excinfo.value.error_type == ErrorType.DATABASE
-    assert "Database integrity error" in excinfo.value.message
-    assert "DB constraint violation" in excinfo.value.message # Check original error
-    assert excinfo.value.field_name == "product_record_integrity_constraint"
-
-
-# Placeholder for existing integration tests if any, or to be fully developed with DB interaction
-# @pytest.fixture(scope="function")
-# def setup_lookups(db_session: Session): # This would be a real DB session
-#     # Create BrandOrm("AlphaBrand", business_details_id=10) -> brand_id_1
-#     # Create CategoryOrm(id=101, name="Test Category", business_details_id=10)
-#     # Create ShoppingCategoryOrm(name="ElectronicsTest") -> sc_id_1
-#     # Create ReturnPolicyOrm for:
-#     #   - type="SALES_RETURN_ALLOWED", fee_type="FIXED", fee=10.00, business_details_id=10 -> rp_id_1
-#     #   - type="SALES_ARE_FINAL", fee_type=None, fee=None, business_details_id=10 -> rp_id_2
-#     # db_session.commit()
-#     # return {"brand_id_1": ..., "sc_id_1": ..., "rp_id_1": ..., "rp_id_2": ...}
-#     pass
-
-# def test_load_product_record_create_success(db_session: Session, setup_lookups):
-#     valid_data_dict = get_valid_product_data(
-#         brand_name="AlphaBrand", # Must match created BrandOrm
-#         category_id=101, # Must match created CategoryOrm
-#         shopping_category_name="ElectronicsTest", # Must match created ShoppingCategoryOrm
-#         return_type="SALES_RETURN_ALLOWED",
-#         return_fee_type="FIXED",
-#         return_fee=10.00 # Must match a created ReturnPolicyOrm
-#     )
-#     product_model = ProductCsvModel(**valid_data_dict)
-
-#     product_db_id = load_product_record_to_db(
-#         db=db_session,
-#         business_details_id=10,
-#         product_data=product_model,
-#         session_id="test_session_create"
-#     )
-#     assert product_db_id is not None
-#     # Query ProductOrm, ProductImageOrm, ProductSpecificationOrm to verify data
-#     # product = db_session.query(ProductOrm).get(product_db_id)
-#     # assert product.name == "Test Product Alpha"
-#     # assert product.return_policy_id == setup_lookups["rp_id_1"]
-#     # assert len(product.images) == 2
-#     # assert len(product.specifications) == 2
-#     pass
-
-# def test_load_product_record_update_success(db_session: Session, setup_lookups):
-#     # 1. Create an initial product
-#     initial_data = get_valid_product_data(self_gen_product_id="SKU-UPDATE-001", product_name="Initial Name")
-#     initial_model = ProductCsvModel(**initial_data)
-#     initial_id = load_product_record_to_db(db_session, 10, initial_model, "test_session_update_init")
-#     assert initial_id is not None
-
-#     # 2. Update the product
-#     update_data_dict = get_valid_product_data(
-#         self_gen_product_id="SKU-UPDATE-001", # Same key
-#         product_name="Updated Product Name",
-#         description="Updated description.",
-#         images="https://example.com/new_img.jpg|main_image:true", # New images
-#         specifications="NewSpec:NewValue" # New specs
-#     )
-#     update_model = ProductCsvModel(**update_data_dict)
-#     updated_id = load_product_record_to_db(db_session, 10, update_model, "test_session_update")
-
-#     assert updated_id == initial_id
-#     # Query and verify updated fields, images, specs (old ones should be gone)
-#     pass
-
-# def test_load_product_record_missing_brand(db_session: Session, setup_lookups):
-#     data_dict = get_valid_product_data(brand_name="NonExistentBrand")
-#     product_model = ProductCsvModel(**data_dict)
-#     product_db_id = load_product_record_to_db(db_session, 10, product_model, "test_session_missing_brand")
-#     assert product_db_id is None # Should fail due to brand lookup
-
-# def test_load_product_record_missing_category(db_session: Session, setup_lookups):
-#     data_dict = get_valid_product_data(category_id=9999) # Non-existent category
-#     product_model = ProductCsvModel(**data_dict)
-#     product_db_id = load_product_record_to_db(db_session, 10, product_model, "test_session_missing_cat")
-#     assert product_db_id is None
-
-# def test_load_product_record_missing_return_policy(db_session: Session, setup_lookups):
-#     data_dict = get_valid_product_data(return_type="SALES_RETURN_ALLOWED", return_fee_type="PERCENTAGE", return_fee=15.0) # Assume this combo doesn't exist
-#     product_model = ProductCsvModel(**data_dict)
-#     product_db_id = load_product_record_to_db(db_session, 10, product_model, "test_session_missing_rp")
-#     assert product_db_id is None
-
-# def test_load_product_record_is_child_item_no_images_specs_on_product(db_session: Session, setup_lookups):
-#     data_dict = get_valid_product_data(
-#         is_child_item=1,
-#         images="https://example.com/child_img.jpg|main_image:true", # These should not be processed for product
-#         specifications="ChildSpec:ChildValue" # These should still be processed
-#     )
-#     product_model = ProductCsvModel(**data_dict)
-#     product_db_id = load_product_record_to_db(db_session, 10, product_model, "test_session_child_item")
-#     assert product_db_id is not None
-#     # product = db_session.query(ProductOrm).get(product_db_id)
-#     # assert len(product.images) == 0 # Images not processed for product if is_child_item=1
-#     # assert len(product.specifications) == 1 # Specifications are always processed
-#     pass
+    # Assertions for updated fields
+    assert existing_product_orm.description == "Updated fantastic omega product."
+    assert existing_product_orm.price == 309.99
+    assert existing_product_orm.quantity == 60
+    assert existing_product_orm.order_limit == 20
+    assert existing_product_orm.updated_by == user_id # Check updated_by is current user
+    
+    # Check price history was added due to price change
+    add_calls = mock_db_session_for_loader.add.call_args_list
+    added_price_history_orms = [call[0][0] for call in add_calls if isinstance(call[0][0], ProductsPriceHistoryOrm)]
+    assert len(added_price_history_orms) == 1 
+    if added_price_history_orms:
+        history_entry = added_price_history_orms[0]
+        assert history_entry.product_id == original_product_id
+        assert history_entry.price == 309.99 
+        assert history_entry.old_price == initial_price # Old actual price 
+        assert history_entry.sale_price == product_csv_model_for_update.sale_price # new sale price (None in this case)
+        
+    mock_db_session_for_loader.flush.assert_called()

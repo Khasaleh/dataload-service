@@ -6,7 +6,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func # For server-side default timestamps
 # from sqlalchemy.sql.expression import nextval # Removed incorrect import
-
+from app.db.schema_names import PUBLIC_SCHEMA
 from .base_class import Base
 import os # Added os import
 
@@ -14,7 +14,7 @@ import os # Added os import
 # These should align with what's set in app/db/connection.py via environment variables
 CATALOG_SCHEMA = os.getenv("CATALOG_SERVICE_SCHEMA", "catalog_management")
 BUSINESS_SCHEMA = os.getenv("BUSINESS_SERVICE_SCHEMA", "fazeal_business")
-PUBLIC_SCHEMA = "public"
+
 
 # --- Upload Session Model ---
 class UploadSessionOrm(Base):
@@ -40,24 +40,29 @@ class UploadSessionOrm(Base):
         {"schema": PUBLIC_SCHEMA} # Assuming operational data like this goes to public or a dedicated ops schema
     )
 
+
 # --- Business Details Model ---
 class BusinessDetailsOrm(Base):
     __tablename__ = "business_details"
-
-    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-    # Example other fields:
-    # company_id_string = Column(String, unique=True, index=True, nullable=False)
-    # business_name = Column(String, nullable=True)
-
-    # Relationships
-    return_policies = relationship("ReturnPolicyOrm", back_populates="business_detail")
-    # Add other relationships as needed, e.g.:
-    # upload_sessions = relationship("UploadSessionOrm", back_populates="business_detail_fk_name")
-    # categories = relationship("CategoryOrm", back_populates="business_detail_fk_name")
-
     __table_args__ = (
         {"schema": PUBLIC_SCHEMA},
     )
+
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
+
+    # Existing relationships
+    return_policies = relationship(
+        "ReturnPolicyOrm",
+        back_populates="business_detail"
+    )
+
+    # Add this relationship to match ShoppingCategoryOrm
+    shopping_categories = relationship(
+        "app.models.shopping_category.ShoppingCategoryOrm",
+        back_populates="business_detail",
+        cascade="all, delete-orphan"
+    )
+
 
 # --- Category Models ---
 class CategoryOrm(Base):
@@ -296,6 +301,7 @@ class ProductOrm(Base):
     name = Column(String(256), nullable=False, index=True) # DDL: character varying(256) NOT NULL
     product_type_status = Column(Integer, nullable=True) # DDL: integer
     self_gen_product_id = Column(String(256), nullable=False, index=True) # DDL: character varying(256) NOT NULL
+    # product_lookup_key = Column(String(256), nullable=True, index=True) # Removed
 
     category_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.categories.id"), nullable=False, index=True) # DDL: bigint NOT NULL
     category = relationship("CategoryOrm") # Relationship to CategoryOrm
@@ -377,6 +383,7 @@ class ProductOrm(Base):
     # Unique constraints based on common practice or previous definitions if applicable
     # For example: UniqueConstraint('business_details_id', 'self_gen_product_id', name='uq_product_business_self_gen_id')
     # UniqueConstraint('business_details_id', 'name', name='uq_product_business_name') - if name is unique per business
+    # UniqueConstraint('business_details_id', 'product_lookup_key', name='uq_product_business_lookup_key'), # Removed
 
     prices = relationship("PriceOrm", back_populates="product", cascade="all, delete-orphan", foreign_keys="[PriceOrm.product_id]")
 
@@ -535,3 +542,25 @@ class MetaTagOrm(Base):
         # UniqueConstraint('business_details_id', 'product_id', name='uq_metatag_business_product'), # product_id is already unique
         {"schema": CATALOG_SCHEMA} # Assigned schema
     )
+
+
+# --- Products Price History Model ---
+class ProductsPriceHistoryOrm(Base):
+    __tablename__ = "products_price_history"
+    __table_args__ = (
+        Index('idx_products_price_history_product_id', "product_id"),
+        {"schema": PUBLIC_SCHEMA} # Assuming public schema as per DDL
+    )
+
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True) # DDL: bigint
+    price = Column(Float, nullable=True) # DDL: real
+    sale_price = Column(Float, nullable=True) # DDL: real
+    product_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.products.id"), nullable=True, index=True) # DDL: bigint
+    month = Column(String(255), nullable=True) # DDL: character varying(255)
+    old_price = Column(Float, nullable=True) # DDL: real
+    year = Column(Integer, nullable=True) # DDL: integer
+
+    # Optional: Define relationship back to ProductOrm if needed
+    # product = relationship("ProductOrm") # If ProductOrm needs a price_history backref:
+                                         # price_history = relationship("ProductsPriceHistoryOrm", back_populates="product")
+                                         # For now, keeping it simple as the loader doesn't require this backref.

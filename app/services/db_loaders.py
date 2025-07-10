@@ -30,6 +30,8 @@ from app.utils.slug import generate_slug
 from app.utils.redis_utils import add_to_id_map, get_from_id_map, DB_PK_MAP_SUFFIX
 from app.exceptions import DataLoaderError
 from app.models.schemas import ErrorType
+# Removed unused import: from app.dataload.product_loader import load_product_record_to_db
+from app.dataload.models.product_csv import ProductCsvModel
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +159,7 @@ def load_category_to_db(
                 logger.info(f"Created category '{full_path}' (ID={final_id})")
 
             # cache in Redis
+            logger.info(f"Caching category in Redis: session_id='{session_id}', business_details_id='{business_details_id}', key_path='{full_path}', category_id='{final_id}'")
             add_to_id_map(
                 session_id,
                 f"categories{DB_PK_MAP_SUFFIX}",
