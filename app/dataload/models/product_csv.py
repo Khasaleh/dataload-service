@@ -15,7 +15,7 @@ def generate_url_slug(name: Optional[str]) -> Optional[str]:
 class ProductCsvModel(BaseModel):
     product_name: str = Field(..., min_length=1)
     # self_gen_product_id: str = Field(..., min_length=1) # Removed as per new requirements
-    product_lookup_key: str = Field(..., min_length=1) # New field for CSV-based product lookup
+    # product_lookup_key: str = Field(..., min_length=1) # Removed: lookup by product_name
     description: str = Field(..., min_length=1)
     brand_name: str = Field(..., min_length=1)
     category_path: str = Field(..., min_length=1)
@@ -124,6 +124,16 @@ class ProductCsvModel(BaseModel):
         if value is not None and value not in [0, 1]:
             raise ValueError("is_child_item must be 0 or 1 if provided")
         return value
+
+    @field_validator('order_limit', mode='before')
+    @classmethod
+    def empty_str_as_none_for_order_limit(cls, v: Any) -> Optional[Any]:
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        # Pydantic will then attempt to validate the (potentially non-None) value as int
+        # If v is already None, or a valid int, or a string like "123", it passes through.
+        # If v is a non-empty string that's not a valid int, Pydantic's default int parsing will raise error.
+        return v
 
     @field_validator('size_unit', mode='before')
     @classmethod

@@ -230,8 +230,12 @@ def test_product_csv_model_order_limit():
     assert model_none.order_limit is None
     # Pydantic automatically handles type conversion for int if it's a valid number string,
     # or raises error if it's not a valid int. Empty string for Optional[int] might need a pre-validator if not handled by default.
-    # model_empty_str = ProductCsvModel(**get_valid_product_csv_data(order_limit="")) # This would likely fail unless a pre-validator is added
-    # For now, assuming CSV parser provides None for empty optional integers.
+    model_empty_str = ProductCsvModel(**get_valid_product_csv_data(order_limit="")) 
+    assert model_empty_str.order_limit is None # Validator should handle "" -> None
+    
+    with pytest.raises(ValidationError): # Test that invalid string for int fails
+         ProductCsvModel(**get_valid_product_csv_data(order_limit="not-an-int"))
+
 
 # Image and Specification String Parsing Tests (using the helper functions for direct unit testing)
 # These tests are for parse_images and parse_specifications which are used by the model.
@@ -386,8 +390,9 @@ def test_load_product_refactored_new_product_success(
         mock_get_db2_session.return_value = mock_db2_session
 
         # 5. Product lookup (for upsert): Assume product does not exist (is_new = True)
+        # Lookup is by name and business_details_id
         mock_db_session_for_loader.query(ProductOrm).filter_by(
-            product_lookup_key=mock_product_csv_model.product_lookup_key,
+            name=mock_product_csv_model.product_name, # Changed to name
             business_details_id=business_details_id
         ).one_or_none.return_value = None
 
@@ -426,7 +431,7 @@ def test_load_product_refactored_new_product_success(
     
     # Assert ProductOrm instance fields (captured_product_orm_instance)
     assert created_product_orm_instance is not None
-    assert created_product_orm_instance.product_lookup_key == mock_product_csv_model.product_lookup_key
+    # assert created_product_orm_instance.product_lookup_key == mock_product_csv_model.product_lookup_key # Removed
     assert created_product_orm_instance.name == mock_product_csv_model.product_name
     assert created_product_orm_instance.self_gen_product_id == "000000999" # 999 zfilled to 9 digits
     assert created_product_orm_instance.mobile_barcode == "P999"
@@ -481,39 +486,163 @@ def test_load_product_refactored_new_product_success(
     assert added_price_history_orm.old_price is None # For new product
 
 
-# The old tests for load_product_record_to_db are now largely obsolete or need heavy adaptation.
-# For now, I will comment them out or remove them to avoid confusion and focus on new tests for the refactored loader.
-# For this operation, I will effectively replace content, so the old tests below this point will be gone.
+# --- Test for Product Update ---
 
-# Previous test functions like:
-# def test_load_product_brand_lookup_fails(...)
-# def test_load_product_category_lookup_fails(...)
-# ... and others for the old `load_product_record_to_db`
-# need to be adapted or removed.
-# The new loader `load_product_record_to_db_refactored` has different parameters (e.g. pre_resolved_category)
-# and internal logic (e.g. product_lookup_key).
+def get_valid_product_csv_data_for_update_test(**overrides: Any) -> Dict[str, Any]:
+    """ Provides valid raw data for ProductCsvModel for update scenarios. """
+    data = {
+        "product_name": "Test Product Omega", # This name will be used for lookup
+        "description": "Updated fantastic omega product.",
+        "brand_name": "OmegaBrand", 
+        "category_path": "Electronics / Gadgets / Testers",
+        "price": 309.99, # Updated price
+        "quantity": 60, # Updated quantity
+        "size_unit": "cm", 
+        "weight_unit": "kg",
+        "active": "ACTIVE",
+        "return_type": "SALES_RETURN_ALLOWED",
+        "return_fee_type": "FIXED", 
+        "return_fee": 5.0,
+        "package_size_length": 35.0,
+        "package_size_width": 25.5,
+        "package_size_height": 15.0,
+        "product_weights": 3.0,
+        "shopping_category_name": None,
+        "warehouse_location": "WH-Updated", 
+        "store_location": "Store-Updated", 
+        "return_policy": "Standard 30 Day",
+        "size_chart_img": None,
+        "url": "test-product-omega-updated", 
+        "video_url": None,
+        "video_thumbnail_url": None,
+        "images": "https://example.com/imgC.jpg|main_image:true", 
+        "specifications": "Feature:Upgraded", 
+        "is_child_item": 0, 
+        "order_limit": 20, # Updated
+        "ean": "9876543210988", # Updated EAN
+        "isbn": None, 
+        "keywords": "omega, updated", 
+        "mpn": "OMEGA-MPN-001", # Usually stable for lookup if used
+        "seo_description": "Updated SEO Desc.", 
+        "seo_title": "Updated SEO Title", 
+        "upc": "192837465013", # Updated UPC
+    }
+    data.update(overrides)
+    return data
 
-# I will remove the old loader tests from this file content.
-# The `mock_product_csv_model_data` fixture also needs to be updated or replaced
-# by `mock_product_csv_model` which directly returns the model instance.
-# The `business_details_id` is not part of `ProductCsvModel` anymore. It's passed to the loader.
-# `category_id` is also not in `ProductCsvModel`, replaced by `category_path`.
-# The old fixture needs to be removed.
+@patch('app.dataload.product_loader.barcode_helper') 
+@patch('app.dataload.product_loader.get_session')    
+def test_load_product_refactored_update_product_no_id_change(
+    mock_get_db2_session, 
+    mock_barcode_helper,
+    mock_db_session_for_loader: Session, 
+    mock_pre_resolved_category: CategoryOrm
+):
+    business_details_id = 1
+    user_id = 101
+    
+    original_product_name = "Test Product Omega" 
+    original_product_id = 555
+    original_self_gen_id = str(original_product_id).zfill(9) 
+    original_mobile_barcode = f"P{original_product_id}"       
+    original_barcode_base64 = "OriginalBase64String=="
+    initial_price = 290.0 # Different from update to trigger price history
 
-# The tests for parse_images and parse_specifications can remain but should use the new
-# get_valid_product_csv_data to construct the model if they test through the model,
-# or just be direct unit tests of the parsing functions.
-# The `test_parse_images_valid` had a key error "name" vs "url", I've corrected this in the new tests.
-# I've renamed these tests (e.g., `test_parse_images_valid_new_data`) to distinguish them.
-# The old `load_product_record_to_db` related tests are removed below this line.
-# The plan is to replace the file content, so this removal will be part of the diff.
-# The section "--- Unit Tests for load_product_record_to_db ---" and its fixtures/tests are the ones to be removed.
-# The new section "--- Unit Tests for load_product_record_to_db_refactored ---" is what's being added.
-# The `parse_images` and `parse_specifications` tests are updated and kept.
-# The Pydantic model tests are updated and kept.
-# The fixture `mock_product_csv_model_data` is removed.
-# The fixture `mock_product_csv_model` (new) is added.
-# The fixture `mock_db_session_for_loader` (new) is added.
-# The fixture `mock_pre_resolved_category` (new) is added.
-# One example test `test_load_product_refactored_new_product_success` is added. More will be needed.
-# The content above this comment block reflects the intended state of the file after this change.
+    existing_product_orm = ProductOrm(
+        id=original_product_id,
+        name=original_product_name,
+        business_details_id=business_details_id,
+        self_gen_product_id=original_self_gen_id,
+        mobile_barcode=original_mobile_barcode,
+        barcode=original_barcode_base64,
+        description="Initial description",
+        price=initial_price, # Initial price
+        sale_price = None,
+        quantity=75,
+        product_type_status=1, 
+        active="ACTIVE",
+        brand_name="OmegaBrand",
+        category_id=mock_pre_resolved_category.id, 
+        url="test-product-omega-initial",
+        created_by=user_id-1, # Different user created
+        created_date=1600000000, 
+        updated_by=user_id-1,
+        updated_date=1600000000,
+         # Fill other NOT NULL fields from ProductOrm DDL
+        package_size_length=35.0,
+        package_size_width=25.5,
+        package_size_height=15.0,
+        product_weights=3.0,
+        size_unit = "CENTIMETERS",
+        weight_unit = "KILOGRAMS",
+        return_type = "SALES_RETURN_ALLOWED", # Example
+    )
+
+    # Mock DB Lookups
+    mock_brand = BrandOrm(id=1, name="OmegaBrand", business_details_id=business_details_id)
+    mock_db_session_for_loader.query(BrandOrm).filter_by().one_or_none.return_value = mock_brand
+    mock_db_session_for_loader.query(CategoryOrm.id).filter().first.return_value = None 
+    mock_db_session_for_loader.query(ShoppingCategoryOrm).filter_by().one_or_none.return_value = None
+        
+    mock_db2_session = MagicMock(spec=Session)
+    mock_db2_query_obj = MagicMock()
+    mock_db2_session.query.return_value = mock_db2_query_obj
+    mock_rp = ReturnPolicyOrm(id=1, policy_name="Standard 30 Day", business_details_id=business_details_id)
+    mock_db2_query_obj.filter.return_value.one_or_none.return_value = mock_rp
+    mock_get_db2_session.return_value = mock_db2_session
+
+    mock_db_session_for_loader.query(ProductOrm).filter_by(
+        name=original_product_name, 
+        business_details_id=business_details_id
+    ).one_or_none.return_value = existing_product_orm
+
+    update_csv_data_dict = get_valid_product_csv_data_for_update_test(
+        product_name=original_product_name, 
+        description="Updated fantastic omega product.",
+        price=309.99, # Price changed
+        quantity=60,
+        return_fee_type="FIXED", 
+        return_fee=5.0,        
+        images="https://example.com/imgC.jpg|main_image:true", 
+        specifications="Feature:Upgraded", 
+        order_limit=20 
+    )
+    product_csv_model_for_update = ProductCsvModel(**update_csv_data_dict)
+
+    updated_product_id = load_product_record_to_db_refactored(
+        db=mock_db_session_for_loader,
+        business_details_id=business_details_id,
+        product_data=product_csv_model_for_update,
+        session_id="test_session_update_123",
+        user_id=user_id, 
+        pre_resolved_category=mock_pre_resolved_category
+    )
+
+    assert updated_product_id == original_product_id 
+
+    # Key Assertions: Generated fields are NOT changed
+    assert existing_product_orm.self_gen_product_id == original_self_gen_id
+    assert existing_product_orm.mobile_barcode == original_mobile_barcode
+    assert existing_product_orm.barcode == original_barcode_base64
+    mock_barcode_helper.generate_barcode_image.assert_not_called()
+    mock_barcode_helper.encode_barcode_to_base64.assert_not_called()
+
+    # Assertions for updated fields
+    assert existing_product_orm.description == "Updated fantastic omega product."
+    assert existing_product_orm.price == 309.99
+    assert existing_product_orm.quantity == 60
+    assert existing_product_orm.order_limit == 20
+    assert existing_product_orm.updated_by == user_id # Check updated_by is current user
+    
+    # Check price history was added due to price change
+    add_calls = mock_db_session_for_loader.add.call_args_list
+    added_price_history_orms = [call[0][0] for call in add_calls if isinstance(call[0][0], ProductsPriceHistoryOrm)]
+    assert len(added_price_history_orms) == 1 
+    if added_price_history_orms:
+        history_entry = added_price_history_orms[0]
+        assert history_entry.product_id == original_product_id
+        assert history_entry.price == 309.99 
+        assert history_entry.old_price == initial_price # Old actual price 
+        assert history_entry.sale_price == product_csv_model_for_update.sale_price # new sale price (None in this case)
+        
+    mock_db_session_for_loader.flush.assert_called()
