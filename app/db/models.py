@@ -301,6 +301,7 @@ class ProductOrm(Base):
     name = Column(String(256), nullable=False, index=True) # DDL: character varying(256) NOT NULL
     product_type_status = Column(Integer, nullable=True) # DDL: integer
     self_gen_product_id = Column(String(256), nullable=False, index=True) # DDL: character varying(256) NOT NULL
+    product_lookup_key = Column(String(256), nullable=True, index=True) # New field for CSV-based lookup key
 
     category_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.categories.id"), nullable=False, index=True) # DDL: bigint NOT NULL
     category = relationship("CategoryOrm") # Relationship to CategoryOrm
@@ -382,6 +383,7 @@ class ProductOrm(Base):
     # Unique constraints based on common practice or previous definitions if applicable
     # For example: UniqueConstraint('business_details_id', 'self_gen_product_id', name='uq_product_business_self_gen_id')
     # UniqueConstraint('business_details_id', 'name', name='uq_product_business_name') - if name is unique per business
+    UniqueConstraint('business_details_id', 'product_lookup_key', name='uq_product_business_lookup_key'),
 
     prices = relationship("PriceOrm", back_populates="product", cascade="all, delete-orphan", foreign_keys="[PriceOrm.product_id]")
 

@@ -14,7 +14,8 @@ def generate_url_slug(name: Optional[str]) -> Optional[str]:
 
 class ProductCsvModel(BaseModel):
     product_name: str = Field(..., min_length=1)
-    self_gen_product_id: str = Field(..., min_length=1)
+    # self_gen_product_id: str = Field(..., min_length=1) # Removed as per new requirements
+    product_lookup_key: str = Field(..., min_length=1) # New field for CSV-based product lookup
     description: str = Field(..., min_length=1)
     brand_name: str = Field(..., min_length=1)
     category_path: str = Field(..., min_length=1)
@@ -32,8 +33,8 @@ class ProductCsvModel(BaseModel):
     package_size_height: float = Field(..., gt=0)
     product_weights: float = Field(..., gt=0)
 
-    size_unit: str
-    weight_unit: str
+    size_unit: str # Will be validated and transformed
+    weight_unit: str # Will be validated and transformed
 
     active: str
 
@@ -43,16 +44,18 @@ class ProductCsvModel(BaseModel):
     warehouse_location: Optional[str] = None
     store_location: Optional[str] = None
     return_policy: Optional[str] = None
-    size_chart_img: Optional[str] = None
+    size_chart_img: Optional[str] = None # Handled by Optional[str] and strip_whitespace
 
     url: Optional[str] = None
-    video_url: Optional[str] = None
-    video_thumbnail_url: Optional[str] = None
+    video_url: Optional[str] = None # Handled by Optional[str] and strip_whitespace
+    video_thumbnail_url: Optional[str] = None # Handled by Optional[str] and strip_whitespace
 
-    images: Optional[str] = None
+    images: Optional[str] = None # Handled by Optional[str] and strip_whitespace
     specifications: Optional[str] = None
 
-    is_child_item: int
+    is_child_item: Optional[int] = None # Changed to Optional[int], default None
+
+    order_limit: Optional[int] = None # New field
 
     ean: Optional[str] = None
     isbn: Optional[str] = None
@@ -117,10 +120,116 @@ class ProductCsvModel(BaseModel):
 
     @field_validator('is_child_item')
     @classmethod
-    def validate_is_child_item(cls, value: int) -> int:
-        if value not in [0, 1]:
-            raise ValueError("is_child_item must be 0 or 1")
+    def validate_is_child_item(cls, value: Optional[int]) -> Optional[int]:
+        if value is not None and value not in [0, 1]:
+            raise ValueError("is_child_item must be 0 or 1 if provided")
         return value
+
+    @field_validator('size_unit', mode='before')
+    @classmethod
+    def normalize_and_validate_size_unit(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("Size unit must be a string.")
+        
+        v_lower = value.strip().lower()
+        mapping = {
+            "m": "METERS", "meters": "METERS",
+            "cm": "CENTIMETERS", "centimeters": "CENTIMETERS",
+            "ft": "FEET", "foot": "FEET", "foots": "FEET", # foots from original DDL, foot for common use
+            "in": "INCHES", "inches": "INCHES",
+            "mm": "MILLIMETERS", "millimeters": "MILLIMETERS",
+        }
+        # Target enums from problem: {METERS, CENTIMETERS,FOOTS,INCHES,MILLIMETERS}
+        # Adjusted mapping to use FOOTS as per problem description, assuming FEET was my interpretation.
+        # Re-adjusting to use FOOTS as specified in the original prompt, even if FEET is more standard.
+        final_mapping = {
+            "m": "METERS", "meters": "METERS",
+            "cm": "CENTIMETERS", "centimeters": "CENTIMETERS",
+            "ft": "FOOTS", "foot": "FOOTS", "foots": "FOOTS", # Using FOOTS
+            "in": "INCHES", "inches": "INCHES",
+            "mm": "MILLIMETERS", "millimeters": "MILLIMETERS",
+        }
+        # Validating against the specific enum set provided: {METERS, CENTIMETERS,FOOTS,INCHES,MILLIMETERS}
+        valid_enums = {"METERS", "CENTIMETERS", "FOOTS", "INCHES", "MILLIMETERS"}
+
+        if v_lower in final_mapping:
+            result = final_mapping[v_lower]
+            if result in valid_enums:
+                return result
+            else: # Should not happen if final_mapping is correct
+                raise ValueError(f"Internal mapping error for size unit '{value}'. Mapped to '{result}' which is not in {valid_enums}")
+
+        # If it's already one of the target enum values (e.g., "CENTIMETERS")
+        if v_lower.upper() in valid_enums:
+            return v_lower.upper()
+            
+        raise ValueError(f"Invalid size_unit: '{value}'. Must be one of {list(final_mapping.keys())} or {list(valid_enums)}.")
+
+    @field_validator('weight_unit', mode='before')
+    @classmethod
+    def normalize_and_validate_weight_unit(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("Weight unit must be a string.")
+
+        v_lower = value.strip().lower()
+        # CSV enum: {KILOGRAMS,GRAMS,POUNDS,OUNCES,MILLIGRAM,TON,METRIC_TON}
+        # My interpretation for 't': METRIC_TON.
+        # For 'tonne': METRIC_TON
+        mapping = {
+            "kg": "KILOGRAMS", "kilograms": "KILOGRAMS",
+            "g": "GRAMS", "grams": "GRAMS",
+            "lb": "POUNDS", "pounds": "POUNDS",
+            "oz": "OUNCES", "ounces": "OUNCES",
+            "mg": "MILLIGRAMS", "milligrams": "MILLIGRAMS", # Original prompt uses MILLIGRAM
+            "t": "METRIC_TON", "ton": "METRIC_TON", # 'ton' could also map to TON if distinct. Assuming 't' and 'ton' map to METRIC_TON as per common interpretation for data loading.
+            "tonne": "METRIC_TON", "metric_ton": "METRIC_TON"
+        }
+        # Target enums from problem: {KILOGRAMS,GRAMS,POUNDS,OUNCES,MILLIGRAM,TON,METRIC_TON}
+        # Correcting MILLIGRAMS to MILLIGRAM
+        final_mapping = {
+            "kg": "KILOGRAMS", "kilograms": "KILOGRAMS",
+            "g": "GRAMS", "grams": "GRAMS",
+            "lb": "POUNDS", "pounds": "POUNDS",
+            "oz": "OUNCES", "ounces": "OUNCES",
+            "mg": "MILLIGRAM", "milligram": "MILLIGRAM", # Corrected to MILLIGRAM
+            "t": "METRIC_TON", "ton": "METRIC_TON", # Assuming 'ton' from CSV also means METRIC_TON here. If 'TON' is a distinct short ton, this needs adjustment.
+            "tonne": "METRIC_TON", "metric_ton": "METRIC_TON"
+        }
+        valid_enums = {"KILOGRAMS", "GRAMS", "POUNDS", "OUNCES", "MILLIGRAM", "TON", "METRIC_TON"}
+
+        if v_lower in final_mapping:
+            result = final_mapping[v_lower]
+            # Special case: if input was 'ton' and we need to distinguish between 'TON' and 'METRIC_TON'
+            # For now, this logic maps 'ton' to 'METRIC_TON'. If 'ton' should map to 'TON' enum, it needs explicit handling.
+            # The problem states "t (for metric ton/tonne) -> METRIC_TON". It doesn't explicitly state what "TON" (the enum) maps from.
+            # Given "TON" is in the enum list, if "ton" (lowercase) from CSV is meant to be "TON" (uppercase enum), the mapping should be:
+            # "ton": "TON"
+            # Let's adjust: if 't' or 'tonne' means METRIC_TON, then 'ton' (if it appears) should map to 'TON'.
+            # This makes the mapping more specific.
+            
+            # Re-evaluating based on "weight_unit in the csv enum is {KILOGRAMS,GRAMS,POUNDS,OUNCES,MILLIGRAM,TON,METRIC_TON}
+            # so if any abbriviation provided here, one of the enums will be added ( KG = KILOGRAMS )"
+            # This implies the keys in `final_mapping` are abbreviations, and values are the target enums.
+            # 't' -> 'METRIC_TON' is clear.
+            # What about 'TON' enum? If CSV provides 'ton', does it mean 'TON' or 'METRIC_TON'?
+            # The user clarified "t (for metric ton/tonne) -> METRIC_TON". And "Ton: t (for metric ton, commonly referred to as "tonne")"
+            # "Metric Ton: t or tonne"
+            # This is slightly circular. I will assume 't' and 'tonne' map to 'METRIC_TON'.
+            # If the CSV contains literally "TON" (uppercase) or "ton" (lowercase), it should map to the "TON" enum value.
+
+            if v_lower == "ton": # Explicitly map "ton" (lowercase) to "TON" (enum)
+                result = "TON"
+
+            if result in valid_enums:
+                return result
+            else: # Should not happen
+                 raise ValueError(f"Internal mapping error for weight unit '{value}'. Mapped to '{result}' which is not in {valid_enums}")
+
+        if v_lower.upper() in valid_enums: # If input is already "KILOGRAMS", "TON", etc.
+            return v_lower.upper()
+
+        raise ValueError(f"Invalid weight_unit: '{value}'. Must be one of {list(final_mapping.keys())} or {list(valid_enums)}.")
+
 
     @field_validator('sale_price', 'cost_price', 'return_fee')
     @classmethod

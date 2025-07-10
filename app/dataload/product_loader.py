@@ -1,11 +1,13 @@
 import logging
+import uuid # Added for temporary placeholder
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, NoResultFound, DataError
 
-from app.utils.slug import generate_slug
+# from app.utils.slug import generate_slug # Replaced by barcode generation for prod.barcode
+from app.utils import barcode_helper # Added barcode helper
 try:
     from app.utils.date_utils import now_epoch_ms
 except ImportError:
@@ -145,11 +147,13 @@ def load_products_to_db(
     summary = {"inserted": 0, "updated": 0, "errors": 0}
 
     for idx, raw in enumerate(records_data, start=2): 
-        product_identifier_for_log = raw.get('self_gen_product_id', f"CSV_row_{idx}") 
+        # Use product_lookup_key for logging if available, otherwise fallback.
+        # ProductCsvModel now has product_lookup_key instead of self_gen_product_id
+        product_identifier_for_log = raw.get('product_lookup_key', f"CSV_row_{idx}") 
         try:
             logger.debug(f"[Product {product_identifier_for_log}] Processing raw data: {raw}")
             model = ProductCsvModel(**raw) 
-            logger.debug(f"[Product {model.self_gen_product_id}] Pydantic model created.") # Removed bulky model dump from INFO/DEBUG
+            logger.debug(f"[Product {model.product_lookup_key}] Pydantic model created.")
             
             # Get the pre-resolved category for this product's path
             # ProductCsvModel's category_path validator already cleans the path.
@@ -168,31 +172,30 @@ def load_products_to_db(
             )
             # Check if product was already in this session's Redis map to count for summary.
             # This reflects Redis state for the session, not necessarily DB state (is_new).
-            prev_redis_val = get_from_id_map( # Corrected: use get_from_id_map to check existence
+            prev_redis_val = get_from_id_map(
                 session_id,
                 f"products{DB_PK_MAP_SUFFIX}",
-                model.self_gen_product_id,
+                model.product_lookup_key, # Use product_lookup_key for Redis mapping
                 pipeline=db_pk_redis_pipeline
             )
 
-            if prev_redis_val is None: # If it wasn't in Redis for this session before
-                summary["inserted"] += 1 
+            if prev_redis_val is None: 
+                summary["inserted"] += 1
             else:
                 summary["updated"] += 1
             
-            # Actual update to the Redis map for the product
-            add_to_id_map( 
+            add_to_id_map(
                 session_id,
                 f"products{DB_PK_MAP_SUFFIX}",
-                model.self_gen_product_id,
+                model.product_lookup_key, # Use product_lookup_key for Redis mapping
                 prod_id,
                 pipeline=db_pk_redis_pipeline
             )
         except DataLoaderError as e:
-            logger.error(f"[Product {product_identifier_for_log}] DataLoaderError during row processing: {e}", exc_info=True)
+            logger.error(f"[Product {product_identifier_for_log}] DataLoaderError during row processing: {e}", exc_info=True) # product_identifier_for_log already updated
             summary["errors"] += 1
-        except Exception as e: # Catch any other unexpected error during model validation or other steps
-            logger.error(f"[Product {product_identifier_for_log}] Unexpected exception during row processing. Raw data: {raw}. Error: {e}", exc_info=True)
+        except Exception as e: 
+            logger.error(f"[Product {product_identifier_for_log}] Unexpected exception during row processing. Raw data: {raw}. Error: {e}", exc_info=True) # product_identifier_for_log already updated
             summary["errors"] += 1
             
     logger.info(f"Finished load_products_to_db for business_id {business_details_id}, session_id {session_id}. Summary: {summary}")
@@ -205,13 +208,13 @@ def load_product_record_to_db_refactored(
     product_data: ProductCsvModel,
     session_id: str, # Retained for potential other uses, though category now comes via pre_resolved_category
     user_id: int,
-    pre_resolved_category: Optional[CategoryOrm] # New parameter
+    pre_resolved_category: Optional[CategoryOrm] 
 ) -> int:
-    log_prefix = f"[Product {product_data.self_gen_product_id}]"
-    logger.info(f"{log_prefix} Starting 3-step processing for business_id {business_details_id}.")
+    log_prefix = f"[ProductLookupKey {product_data.product_lookup_key}]" # Changed identifier for logging
+    logger.info(f"{log_prefix} Starting processing for business_id {business_details_id}.")
     now_ms = now_epoch_ms()
 
-    # --- Step 1: Lookups & Validations First (Category is now pre-resolved) ---
+    # --- Step 1: Lookups & Validations (Category is pre-resolved) ---
     try:
         logger.debug(f"{log_prefix} Step 1: Performing lookups and validations.")
 
@@ -290,13 +293,15 @@ def load_product_record_to_db_refactored(
         logger.debug(f"{log_prefix} Step 1 completed successfully.")
 
         # --- Step 2: Product Core Data Load ---
-        logger.debug(f"{log_prefix} Step 2: Upserting ProductOrm and populating core fields.")
+        logger.debug(f"{log_prefix} Step 2: Upserting ProductOrm and populating fields.")
         
+        # --- Product Lookup ---
+        # Product lookup now uses product_lookup_key from the CSV model
         prod = db.query(ProductOrm).filter_by(
-            self_gen_product_id=product_data.self_gen_product_id,
+            product_lookup_key=product_data.product_lookup_key, # Changed lookup field
             business_details_id=business_details_id
         ).one_or_none()
-        logger.debug(f"{log_prefix} Existing product found by self_gen_product_id: {prod.id if prod else 'None'}")
+        logger.debug(f"{log_prefix} Existing product by product_lookup_key: {prod.id if prod else 'None'}")
 
         is_new = prod is None
         old_actual_price: Optional[float] = None
@@ -304,29 +309,32 @@ def load_product_record_to_db_refactored(
 
         if is_new:
             logger.info(f"{log_prefix} Creating new product.")
+            # self_gen_product_id initialized with a temporary placeholder
+            temp_self_gen_id = f"TEMP_SGPI_{uuid.uuid4().hex[:16]}" # Temp placeholder
             prod = ProductOrm(
-                self_gen_product_id=product_data.self_gen_product_id,
+                product_lookup_key=product_data.product_lookup_key, # Store the lookup key
+                self_gen_product_id=temp_self_gen_id, # Placeholder
                 business_details_id=business_details_id,
                 created_by=user_id, created_date=now_ms,
-                updated_by=user_id, updated_date=now_ms,
-                barcode=generate_slug(product_data.self_gen_product_id)
+                # barcode will be generated after ID
             )
             db.add(prod)
-            logger.debug(f"{log_prefix} New ProductOrm added to session.")
+            logger.debug(f"{log_prefix} New ProductOrm (ID pending) added to session with temp self_gen_product_id: {temp_self_gen_id}.")
         else:
             logger.info(f"{log_prefix} Updating existing product ID: {prod.id}")
             old_actual_price = prod.price
             old_sale_price = prod.sale_price
             logger.debug(f"{log_prefix} Captured old prices for history - Actual: {old_actual_price}, Sale: {old_sale_price}")
-            prod.updated_by = user_id
-            prod.updated_date = now_ms
-
-        # Populate core fields
+        
+        # Common fields for new and update
+        prod.updated_by = user_id
+        prod.updated_date = now_ms
+        
         prod.name = product_data.product_name
         prod.description = product_data.description
-        prod.brand_name = product_data.brand_name 
-        prod.category_id = category.id 
-        prod.shopping_category_id = shopping_cat_id 
+        prod.brand_name = product_data.brand_name
+        prod.category_id = category.id
+        prod.shopping_category_id = shopping_cat_id
         prod.price = product_data.price
         prod.sale_price = product_data.sale_price
         prod.cost_price = product_data.cost_price
@@ -335,23 +343,51 @@ def load_product_record_to_db_refactored(
         prod.package_size_width = product_data.package_size_width
         prod.package_size_height = product_data.package_size_height
         prod.product_weights = product_data.product_weights
-        prod.size_unit = product_data.size_unit.upper() if product_data.size_unit else None
-        prod.weight_unit = product_data.weight_unit.upper() if product_data.weight_unit else None
         
-        if return_policy_orm_from_db2: 
+        # Unit fields are already transformed by ProductCsvModel
+        prod.size_unit = product_data.size_unit 
+        prod.weight_unit = product_data.weight_unit
+
+        if return_policy_orm_from_db2:
             prod.return_policy_id = return_policy_orm_from_db2.id
-        elif product_data.return_policy: 
-             pass 
-        elif is_new: 
-             prod.return_policy_id = None
+        elif is_new: # Only set to None if new and no policy provided
+            prod.return_policy_id = None
+        # If updating and no policy provided in CSV, existing policy is preserved.
 
         prod.return_type = product_data.return_type
-        prod.return_fee_type = product_data.return_fee_type
-        prod.return_fee = product_data.return_fee
-        prod.url = product_data.url or generate_slug(product_data.product_name)
+        
+        # Return Fee Logic
+        if product_data.return_fee_type == "FREE":
+            prod.return_fee_type = "FIXED"
+            prod.return_fee = 0.0
+            logger.debug(f"{log_prefix} CSV return_fee_type is FREE. Set DB to FIXED and fee to 0.0.")
+        else:
+            prod.return_fee_type = product_data.return_fee_type
+            prod.return_fee = product_data.return_fee
+            logger.debug(f"{log_prefix} Using CSV return_fee_type '{product_data.return_fee_type}' and fee '{product_data.return_fee}'.")
+
+        # product_data.url is already slugified or validated by ProductCsvModel
+        prod.url = product_data.url # if None, will be saved as NULL (slug from name is default in Pydantic)
+        
+        # Image/Video fields - saved as NULL if None (empty in CSV)
         prod.video_url = product_data.video_url
-        prod.thumbnail_url = product_data.video_thumbnail_url
-        prod.active = product_data.active
+        prod.thumbnail_url = product_data.video_thumbnail_url # from CSV video_thumbnail_url
+        prod.size_chart_image = product_data.size_chart_img # from CSV size_chart_img
+
+        # Active status from CSV to product_type_status
+        if product_data.active.upper() == "ACTIVE":
+            prod.product_type_status = 1
+            prod.active = "ACTIVE" # Assuming ProductOrm.active still stores "ACTIVE" / "INACTIVE"
+        elif product_data.active.upper() == "INACTIVE":
+            prod.product_type_status = 2
+            prod.active = "INACTIVE"
+        else:
+            # This case should be prevented by Pydantic validator on ProductCsvModel.active
+            logger.warning(f"{log_prefix} Invalid 'active' status '{product_data.active}' from CSV. Defaulting product_type_status and active field; Pydantic model should have caught this.")
+            # Decide on a default or raise error. For now, let's assume Pydantic catches it.
+            # If it could reach here, prod.product_type_status might remain None or need a default.
+            # prod.active would also need a default or be left as is for updates.
+
         prod.ean = product_data.ean
         prod.isbn = product_data.isbn
         prod.keywords = product_data.keywords
@@ -359,17 +395,67 @@ def load_product_record_to_db_refactored(
         prod.seo_description = product_data.seo_description
         prod.seo_title = product_data.seo_title
         prod.upc = product_data.upc
+        
+        # is_child_item is Optional[int], saved as NULL if None
         prod.is_child_item = product_data.is_child_item
         
+        # order_limit is Optional[int], saved as NULL if None
+        prod.order_limit = product_data.order_limit
+
         logger.debug(f"{log_prefix} Core product fields populated. Attempting flush to get/confirm product ID.")
-        db.flush()
+        db.flush() # This assigns prod.id if new
         logger.info(f"{log_prefix} Product ID after flush: {prod.id}")
-        logger.debug(f"{log_prefix} Step 2 completed successfully.")
 
-        # --- Step 3: Load Dependent Data ---
-        logger.debug(f"{log_prefix} Step 3: Loading dependent data for product ID {prod.id}.")
+        # --- Post-flush updates (ID-dependent fields) ---
+        logger.debug(f"{log_prefix} Step 2b: Populating ID-dependent fields for product ID {prod.id}.")
 
-        # ProductSpecifications
+        # Generate and set self_gen_product_id (if new or if it needs to be set/updated)
+        # Per plan: only set on new. If updating, existing self_gen_product_id is kept.
+        if is_new: # Only generate for new products
+            prod.self_gen_product_id = str(prod.id).zfill(9)
+            logger.info(f"{log_prefix} Generated self_gen_product_id: {prod.self_gen_product_id}")
+        
+        # Generate mobile_barcode: P + product.id
+        prod.mobile_barcode = f"P{prod.id}"
+        logger.info(f"{log_prefix} Generated mobile_barcode: {prod.mobile_barcode}")
+
+        # Generate barcode image and Base64 string
+        try:
+            # Dimensions from user prompt: 350x100
+            barcode_image_bytes = barcode_helper.generate_barcode_image(prod.mobile_barcode, 350, 100)
+            prod.barcode = barcode_helper.encode_barcode_to_base64(barcode_image_bytes)
+            logger.info(f"{log_prefix} Generated and Base64 encoded barcode for mobile_barcode '{prod.mobile_barcode}'.")
+        except barcode_helper.BarcodeGenerationError as bge:
+            logger.error(f"{log_prefix} Barcode generation failed for '{prod.mobile_barcode}': {bge}", exc_info=True)
+            # Decide if this is fatal for the product load or if prod.barcode can be null.
+            # For now, assume it's not fatal and prod.barcode will remain null or its previous value.
+            # If barcode is critical, re-raise or handle as a DataLoaderError.
+            # The DDL for products.barcode is NOT NULL. This means it MUST be generated.
+            # Re-raising as DataLoaderError if it fails.
+            raise DataLoaderError(
+                message=f"Barcode generation failed: {bge}",
+                error_type=ErrorType.PROCESSING, field_name="barcode", offending_value=prod.mobile_barcode,
+                original_exception=bge
+            )
+        except Exception as e: # Catch any other unexpected error from barcode generation
+            logger.error(f"{log_prefix} Unexpected error during barcode generation for '{prod.mobile_barcode}': {e}", exc_info=True)
+            raise DataLoaderError(
+                message=f"Unexpected barcode error: {e}",
+                error_type=ErrorType.PROCESSING, field_name="barcode", offending_value=prod.mobile_barcode,
+                original_exception=e
+            )
+
+        # All core and ID-dependent fields for ProductOrm itself are set.
+        # Another flush might be needed if any relationships were changed that trigger SQL.
+        # For simple column updates on 'prod', the final commit will handle it.
+        # However, if there were deferred FK checks or similar, an explicit flush here might be considered.
+        # For now, assuming direct column updates are fine.
+        logger.debug(f"{log_prefix} Step 2 (core and ID-dependent fields) completed successfully.")
+
+        # --- Step 3: Load Dependent Data (Specifications, Images, Price History) ---
+        logger.debug(f"{log_prefix} Step 3: Loading dependent data (specs, images, price history) for product ID {prod.id}.")
+
+        # ProductSpecifications (logic seems mostly fine, just adapt logging if self_gen_product_id was used in it)
         logger.debug(f"{log_prefix} Processing product specifications.")
         if not is_new: 
             logger.debug(f"{log_prefix} Deleting existing specifications for updated product.")
@@ -437,16 +523,16 @@ def load_product_record_to_db_refactored(
     except (IntegrityError, DataError) as e:
         logger.error(f"{log_prefix} Database integrity or data error: {e}", exc_info=True)
         db.rollback()
-        raise DataLoaderError(message=str(e.orig), error_type=ErrorType.DATABASE, offending_value=product_data.self_gen_product_id, original_exception=e)
+        raise DataLoaderError(message=str(e.orig), error_type=ErrorType.DATABASE, offending_value=product_data.product_lookup_key, original_exception=e)
     except NoResultFound as e:
         logger.error(f"{log_prefix} Lookup error (NoResultFound): {e}", exc_info=True)
         db.rollback()
-        raise DataLoaderError(message=str(e), error_type=ErrorType.LOOKUP, offending_value=product_data.self_gen_product_id, original_exception=e)
-    except DataLoaderError as e:
+        raise DataLoaderError(message=str(e), error_type=ErrorType.LOOKUP, offending_value=product_data.product_lookup_key, original_exception=e)
+    except DataLoaderError as e: # This includes the re-raised BarcodeGenerationError if it's wrapped in DataLoaderError
         logger.error(f"{log_prefix} DataLoaderError occurred: {e.message}", exc_info=True) 
         db.rollback()
         raise
     except Exception as e:
         logger.error(f"{log_prefix} Unexpected error: {e}", exc_info=True)
         db.rollback()
-        raise DataLoaderError(message=f"Unexpected error for product {product_data.self_gen_product_id}: {str(e)}", error_type=ErrorType.UNEXPECTED_ROW_ERROR, offending_value=product_data.self_gen_product_id, original_exception=e)
+        raise DataLoaderError(message=f"Unexpected error for product {product_data.product_lookup_key}: {str(e)}", error_type=ErrorType.UNEXPECTED_ROW_ERROR, offending_value=product_data.product_lookup_key, original_exception=e)
