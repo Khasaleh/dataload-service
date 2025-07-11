@@ -1,4 +1,4 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional # Added Optional
 
 class ItemParserError(ValueError):
     """Custom exception for item parsing errors."""
