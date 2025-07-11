@@ -29,6 +29,7 @@ from app.services.db_loaders import (
     load_category_to_db,
     load_price_to_db,
 )
+from app.dataload.item_loader import load_items_to_db # Added for item/variant loading
 # from app.dataload.product_loader import load_product_record_to_db # Unused and causes ImportError
 from app.dataload.meta_tags_loader import load_meta_tags_from_csv
 from app.models import UploadJobStatus, ErrorDetailModel, ErrorType
@@ -207,11 +208,21 @@ def process_csv_task(
             # To make it consistent with other row_errors, we'd need load_products_to_db to collect ErrorDetailModel.
             # Let's assume for now that if product_summary["errors"] > 0, we create a generic error detail.
             if product_summary.get("errors", 0) > 0:
-                 # This is a general error for the batch.
-                 # To get per-row errors, load_products_to_db would need to be modified.
-                 # For now, we'll just indicate a batch error count. The total error count will be updated later.
-                 # The details field in UploadSessionOrm might not have per-row product errors unless load_products_to_db is changed.
                  pass # The summary["errors"] from load_products_to_db will be used in final_status update
+        
+        elif map_type == "product_items": # New handler for item/variants
+            item_summary = load_items_to_db(
+                data_db, int(business_id), validated, session_id, user_id
+            )
+            # load_items_to_db returns: 
+            # {"csv_rows_processed": count, "csv_rows_with_errors": count, "total_main_skus_created_or_updated": count}
+            # 'processed' for this task usually means successfully processed input records (CSV rows).
+            # For items, one CSV row can result in many SKUs.
+            # We'll use csv_rows_processed - csv_rows_with_errors for the 'processed' count here.
+            processed = item_summary.get("csv_rows_processed", 0) - item_summary.get("csv_rows_with_errors", 0)
+            # The detailed errors are logged within load_items_to_db.
+            # If load_items_to_db were to return a list of ErrorDetailModel, we would append to row_errors.
+            # For now, item_summary["csv_rows_with_errors"] will be used for the final error count.
 
         else: # Handles attributes, meta_tags, categories (record by record)
             for idx, rec in enumerate(validated, start=2):
@@ -270,17 +281,30 @@ def process_csv_task(
         if not row_errors
         else UploadJobStatus.COMPLETED_WITH_ERRORS
     )
-    final_error_count = len(row_errors)
-    if map_type == "products" and 'product_summary' in locals(): # Check if product_summary exists
+    final_error_count = len(row_errors) # Default from per-record processing (attributes, categories, etc.)
+    
+    if map_type == "products" and 'product_summary' in locals(): 
         final_error_count = product_summary.get("errors", 0)
-        # If product_summary["errors"] > 0 and row_errors is empty,
-        # we might want to add a generic error detail for the batch.
-        if final_error_count > 0 and not row_errors:
+        if final_error_count > 0 and not row_errors: # If products loader had errors but no detailed row_errors collected here
             row_errors.append(ErrorDetailModel(
-                row_number=None, # Batch error
+                row_number=None, 
                 error_message=f"{final_error_count} error(s) occurred during product batch processing.",
-                error_type=ErrorType.BATCH_PROCESSING_ERROR
+                error_type=ErrorType.BATCH_PROCESSING_ERROR # General error type for batch
             ))
+    elif map_type == "product_items" and 'item_summary' in locals(): # Handle item_summary
+        final_error_count = item_summary.get("csv_rows_with_errors", 0)
+        if final_error_count > 0 and not row_errors: # If item_loader had errors but no detailed row_errors collected here
+            # Note: load_items_to_db currently logs row errors but doesn't return them as ErrorDetailModel list.
+            # This generic message indicates that some rows failed as per the summary.
+            row_errors.append(ErrorDetailModel(
+                row_number=None, 
+                error_message=f"{final_error_count} CSV row(s) failed during item/variant processing.",
+                error_type=ErrorType.BATCH_PROCESSING_ERROR 
+            ))
+    elif map_type == "product_prices" and "summary" in locals() and "errors_list" in summary:
+        # product_prices already populates row_errors if summary["errors_list"] exists
+        # final_error_count is already len(row_errors) in this case.
+        pass
 
 
     _update_session_status(

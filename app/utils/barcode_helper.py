@@ -115,7 +115,7 @@ if __name__ == '__main__':
         # Test edge cases or invalid inputs
         print("\nTesting invalid input for generation:")
         try:
-            generate_barcode_image("", 100, 50)
+            generate_barcode_image("", 350, 100)
         except ValueError as ve:
             print(f"Caught expected error: {ve}")
         
