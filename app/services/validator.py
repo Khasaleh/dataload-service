@@ -8,15 +8,16 @@ from app.models.schemas import (
     ProductCsvModel, ErrorDetailModel, ErrorType,
     CategoryCsvModel
 )
+from app.dataload.models.item_csv import ItemCsvModel # Added import for new model
 from typing import List, Dict, Optional
 from app.utils.redis_utils import get_from_id_map
-from app.dataload.models.product_csv import ProductCsvModel
+# from app.dataload.models.product_csv import ProductCsvModel # Already imported via schemas or not needed directly here
 
 MODEL_MAP = {
     "brands":           BrandCsvModel,
     "attributes":       AttributeCsvModel,
     "return_policies":  ReturnPolicyCsvModel,
-    "product_items":    ProductItemModel,
+    "product_items":    ItemCsvModel, # Changed from ProductItemModel to ItemCsvModel
     "product_prices":   ProductPriceModel,
     "meta_tags":        MetaTagModel,
     "products":         ProductCsvModel,
