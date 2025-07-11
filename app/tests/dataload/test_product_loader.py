@@ -123,9 +123,36 @@ def test_product_csv_model_url_provided_invalid():
     with pytest.raises(ValidationError, match="Provided URL is not a valid slug"):
         ProductCsvModel(**get_valid_product_csv_data(url="My Custom Slug!"))
 
-def test_product_csv_model_active_status_invalid():
-    with pytest.raises(ValidationError, match="Status must be 'ACTIVE' or 'INACTIVE'"):
+# --- Tests for 'active' field in ProductCsvModel ---
+def test_product_csv_model_active_missing_defaults_to_ACTIVE():
+    data = get_valid_product_csv_data()
+    del data['active'] # Simulate field missing from CSV row
+    model = ProductCsvModel(**data)
+    assert model.active == "ACTIVE"
+
+def test_product_csv_model_active_empty_string_defaults_to_ACTIVE():
+    model = ProductCsvModel(**get_valid_product_csv_data(active=""))
+    assert model.active == "ACTIVE"
+
+@pytest.mark.parametrize("active_input, expected_output", [
+    ("ACTIVE", "ACTIVE"),
+    ("active", "ACTIVE"),
+    ("INACTIVE", "INACTIVE"),
+    ("inactive", "INACTIVE"),
+    (" Active ", "ACTIVE"), # Test stripping of whitespace
+])
+def test_product_csv_model_active_explicit_valid_values(active_input, expected_output):
+    model = ProductCsvModel(**get_valid_product_csv_data(active=active_input))
+    assert model.active == expected_output
+
+def test_product_csv_model_active_invalid_string_value():
+    with pytest.raises(ValidationError, match="Status, if provided and not empty, must be 'ACTIVE' or 'INACTIVE'"):
         ProductCsvModel(**get_valid_product_csv_data(active="Pending"))
+
+def test_product_csv_model_active_invalid_type():
+    with pytest.raises(ValidationError, match="Invalid type for active status"): # Match error from validator for non-str/None
+        ProductCsvModel(**get_valid_product_csv_data(active=123))
+
 
 def test_product_csv_model_return_type_invalid():
     with pytest.raises(ValidationError, match="return_type must be 'SALES_RETURN_ALLOWED' or 'SALES_ARE_FINAL'"):
@@ -324,14 +351,46 @@ def mock_db_session_for_loader():
     return session
 
 @pytest.fixture
-def mock_product_csv_model(request):
-    """Creates a ProductCsvModel instance from potentially overridden data."""
-    overrides = getattr(request, "param", {})
-    data = get_valid_product_csv_data(**overrides)
-    # Remove fields not expected directly by ProductCsvModel if they were just for raw data
-    # For example, business_details_id is passed directly to loader, not part of CSV model itself.
-    # However, my get_valid_product_csv_data does not include business_details_id.
-    return ProductCsvModel(**data)
+def mock_product_csv_model(request) -> ProductCsvModel:
+    """
+    Creates a ProductCsvModel instance.
+    If request.param is a dict, it's used as overrides for get_valid_product_csv_data.
+    If request.param is the string "active_missing_scenario", the 'active' key is removed from data.
+    """
+    raw_data_overrides = {}
+    delete_active_key = False
+
+    if hasattr(request, "param"):
+        if isinstance(request.param, dict):
+            # If param is a dict, it could be raw_data itself or overrides
+            # For this fixture, assume if it's a dict from parametrize, it's the full data for ProductCsvModel
+            # This simplifies the parametrization for direct data dicts.
+            # Let's refine: if request.param is a dict, it's specific overrides.
+             raw_data_overrides = request.param
+        elif request.param == "active_missing_scenario":
+            delete_active_key = True
+        # Can add more special string markers for other scenarios if needed
+    
+    # Ensure 'active' is not in overrides if we plan to delete it
+    # This logic is a bit complex if overrides also contain 'active'
+    # A clearer approach for parametrize: pass the *final data dict* or a marker.
+    # Let's assume parametrize passes dicts that are *overrides* to the default valid data.
+    
+    current_overrides = {}
+    if hasattr(request, "param"):
+        if isinstance(request.param, dict):
+            current_overrides = request.param
+        elif request.param == "active_missing_scenario":
+            delete_active_key = True # Will apply to default data
+            # No specific overrides in this case, but could be combined if fixture was more complex
+    
+    data_for_model = get_valid_product_csv_data(**current_overrides)
+    
+    if delete_active_key:
+        if 'active' in data_for_model: # Remove if it was part of default or current_overrides
+            del data_for_model['active']
+            
+    return ProductCsvModel(**data_for_model)
 
 @pytest.fixture
 def mock_pre_resolved_category():
@@ -343,13 +402,26 @@ def mock_pre_resolved_category():
     return category
 
 # Example of a test for the loader (will need many more)
-@patch('app.dataload.product_loader.barcode_helper') # Mock the entire barcode_helper module
-def test_load_product_refactored_new_product_success(
-    mock_barcode_helper,
+@patch('app.dataload.product_loader.barcode_helper')
+@pytest.mark.parametrize("csv_active_override, expected_db_active_val, expected_prod_type_status", [
+    ({"active": "ACTIVE"}, "ACTIVE", 1),    # Explicitly ACTIVE from CSV
+    ({"active": "active"}, "ACTIVE", 1),    # Case-insensitivity for ACTIVE
+    ({"active": "INACTIVE"}, "INACTIVE", 2),# Explicitly INACTIVE from CSV
+    ({"active": "inactive"}, "INACTIVE", 2),# Case-insensitivity for INACTIVE
+    ({"active": ""}, "ACTIVE", 1),          # Empty string in CSV -> defaults to ACTIVE in DB
+    ("active_missing_scenario", "ACTIVE", 1) # 'active' key missing from CSV data -> defaults to ACTIVE in DB
+], indirect=["mock_product_csv_model"]) # mock_product_csv_model will receive the first element of each tuple
+def test_load_product_refactored_new_product_creation_scenarios( # Renamed for clarity
+    mock_barcode_helper, # Patched module
     mock_db_session_for_loader: Session, 
-    mock_product_csv_model: ProductCsvModel,
-    mock_pre_resolved_category: CategoryOrm
+    mock_product_csv_model: ProductCsvModel, # Parametrized via csv_active_override
+    expected_db_active_val: str,             # Second element of parametrize tuple
+    expected_prod_type_status: int,          # Third element of parametrize tuple
+    mock_pre_resolved_category: CategoryOrm  # Regular fixture
 ):
+    # The mock_product_csv_model fixture is now responsible for creating the model
+    # based on csv_active_override (which is request.param for the fixture)
+
     business_details_id = 1
     user_id = 100
 
@@ -443,14 +515,17 @@ def test_load_product_refactored_new_product_success(
     assert created_product_orm_instance.mobile_barcode == "P999"
     assert created_product_orm_instance.barcode == "FakeBase64String=="
     
-    if mock_product_csv_model.active == "ACTIVE":
-        assert created_product_orm_instance.product_type_status == 1
-        assert created_product_orm_instance.active == "ACTIVE"
-    else: # INACTIVE
-        assert created_product_orm_instance.product_type_status == 2
-        assert created_product_orm_instance.active == "INACTIVE"
+    # Assert active status based on parametrization
+    assert created_product_orm_instance.active == expected_db_active_val
+    assert created_product_orm_instance.product_type_status == expected_prod_type_status
+    
+    # This assertion should use the model's state AFTER pydantic processing, 
+    # which includes defaulting for 'active'.
+    # The loader logic is: if product_data.active (from model) == "INACTIVE" then status 2, else 1.
+    # So, expected_db_active_val and expected_prod_type_status should align with this.
+    # The parametrization is already set up to provide these expected DB values.
 
-    if mock_product_csv_model.return_fee_type == "FREE":
+    if mock_product_csv_model.return_fee_type == "FREE": # This logic is independent of 'active' status
         assert created_product_orm_instance.return_fee_type == "FIXED"
         assert created_product_orm_instance.return_fee == 0.0
     else:

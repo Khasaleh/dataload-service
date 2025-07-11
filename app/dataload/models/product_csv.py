@@ -36,7 +36,7 @@ class ProductCsvModel(BaseModel):
     size_unit: str # Will be validated and transformed
     weight_unit: str # Will be validated and transformed
 
-    active: str
+    active: Optional[str] = Field(default="ACTIVE") # Default to ACTIVE
 
     return_type: str
     return_fee_type: Optional[str] = None
@@ -66,12 +66,27 @@ class ProductCsvModel(BaseModel):
     upc: Optional[str] = None
 
     # ----- FIELD-LEVEL CLEANUPS -----
-    @field_validator('active')
+    @field_validator('active', mode='before')
     @classmethod
-    def validate_active_status(cls, value: str) -> str:
-        if value.upper() not in ["ACTIVE", "INACTIVE"]:
-            raise ValueError("Status must be 'ACTIVE' or 'INACTIVE'")
-        return value.upper()
+    def validate_and_normalize_active_status(cls, value: Any) -> Optional[str]:
+        if isinstance(value, str):
+            stripped_value = value.strip()
+            if stripped_value == "":
+                return None # Will allow Pydantic to use the default="ACTIVE"
+            
+            upper_value = stripped_value.upper()
+            if upper_value not in ["ACTIVE", "INACTIVE"]:
+                raise ValueError("Status, if provided and not empty, must be 'ACTIVE' or 'INACTIVE'")
+            return upper_value # Return 'ACTIVE' or 'INACTIVE'
+        
+        if value is None: # If input is None (e.g. field missing in CSV row parsed as None)
+            return None # Will allow Pydantic to use the default="ACTIVE"
+            
+        # If it's not a string or None, it's an invalid type for this logic.
+        # Pydantic will likely catch type errors for Optional[str] earlier if not a str or None.
+        # This validator primarily focuses on string processing for "ACTIVE"/"INACTIVE" and empty string.
+        raise ValueError("Invalid type for active status. Must be a string or None/empty.")
+
 
     @field_validator('return_type')
     @classmethod
@@ -273,8 +288,9 @@ class ProductCsvModel(BaseModel):
             if len(parts) % 2 != 0:
                 raise ValueError("Images string must have pairs of url and main_image flag.")
             for i in range(0, len(parts), 2):
-                if not parts[i].startswith(('http://', 'https://')):
-                    raise ValueError(f"Image URL '{parts[i]}' must be a valid URL.")
+                # Removed absolute URL check:
+                # if not parts[i].startswith(('http://', 'https://')):
+                #     raise ValueError(f"Image URL '{parts[i]}' must be a valid URL.")
                 if parts[i+1] not in ["main_image:true", "main_image:false"]:
                     raise ValueError(f"Image flag '{parts[i+1]}' must be 'main_image:true' or 'main_image:false'.")
 

@@ -93,8 +93,9 @@ def parse_images(image_str: Optional[str]) -> List[Dict[str, Any]]:
         logger.warning(f"Malformed images string: '{image_str}'"); return images
     for i in range(0, len(parts), 2):
         url, flag_str = parts[i].strip(), parts[i+1].strip().lower()
-        if not url.startswith(('http://', 'https://')):
-            logger.warning(f"Invalid image URL: '{url}'"); continue
+        # Removed absolute URL check:
+        # if not url.startswith(('http://', 'https://')):
+        #     logger.warning(f"Invalid image URL: '{url}'"); continue
         if flag_str == 'main_image:true': is_main = True
         elif flag_str == 'main_image:false': is_main = False
         else: logger.warning(f"Invalid main_image flag: '{flag_str}'"); continue
@@ -384,19 +385,16 @@ def load_product_record_to_db_refactored(
         prod.thumbnail_url = product_data.video_thumbnail_url # from CSV video_thumbnail_url
         prod.size_chart_image = product_data.size_chart_img # from CSV size_chart_img
 
-        # Active status from CSV to product_type_status
-        if product_data.active.upper() == "ACTIVE":
-            prod.product_type_status = 1
-            prod.active = "ACTIVE" # Assuming ProductOrm.active still stores "ACTIVE" / "INACTIVE"
-        elif product_data.active.upper() == "INACTIVE":
-            prod.product_type_status = 2
+        # Active status logic based on ProductCsvModel.active (which defaults to "ACTIVE")
+        # ProductCsvModel validator ensures product_data.active is either "ACTIVE" or "INACTIVE".
+        if product_data.active == "INACTIVE":
+            prod.product_type_status = 1 # Changed to 1 for INACTIVE (Unpublished)
             prod.active = "INACTIVE"
-        else:
-            # This case should be prevented by Pydantic validator on ProductCsvModel.active
-            logger.warning(f"{log_prefix} Invalid 'active' status '{product_data.active}' from CSV. Defaulting product_type_status and active field; Pydantic model should have caught this.")
-            # Decide on a default or raise error. For now, let's assume Pydantic catches it.
-            # If it could reach here, prod.product_type_status might remain None or need a default.
-            # prod.active would also need a default or be left as is for updates.
+            logger.debug(f"{log_prefix} Product explicitly set to INACTIVE. Status: 1 (Unpublished).")
+        else: # Default or explicit "ACTIVE"
+            prod.product_type_status = 2 # Changed to 2 for ACTIVE (Published)
+            prod.active = "ACTIVE"
+            logger.debug(f"{log_prefix} Product set to ACTIVE (explicitly or by default). Status: 2 (Published).")
 
         prod.ean = product_data.ean
         prod.isbn = product_data.isbn
@@ -419,38 +417,38 @@ def load_product_record_to_db_refactored(
         # --- Post-flush updates (ID-dependent fields) ---
         logger.debug(f"{log_prefix} Step 2b: Populating ID-dependent fields for product ID {prod.id}.")
 
-        if is_new: # Only generate these fields for new products
+        if is_new: # Only generate self_gen_product_id for new products
             # Generate and set self_gen_product_id
             prod.self_gen_product_id = str(prod.id).zfill(9)
             logger.info(f"{log_prefix} New product: Generated self_gen_product_id: {prod.self_gen_product_id}")
-            
-            # Generate mobile_barcode: P + product.id
-            prod.mobile_barcode = f"P{prod.id}"
-            logger.info(f"{log_prefix} New product: Generated mobile_barcode: {prod.mobile_barcode}")
+        
+        # Generate/Regenerate mobile_barcode and barcode for ALL products (new or update)
+        # Mobile barcode is P + product.id. This value won't change for existing products,
+        # but we regenerate the image and base64 string.
+        prod.mobile_barcode = f"P{prod.id}"
+        logger.info(f"{log_prefix} Set/updated mobile_barcode to: {prod.mobile_barcode} for product ID {prod.id}")
 
-            # Generate barcode image and Base64 string
-            try:
-                # Dimensions from user prompt: 350x100
-                barcode_image_bytes = barcode_helper.generate_barcode_image(prod.mobile_barcode, 350, 100)
-                prod.barcode = barcode_helper.encode_barcode_to_base64(barcode_image_bytes)
-                logger.info(f"{log_prefix} New product: Generated and Base64 encoded barcode for mobile_barcode '{prod.mobile_barcode}'.")
-            except barcode_helper.BarcodeGenerationError as bge:
-                logger.error(f"{log_prefix} Barcode generation failed for new product '{prod.mobile_barcode}': {bge}", exc_info=True)
-                # Barcode is NOT NULL, this is a fatal error for this product record.
-                raise DataLoaderError(
-                    message=f"Barcode generation failed: {bge}",
-                    error_type=ErrorType.PROCESSING, field_name="barcode", offending_value=prod.mobile_barcode, # mobile_barcode is relevant here
-                    original_exception=bge
-                )
-            except Exception as e: 
-                logger.error(f"{log_prefix} Unexpected error during barcode generation for new product '{prod.mobile_barcode}': {e}", exc_info=True)
-                raise DataLoaderError(
-                    message=f"Unexpected barcode error: {e}",
-                    error_type=ErrorType.PROCESSING, field_name="barcode", offending_value=prod.mobile_barcode,
-                    original_exception=e
-                )
-        else:
-            logger.info(f"{log_prefix} Existing product update: self_gen_product_id, mobile_barcode, and barcode are not changed.")
+        # Generate barcode image and Base64 string
+        try:
+            # Dimensions from user prompt: 350x100
+            barcode_image_bytes = barcode_helper.generate_barcode_image(prod.mobile_barcode, 350, 100)
+            prod.barcode = barcode_helper.encode_barcode_to_base64(barcode_image_bytes)
+            logger.info(f"{log_prefix} Generated/Updated and Base64 encoded barcode for mobile_barcode '{prod.mobile_barcode}'.")
+        except barcode_helper.BarcodeGenerationError as bge:
+            logger.error(f"{log_prefix} Barcode generation failed for product ID {prod.id}, mobile_barcode '{prod.mobile_barcode}': {bge}", exc_info=True)
+            # Barcode is NOT NULL, this is a fatal error for this product record.
+            raise DataLoaderError(
+                message=f"Barcode generation failed: {bge}",
+                error_type=ErrorType.PROCESSING, field_name="barcode", offending_value=prod.mobile_barcode,
+                original_exception=bge
+            )
+        except Exception as e: 
+            logger.error(f"{log_prefix} Unexpected error during barcode generation for product ID {prod.id}, mobile_barcode '{prod.mobile_barcode}': {e}", exc_info=True)
+            raise DataLoaderError(
+                message=f"Unexpected barcode error: {e}",
+                error_type=ErrorType.PROCESSING, field_name="barcode", offending_value=prod.mobile_barcode,
+                original_exception=e
+            )
 
         # All core and ID-dependent fields for ProductOrm itself are set (or intentionally not changed for updates).
         # Another flush might be needed if any relationships were changed that trigger SQL.

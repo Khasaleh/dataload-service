@@ -33,9 +33,10 @@ def generate_barcode_image(text: str, desired_width: int, desired_height: int) -
         # Initialize writer with options for finer control if necessary
         writer_options = {
             'module_height': 15.0,  # Default, can be adjusted
-            'font_size': 10,        # Default, can be adjusted
-            'text_distance': 5.0,   # Default, can be adjusted
-            'quiet_zone': 6.5,      # Default, can be adjusted
+            # 'font_size': 10,      # No longer needed as text is not written
+            # 'text_distance': 5.0, # No longer needed
+            'quiet_zone': 2.0,      # Reduce quiet zone a bit to give more space to lines
+            'write_text': False     # Key change: do not write text data below barcode
         }
         
         # Create a BytesIO buffer to hold the image data
