@@ -3,6 +3,7 @@ from typing import List, Dict, Any, Optional
 
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, NoResultFound, DataError
+from sqlalchemy import func # Added for func.lower
 
 
 # ORM Models
@@ -64,10 +65,11 @@ def _lookup_attribute_ids(db: Session, business_details_id: int, attribute_names
     # Ensure unique names for lookup to avoid redundant DB calls, though list(set()) already does this.
     for name in sorted(list(set(attribute_names))):
         try:
+            # Use func.lower for case-insensitive comparison on name
             attr_orm = db.query(AttributeOrm.id).filter(
-                AttributeOrm.name == name, 
+                func.lower(AttributeOrm.name) == func.lower(name), 
                 AttributeOrm.business_details_id == business_details_id
-            ).one() # Use .one() if attribute MUST exist, or .one_or_none() if it can be optional (then handle None)
+            ).one()
             attr_id_map[name] = attr_orm.id
         except NoResultFound:
             missing_attrs.append(name)
@@ -110,11 +112,15 @@ def _lookup_attribute_value_ids(
             logger.error(f"Internal inconsistency: Attribute ID for '{attr_name}' not present in attr_id_map during value lookup for '{val_name}'.")
             missing_vals.append(f"{attr_name} -> {val_name} (Attribute '{attr_name}' missing its ID)")
             continue 
-
+        
+        logger.debug(
+            f"Looking up AttributeValue: attr_name='{attr_name}', attr_id='{attr_id}', val_name_from_csv='{val_name}'"
+        )
         try:
+            # Use func.lower for case-insensitive comparison on value
             attr_val_orm = db.query(AttributeValueOrm.id).filter(
                 AttributeValueOrm.attribute_id == attr_id,
-                AttributeValueOrm.value == val_name # 'value' field in AttributeValueOrm
+                func.lower(AttributeValueOrm.value) == func.lower(val_name)
             ).one()
             attr_val_id_map[(attr_name, val_name)] = attr_val_orm.id
         except NoResultFound:
