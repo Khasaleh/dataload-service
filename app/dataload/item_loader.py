@@ -126,23 +126,34 @@ def _lookup_attribute_value_ids(
             f"Looking up AttributeValue: attr_name='{attr_name}', attr_id='{attr_id}', val_name_from_csv='{val_name}'"
         )
         try:
-            # Use func.lower for case-insensitive comparison on value
-            attr_val_orm = db.query(AttributeValueOrm.id).filter(
+            # Compare CSV value (val_name) against AttributeValueOrm.name column, case-insensitively
+            attr_val_orm_result = db.query(AttributeValueOrm.id).filter(
                 AttributeValueOrm.attribute_id == attr_id,
-                func.lower(AttributeValueOrm.value) == func.lower(val_name)
-            ).one()
-            attr_val_id_map[(attr_name, val_name)] = attr_val_orm.id
+                func.lower(AttributeValueOrm.name) == func.lower(val_name)
+            ).one() # Expect exactly one match
+            
+            attr_val_id_map[(attr_name, val_name)] = attr_val_orm_result.id
         except NoResultFound:
             missing_vals.append(f"{attr_name} -> {val_name}")
+        except MultipleResultsFound:
+            logger.error(
+                f"Multiple attribute values found for attr_id='{attr_id}', "
+                f"val_name='{val_name}' (case-insensitive). This indicates a data integrity issue "
+                f"where (attribute_id, LOWER(name)) is not unique in attribute_value table."
+            )
+            missing_vals.append(f"{attr_name} -> {val_name} (Multiple results found in DB)")
         except Exception as e:
             logger.error(f"Error looking up attribute value '{val_name}' for attribute '{attr_name}' (ID: {attr_id}): {e}", exc_info=True)
             missing_vals.append(f"{attr_name} -> {val_name} (DB error)")
 
 
     if missing_vals:
-        if any("(DB error)" in mv or "(Attribute" in mv for mv in missing_vals):
-            raise DataLoaderError(
-                message=f"Critical error during attribute value lookup or some values not found: {', '.join(missing_vals)}",
+        # Check if any missing_val contains specific error indicators to modify message
+        is_critical_error = any("(DB error)" in mv or "(Attribute" in mv or "(Multiple results found in DB)" in mv for mv in missing_vals)
+        error_message_intro = "Critical error during attribute value lookup or some values not found/unique" if is_critical_error else "Attribute values not found"
+        
+        raise DataLoaderError(
+            message=f"{error_message_intro}: {', '.join(missing_vals)}",
                 error_type=ErrorType.LOOKUP,
                 field_name="attribute_combination (derived values)",
                 offending_value=str(missing_vals)
