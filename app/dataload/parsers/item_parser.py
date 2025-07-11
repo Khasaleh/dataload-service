@@ -133,14 +133,31 @@ def parse_attribute_combination_string(
 
         if current_attribute_is_main:
             # Main attribute group_str is "Val1|main_sku:bool1:Val2|main_sku:bool2..."
-            # value_segments from group_str.split(':') will be [Val1|main_sku, bool1, Val2|main_sku, bool2, ...]
+            raw_value_segments = group_str.split(':')
+            # Filter out empty strings that might result from leading/trailing/double colons, and strip valid ones
+            value_segments = [segment.strip() for segment in raw_value_segments if segment.strip()]
+
+            if not value_segments:
+                # This happens if group_str was empty, all colons, or colons with only whitespace.
+                # If group_str itself had non-whitespace content, it means it was malformed into all empty segments.
+                original_content_present = group_str.strip()
+                if not original_content_present:
+                    raise ItemParserError(
+                        f"Main attribute group for '{attribute_definition['name']}' is empty."
+                    )
+                else: # Original group_str had content but it all became empty segments after split & strip
+                    raise ItemParserError(
+                        f"Main attribute group for '{attribute_definition['name']}' ('{group_str}') "
+                        "resulted in no valid segments after processing delimiters. Check for excessive or misplaced colons."
+                    )
+
             if len(value_segments) % 2 != 0:
                 raise ItemParserError(
                     f"Malformed value string for main attribute '{attribute_definition['name']}': '{group_str}'. "
-                    "Expected pairs of 'ValueName|main_sku' and 'true/false' separated by colons."
+                    f"Processed segments: {value_segments}. Expected an even number of segments for 'ValueName|main_sku' and 'true/false' pairs."
                 )
             for vp_idx in range(0, len(value_segments), 2):
-                val_name_part_raw = value_segments[vp_idx]
+                val_name_part_raw = value_segments[vp_idx] # Already stripped
                 val_flag_part_raw = value_segments[vp_idx+1]
 
                 val_name_part = val_name_part_raw.strip()
