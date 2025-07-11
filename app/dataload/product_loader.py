@@ -93,8 +93,9 @@ def parse_images(image_str: Optional[str]) -> List[Dict[str, Any]]:
         logger.warning(f"Malformed images string: '{image_str}'"); return images
     for i in range(0, len(parts), 2):
         url, flag_str = parts[i].strip(), parts[i+1].strip().lower()
-        if not url.startswith(('http://', 'https://')):
-            logger.warning(f"Invalid image URL: '{url}'"); continue
+        # Removed absolute URL check:
+        # if not url.startswith(('http://', 'https://')):
+        #     logger.warning(f"Invalid image URL: '{url}'"); continue
         if flag_str == 'main_image:true': is_main = True
         elif flag_str == 'main_image:false': is_main = False
         else: logger.warning(f"Invalid main_image flag: '{flag_str}'"); continue

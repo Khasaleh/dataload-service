@@ -288,8 +288,9 @@ class ProductCsvModel(BaseModel):
             if len(parts) % 2 != 0:
                 raise ValueError("Images string must have pairs of url and main_image flag.")
             for i in range(0, len(parts), 2):
-                if not parts[i].startswith(('http://', 'https://')):
-                    raise ValueError(f"Image URL '{parts[i]}' must be a valid URL.")
+                # Removed absolute URL check:
+                # if not parts[i].startswith(('http://', 'https://')):
+                #     raise ValueError(f"Image URL '{parts[i]}' must be a valid URL.")
                 if parts[i+1] not in ["main_image:true", "main_image:false"]:
                     raise ValueError(f"Image flag '{parts[i+1]}' must be 'main_image:true' or 'main_image:false'.")
 
