@@ -126,80 +126,68 @@ def parse_attribute_combination_string(
         # Values within a group are separated by ':'
         value_segments = group_str.split(':')
         
-        if not value_segments or not any(vs.strip() for vs in value_segments):
+        # current_attribute_is_main = attribute_definition['is_main'] # This is NOT used to determine parsing style for segments
+
+        # Values within a group are separated by ':'.
+        # All attribute values are expected to follow "ValueName|main_sku:boolean_flag" structure.
+        raw_value_segments = group_str.split(':')
+        # Filter out empty strings that might result from leading/trailing/double colons, and strip valid ones.
+        value_segments = [segment.strip() for segment in raw_value_segments if segment.strip()]
+
+        if not value_segments:
+            original_content_present = group_str.strip() # Check original group_str before it was split
+            if not original_content_present: # group_str was empty or just whitespace
+                raise ItemParserError(
+                    f"Attribute group for '{attribute_definition['name']}' is empty."
+                )
+            # If original_content_present is true, but value_segments is empty,
+            # it means group_str consisted only of colons or colons and whitespace.
             raise ItemParserError(
-                f"Attribute group for '{attribute_definition['name']}' has no values or only empty values defined in segment '{group_str}'."
+                f"Attribute group for '{attribute_definition['name']}' ('{group_str}') "
+                "resulted in no valid segments after processing colons. Check for excessive or misplaced colons."
             )
 
-        if current_attribute_is_main:
-            # Main attribute group_str is "Val1|main_sku:bool1:Val2|main_sku:bool2..."
-            raw_value_segments = group_str.split(':')
-            # Filter out empty strings that might result from leading/trailing/double colons, and strip valid ones
-            value_segments = [segment.strip() for segment in raw_value_segments if segment.strip()]
-
-            if not value_segments:
-                # This happens if group_str was empty, all colons, or colons with only whitespace.
-                # If group_str itself had non-whitespace content, it means it was malformed into all empty segments.
-                original_content_present = group_str.strip()
-                if not original_content_present:
-                    raise ItemParserError(
-                        f"Main attribute group for '{attribute_definition['name']}' is empty."
-                    )
-                else: # Original group_str had content but it all became empty segments after split & strip
-                    raise ItemParserError(
-                        f"Main attribute group for '{attribute_definition['name']}' ('{group_str}') "
-                        "resulted in no valid segments after processing delimiters. Check for excessive or misplaced colons."
-                    )
-
-            if len(value_segments) % 2 != 0:
-                raise ItemParserError(
-                    f"Malformed value string for main attribute '{attribute_definition['name']}': '{group_str}'. "
-                    f"Processed segments: {value_segments}. Expected an even number of segments for 'ValueName|main_sku' and 'true/false' pairs."
-                )
-            for vp_idx in range(0, len(value_segments), 2):
-                val_name_part_raw = value_segments[vp_idx] # Already stripped
-                val_flag_part_raw = value_segments[vp_idx+1]
-
-                val_name_part = val_name_part_raw.strip()
-                val_flag_part = val_flag_part_raw.strip().lower()
-                
-                expected_suffix = "|main_sku"
-                if not val_name_part.lower().endswith(expected_suffix):
-                    raise ItemParserError(
-                        f"Malformed value name part '{val_name_part_raw}' for main attribute "
-                        f"'{attribute_definition['name']}'. Expected 'ValueName|main_sku'."
-                    )
-                
-                actual_value = val_name_part[:-len(expected_suffix)].strip()
-                if not actual_value:
-                     raise ItemParserError(
-                         f"Empty actual value for main attribute '{attribute_definition['name']}' from segment '{val_name_part_raw}'."
-                     )
-
-                value_detail = {'value': actual_value}
-                if val_flag_part == "true":
-                    value_detail['is_default_sku_value'] = True
-                elif val_flag_part == "false":
-                    value_detail['is_default_sku_value'] = False
-                else:
-                    raise ItemParserError(
-                        f"Invalid boolean flag '{val_flag_part_raw}' for value '{actual_value}' "
-                        f"of main attribute '{attribute_definition['name']}'. Expected 'true' or 'false'."
-                    )
-                values_for_this_attribute.append(value_detail)
-        else: # Not the main attribute
-            # Non-main attribute group_str is "Val1:Val2:Val3..."
-            # value_segments from group_str.split(':') are the actual values.
-            for val_str_segment in value_segments:
-                actual_value = val_str_segment.strip()
-                if not actual_value:
-                    raise ItemParserError(
-                        f"Empty value found for non-main attribute '{attribute_definition['name']}' in group segment '{group_str}'."
-                    )
-                values_for_this_attribute.append({'value': actual_value})
+        if len(value_segments) % 2 != 0:
+            raise ItemParserError(
+                f"Malformed value string for attribute '{attribute_definition['name']}': '{group_str}'. "
+                f"Processed segments: {value_segments}. Expected an even number of segments for 'ValueName|main_sku' and 'true/false' pairs."
+            )
         
-        if not values_for_this_attribute:
-             raise ItemParserError(f"No values parsed for attribute '{attribute_definition['name']}' from segment '{group_str}'.")
+        for vp_idx in range(0, len(value_segments), 2):
+            val_name_part_raw = value_segments[vp_idx] 
+            val_flag_part_raw = value_segments[vp_idx+1]
+
+            val_name_part = val_name_part_raw 
+            val_flag_part = val_flag_part_raw.lower()
+            
+            expected_suffix = "|main_sku"
+            if not val_name_part.lower().endswith(expected_suffix.lower()):
+                raise ItemParserError(
+                    f"Malformed value name part '{val_name_part_raw}' for attribute "
+                    f"'{attribute_definition['name']}'. Expected it to end with '{expected_suffix}' (case-insensitive)."
+                )
+            
+            actual_value = val_name_part[:-len(expected_suffix)].strip() 
+            if not actual_value: 
+                 raise ItemParserError(
+                     f"Empty actual value for attribute '{attribute_definition['name']}' from segment '{val_name_part_raw}' "
+                     f"(after stripping '{expected_suffix}')."
+                 )
+
+            value_detail = {'value': actual_value}
+            if val_flag_part == "true":
+                value_detail['is_default_sku_value'] = True
+            elif val_flag_part == "false":
+                value_detail['is_default_sku_value'] = False
+            else:
+                raise ItemParserError(
+                    f"Invalid boolean flag component '{val_flag_part_raw}' for value '{actual_value}' "
+                    f"of attribute '{attribute_definition['name']}'. Expected 'true' or 'false'."
+                )
+            values_for_this_attribute.append(value_detail)
+        
+        if not values_for_this_attribute: 
+             raise ItemParserError(f"No values could be parsed for attribute '{attribute_definition['name']}' from segment '{group_str}'.")
         result_list.append(values_for_this_attribute)
             
     return result_list
