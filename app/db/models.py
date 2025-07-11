@@ -372,8 +372,8 @@ class ProductOrm(Base):
     # items = relationship("ProductItemOrm", back_populates="product", cascade="all, delete-orphan") # Old, to be replaced by SkuOrm/MainSkuOrm
 
     # New relationships for SKUs
-    skus = relationship("SkuOrm", back_populates="product", cascade="all, delete-orphan")
-    main_sku_entries = relationship("MainSkuOrm", back_populates="product", cascade="all, delete-orphan")
+    skus = relationship("SkuOrm", foreign_keys="[SkuOrm.product_id]", back_populates="product", cascade="all, delete-orphan")
+    main_sku_entries = relationship("MainSkuOrm", foreign_keys="[MainSkuOrm.product_id]", back_populates="product", cascade="all, delete-orphan")
 
     # Removing old relationships that are not in the new DDL context
     legacy_prices = relationship("ProductPriceOrm", back_populates="product", cascade="all, delete-orphan")
@@ -495,7 +495,7 @@ class MainSkuOrm(Base):
     quantity = Column(Integer, nullable=True)
 
     product_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.products.id"), nullable=False, index=True)
-    # product = relationship("ProductOrm", back_populates="main_sku_entries") # Defined in ProductOrm
+    product = relationship("ProductOrm", foreign_keys=[product_id], back_populates="main_sku_entries")
 
     # variant_id links to a specific ProductVariantOrm record (the one for the main attribute)
     # This FK must be nullable or deferred if ProductVariantOrm not defined yet or if it can be optional initially.
@@ -516,10 +516,10 @@ class MainSkuOrm(Base):
     images = relationship("ProductImageOrm", back_populates="main_sku", cascade="all, delete-orphan")
 
     # Relationship back to SkuOrm (1-to-1). SkuOrm will have main_sku_id = MainSkuOrm.id
-    # sku_entry is defined via backref from SkuOrm.main_sku relationship
+    sku_entry = relationship("SkuOrm", foreign_keys="[SkuOrm.main_sku_id]", back_populates="main_sku", uselist=False)
 
-    # Relationship to its constituent product_variant entries (needed for main_attribute_product_variant)
-    # product_variants_associated = relationship("ProductVariantOrm", back_populates="main_sku") # Defined by backref from ProductVariantOrm.main_sku
+    # Relationship to its constituent product_variant entries
+    product_variants_associated = relationship("ProductVariantOrm", back_populates="main_sku")
     main_attribute_product_variant = relationship("ProductVariantOrm", foreign_keys=[variant_id], post_update=True, uselist=False)
 
 
@@ -549,7 +549,7 @@ class SkuOrm(Base):
     # This establishes the 1-to-1 link where SkuOrm.id == MainSkuOrm.id conceptually,
     # but MainSkuOrm is the "primary" side of this paired record.
     main_sku_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.main_skus.id", name="fk_sku_main_sku_id"), nullable=False, unique=True, index=True)
-    main_sku = relationship("MainSkuOrm", foreign_keys=[main_sku_id], backref="sku_entry", uselist=False)
+    main_sku = relationship("MainSkuOrm", foreign_keys=[main_sku_id], back_populates="sku_entry", uselist=False)
 
 
     order_limit = Column(BigInteger, nullable=True)
@@ -585,7 +585,7 @@ class ProductVariantOrm(Base):
     active = Column(String(255), nullable=True, default='ACTIVE', index=True)
     
     main_sku_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.main_skus.id"), nullable=False, index=True)
-    main_sku = relationship("MainSkuOrm", backref="product_variants_associated") # Avoids conflict with main_attribute_product_variant
+    main_sku = relationship("MainSkuOrm", back_populates="product_variants_associated")
 
 
 class PriceOrm(Base):
