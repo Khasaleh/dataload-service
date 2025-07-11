@@ -66,22 +66,31 @@ def _lookup_attribute_ids(db: Session, business_details_id: int, attribute_names
     for name in sorted(list(set(attribute_names))):
         try:
             # Use func.lower for case-insensitive comparison on name
-            attr_orm = db.query(AttributeOrm.id).filter(
+            attr_orm_result = db.query(AttributeOrm.id).filter(
                 func.lower(AttributeOrm.name) == func.lower(name), 
                 AttributeOrm.business_details_id == business_details_id
-            ).one()
-            attr_id_map[name] = attr_orm.id
-        except NoResultFound:
-            missing_attrs.append(name)
-        except Exception as e: # Catch other potential DB errors during lookup
+            ).first() # Changed to .first()
+
+            if attr_orm_result:
+                attr_id_map[name] = attr_orm_result.id
+            else: # attr_orm_result is None, meaning not found
+                missing_attrs.append(name)
+        except Exception as e: # Catch other potential DB errors or unexpected issues
             logger.error(f"Error looking up attribute '{name}' for business {business_details_id}: {e}", exc_info=True)
-            missing_attrs.append(f"{name} (DB error)") # Mark as error
+            # Ensure name is added to missing_attrs if an error occurred, to signify lookup failure.
+            # Avoid adding duplicates if already added by a NoResultFound-like path (though .first() doesn't raise NoResultFound for empty results)
+            if name not in missing_attrs and f"{name} (DB error)" not in missing_attrs:
+                 missing_attrs.append(f"{name} (DB error)")
             
     if missing_attrs:
-        # Check if any missing_attr contains "(DB error)" to modify message slightly
-        if any("(DB error)" in ma for ma in missing_attrs):
-             raise DataLoaderError(
-                message=f"Critical error during attribute lookup or some attributes not found for business {business_details_id}: {', '.join(missing_attrs)}",
+        # Consolidate error reporting for missing attributes or DB errors during lookup
+        # The "(DB error)" suffix helps distinguish.
+        # If any item contains "(DB error)", it implies a more critical issue than just "not found".
+        is_critical_error = any("(DB error)" in ma for ma in missing_attrs)
+        error_message_intro = "Critical error during attribute lookup or some attributes not found" if is_critical_error else "Attributes not found"
+        
+        raise DataLoaderError(
+            message=f"{error_message_intro} for business {business_details_id}: {', '.join(missing_attrs)}",
                 error_type=ErrorType.LOOKUP,
                 field_name="attributes (derived names)",
                 offending_value=str(missing_attrs)
