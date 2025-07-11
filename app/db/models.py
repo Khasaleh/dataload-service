@@ -519,7 +519,7 @@ class MainSkuOrm(Base):
     sku_entry = relationship("SkuOrm", foreign_keys="[SkuOrm.main_sku_id]", back_populates="main_sku", uselist=False)
 
     # Relationship to its constituent product_variant entries
-    product_variants_associated = relationship("ProductVariantOrm", back_populates="main_sku")
+    product_variants_associated = relationship("ProductVariantOrm", foreign_keys="ProductVariantOrm.main_sku_id", back_populates="main_sku")
     main_attribute_product_variant = relationship("ProductVariantOrm", foreign_keys=[variant_id], post_update=True, uselist=False)
 
 
