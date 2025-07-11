@@ -519,7 +519,11 @@ class MainSkuOrm(Base):
     sku_entry = relationship("SkuOrm", foreign_keys="[SkuOrm.main_sku_id]", back_populates="main_sku", uselist=False)
 
     # Relationship to its constituent product_variant entries
-    product_variants_associated = relationship("ProductVariantOrm", foreign_keys="ProductVariantOrm.main_sku_id", back_populates="main_sku")
+    product_variants_associated = relationship(
+        "ProductVariantOrm",
+        primaryjoin="MainSkuOrm.id == ProductVariantOrm.main_sku_id",
+        back_populates="main_sku"
+    )
     main_attribute_product_variant = relationship("ProductVariantOrm", foreign_keys=[variant_id], post_update=True, uselist=False)
 
 
@@ -588,7 +592,11 @@ class ProductVariantOrm(Base):
     active = Column(String(255), nullable=True, default='ACTIVE', index=True)
     
     main_sku_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.main_skus.id"), nullable=False, index=True)
-    main_sku = relationship("MainSkuOrm", foreign_keys=[main_sku_id], back_populates="product_variants_associated")
+    main_sku = relationship(
+        "MainSkuOrm",
+        primaryjoin="MainSkuOrm.id == ProductVariantOrm.main_sku_id",
+        back_populates="product_variants_associated"
+    )
 
 
 class PriceOrm(Base):

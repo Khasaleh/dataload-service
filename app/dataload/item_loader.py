@@ -319,8 +319,8 @@ def load_item_record_to_db(
                     created_by=user_id,
                     created_date=current_time_epoch_ms,
                     updated_by=user_id,
-                    updated_date=current_time_epoch_ms,
-                    business_details_id=business_details_id 
+                    updated_date=current_time_epoch_ms
+                    # business_details_id=business_details_id # Removed, not in MainSkuOrm DDL
                 )
                 db.add(main_sku_orm)
                 db.flush() 
@@ -355,8 +355,8 @@ def load_item_record_to_db(
                     created_by=user_id,
                     created_date=current_time_epoch_ms,
                     updated_by=user_id,
-                    updated_date=current_time_epoch_ms,
-                    business_details_id=business_details_id 
+                    updated_date=current_time_epoch_ms
+                    # business_details_id=business_details_id # Removed, not in SkuOrm DDL
                 )
                 db.add(sku_orm)
                 db.flush() 
@@ -390,8 +390,8 @@ def load_item_record_to_db(
                         created_by=user_id,
                         created_date=current_time_epoch_ms,
                         updated_by=user_id,
-                        updated_date=current_time_epoch_ms,
-                        business_details_id=business_details_id 
+                        updated_date=current_time_epoch_ms
+                        # business_details_id=business_details_id # Removed, not in ProductVariantOrm DDL
                     )
                     db.add(pv_orm)
                     db.flush() 
@@ -453,8 +453,8 @@ def load_item_record_to_db(
                         created_by=user_id,
                         created_date=current_time_epoch_ms, 
                         updated_by=user_id,
-                        updated_date=current_time_epoch_ms,
-                        business_details_id=business_details_id 
+                        updated_date=current_time_epoch_ms
+                        # business_details_id=business_details_id # Removed, not in ProductImageOrm DDL
                     )
                     db.add(image_orm)
                     logger.debug(f"{log_prefix} Added ProductImageOrm for URL: {img_data['url']}, Main: {img_data['main_image']}")
