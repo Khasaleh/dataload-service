@@ -588,7 +588,7 @@ class ProductVariantOrm(Base):
     active = Column(String(255), nullable=True, default='ACTIVE', index=True)
     
     main_sku_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.main_skus.id"), nullable=False, index=True)
-    main_sku = relationship("MainSkuOrm", back_populates="product_variants_associated")
+    main_sku = relationship("MainSkuOrm", foreign_keys=[main_sku_id], back_populates="product_variants_associated")
 
 
 class PriceOrm(Base):
