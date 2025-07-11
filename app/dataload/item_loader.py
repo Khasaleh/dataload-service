@@ -14,12 +14,16 @@ from app.db.models import (
     ProductVariantOrm,
     ProductImageOrm,
     AttributeOrm,
-    AttributeValueOrm
+    AttributeValueOrm,
+    MainSkuOrm # Ensure MainSkuOrm is imported if not already
 )
 # Pydantic CSV Model
 from app.dataload.models.item_csv import ItemCsvModel
 
 # Parsing Utilities
+# Need to import sql_func for sqlalchemy.sql.func
+from sqlalchemy import and_, func as sql_func
+
 from app.dataload.parsers.item_parser import (
     parse_attributes_string,
     parse_attribute_combination_string,
@@ -167,6 +171,79 @@ def _lookup_attribute_value_ids(
     return attr_val_id_map
 
 
+def find_existing_sku_by_attributes(
+    db: Session, 
+    product_id: int, 
+    target_attribute_value_ids: List[int],
+    log_prefix: str = "" 
+) -> Optional[Tuple[SkuOrm, MainSkuOrm]]:
+    """
+    Finds an existing SkuOrm and its corresponding MainSkuOrm based on product_id 
+    and a specific combination of attribute_value_ids.
+    A SKU is considered a match if it's linked to all target_attribute_value_ids 
+    and no other attribute_value_ids.
+    """
+    if not target_attribute_value_ids:
+        logger.debug(f"{log_prefix} No target attribute value IDs provided for SKU lookup.")
+        return None
+
+    num_target_attributes = len(target_attribute_value_ids)
+
+    # Subquery to find sku_ids that are linked to *all* target_attribute_value_ids
+    # It counts, for each sku_id, how many of the target_attribute_value_ids it is linked to.
+    # We are interested in sku_ids where this count equals num_target_attributes.
+    subquery_matching_attributes = (
+        db.query(
+            ProductVariantOrm.sku_id,
+            sql_func.count(ProductVariantOrm.attribute_value_id).label("matching_attributes_count")
+        )
+        .filter(ProductVariantOrm.attribute_value_id.in_(target_attribute_value_ids))
+        .group_by(ProductVariantOrm.sku_id)
+        .having(sql_func.count(ProductVariantOrm.attribute_value_id) == num_target_attributes)
+        .subquery("sq_matching_skus")
+    )
+
+    # Subquery to count the *total* number of attributes linked to each sku_id.
+    # This is to ensure the SKU doesn't have additional attributes beyond the target ones.
+    subquery_total_attributes_for_sku = (
+        db.query(
+            ProductVariantOrm.sku_id,
+            sql_func.count(ProductVariantOrm.attribute_value_id).label("total_attributes_count")
+        )
+        .group_by(ProductVariantOrm.sku_id)
+        .subquery("sq_total_attributes_for_sku")
+    )
+
+    # Main query to find the SkuOrm
+    # It must:
+    # 1. Belong to the given product_id.
+    # 2. Be present in subquery_matching_attributes (has all target attributes).
+    # 3. Its total number of attributes (from subquery_total_attributes_for_sku) must also be num_target_attributes.
+    existing_sku_orm = (
+        db.query(SkuOrm)
+        .join(subquery_matching_attributes, SkuOrm.id == subquery_matching_attributes.c.sku_id)
+        .join(subquery_total_attributes_for_sku, SkuOrm.id == subquery_total_attributes_for_sku.c.sku_id)
+        .filter(SkuOrm.product_id == product_id)
+        .filter(subquery_total_attributes_for_sku.c.total_attributes_count == num_target_attributes)
+        .first() # Expect at most one such SKU
+    )
+
+    if existing_sku_orm:
+        logger.debug(f"{log_prefix} Found existing SkuOrm ID: {existing_sku_orm.id} by attribute combination.")
+        # Fetch the corresponding MainSkuOrm
+        # Assuming existing_sku_orm.main_sku_id correctly links SkuOrm to MainSkuOrm
+        main_sku_orm = db.query(MainSkuOrm).filter(MainSkuOrm.id == existing_sku_orm.main_sku_id).one_or_none()
+        if main_sku_orm:
+            logger.debug(f"{log_prefix} Found corresponding MainSkuOrm ID: {main_sku_orm.id}.")
+            return existing_sku_orm, main_sku_orm
+        else:
+            logger.error(f"{log_prefix} Data integrity issue: SkuOrm ID {existing_sku_orm.id} found, but its MainSkuOrm (ID: {existing_sku_orm.main_sku_id}) is missing for product {product_id}.")
+            return None # Or raise an error indicating data inconsistency
+    
+    logger.debug(f"{log_prefix} No existing SKU found for product_id {product_id} with attributes {target_attribute_value_ids}.")
+    return None
+
+
 def load_item_record_to_db(
     db: Session, 
     business_details_id: int, 
@@ -174,13 +251,13 @@ def load_item_record_to_db(
     user_id: int,
 ) -> List[int]:
     """
-    Processes a single item CSV row, creates SKU, MainSKU, ProductVariant records.
-    Returns a list of created/updated main_sku_ids for this row.
+    Processes a single item CSV row. If SKUs exist, updates them. If not, skips creation.
+    Returns a list of processed (created/updated) main_sku_ids for this row.
     """
     log_prefix = f"[ItemCSV Product: {item_csv_row.product_name}]"
     logger.info(f"{log_prefix} Starting processing of item CSV row.")
 
-    created_main_sku_ids_for_row: List[int] = [] # Renamed to avoid conflict with potential outer scope vars
+    processed_main_sku_ids_for_row: List[int] = []
 
     try:
         # 1. Product Lookup
@@ -298,117 +375,85 @@ def load_item_record_to_db(
                         is_default_sku = True
                 logger.debug(f"{variant_log_prefix}Is Default SKU: {is_default_sku}")
                 
-                # TODO: Implement SKU lookup for updates. For now, focusing on creation.
+                # --- SKU Lookup and Update/Skip Logic ---
+                current_target_attr_value_ids = sorted([
+                    attr_val_id_map[(attr_detail['attribute_name'], attr_detail['value'])]
+                    for attr_detail in current_sku_variant
+                ])
 
-                # 3. Create MainSkuOrm instance
-                main_sku_orm = MainSkuOrm(
-                    product_id=product_id,
-                    price=price,
-                    discount_price=discount_price,
-                    quantity=quantity,
-                    active=active_db_val,
-                    is_default=is_default_sku,
-                    order_limit=order_limit,
-                    package_size_length=pkg_length,
-                    package_size_width=pkg_width,
-                    package_size_height=pkg_height,
-                    package_weight=pkg_weight,
-                    part_number="TEMP_MAIN_PN", 
-                    mobile_barcode="TEMP_MAIN_MB",
-                    barcode="TEMP_MAIN_B",      
-                    created_by=user_id,
-                    created_date=current_time_epoch_ms,
-                    updated_by=user_id,
-                    updated_date=current_time_epoch_ms
-                    # business_details_id=business_details_id # Removed, not in MainSkuOrm DDL
+                existing_sku_tuple = find_existing_sku_by_attributes(
+                    db, product_id, current_target_attr_value_ids, variant_log_prefix
                 )
-                db.add(main_sku_orm)
-                db.flush() 
-                logger.debug(f"{variant_log_prefix}Created MainSkuOrm ID: {main_sku_orm.id}")
 
-                main_sku_orm.part_number = str(main_sku_orm.id).zfill(9)
-                main_sku_orm.mobile_barcode = f"S{main_sku_orm.id}P{product_id}"
-                try:
-                    barcode_bytes = barcode_helper.generate_barcode_image(main_sku_orm.mobile_barcode, 350, 100)
-                    main_sku_orm.barcode = barcode_helper.encode_barcode_to_base64(barcode_bytes)
-                except barcode_helper.BarcodeGenerationError as bge:
-                    raise DataLoaderError(f"Barcode gen failed for MainSKU {main_sku_orm.id}: {bge}", ErrorType.PROCESSING, "main_sku.barcode", main_sku_orm.mobile_barcode)
+                main_sku_orm_instance: Optional[MainSkuOrm] = None
+                sku_orm_instance: Optional[SkuOrm] = None
+
+                if existing_sku_tuple:
+                    sku_orm_instance, main_sku_orm_instance = existing_sku_tuple
+                    logger.info(f"{variant_log_prefix}Found existing MainSKU ID: {main_sku_orm_instance.id}, SKU ID: {sku_orm_instance.id}. Updating.")
+
+                    # Update existing MainSkuOrm
+                    main_sku_orm_instance.price = price
+                    main_sku_orm_instance.discount_price = discount_price
+                    main_sku_orm_instance.quantity = quantity
+                    main_sku_orm_instance.active = active_db_val
+                    # main_sku_orm_instance.is_default = is_default_sku # is_default is structural, generally not updated unless explicitly required.
+                                                                    # If it needs to change, it implies a change in which variant is "main",
+                                                                    # which might have other side effects (e.g. image assignment).
+                                                                    # For now, assume is_default is not changed on simple data updates.
+                    main_sku_orm_instance.order_limit = order_limit
+                    main_sku_orm_instance.package_size_length = pkg_length
+                    main_sku_orm_instance.package_size_width = pkg_width
+                    main_sku_orm_instance.package_size_height = pkg_height
+                    main_sku_orm_instance.package_weight = pkg_weight
+                    main_sku_orm_instance.updated_by = user_id
+                    main_sku_orm_instance.updated_date = current_time_epoch_ms
+                    
+                    # Barcodes and part numbers are usually stable after creation.
+                    # Regenerate if business logic dictates they can change on update.
+                    # For now, assuming they are stable.
+
+                    # Update existing SkuOrm
+                    sku_orm_instance.price = price
+                    sku_orm_instance.discount_price = discount_price
+                    sku_orm_instance.quantity = quantity
+                    sku_orm_instance.active = active_db_val
+                    sku_orm_instance.order_limit = order_limit
+                    sku_orm_instance.package_size_length = pkg_length
+                    sku_orm_instance.package_size_width = pkg_width
+                    sku_orm_instance.package_size_height = pkg_height
+                    sku_orm_instance.package_weight = pkg_weight
+                    sku_orm_instance.updated_by = user_id
+                    sku_orm_instance.updated_date = current_time_epoch_ms
+
+                    # ProductVariantOrm entries define the SKU structure.
+                    # Their attribute_id/attribute_value_id links are not "updated".
+                    # If these change, it implies a different SKU.
+                    # We might update their 'active' status if it can vary independently of SkuOrm/MainSkuOrm.
+                    # For now, assuming ProductVariantOrm `active` status is tied to SkuOrm/MainSkuOrm `active` status.
+                    # If ProductVariantOrm records need individual status updates, that logic would go here.
+                    # Example:
+                    # existing_pvs = db.query(ProductVariantOrm).filter(ProductVariantOrm.sku_id == sku_orm_instance.id).all()
+                    # for pv in existing_pvs:
+                    #    pv.active = active_db_val # Or some other logic
+                    #    pv.updated_by = user_id
+                    #    pv.updated_date = current_time_epoch_ms
+                    
+                    logger.debug(f"{variant_log_prefix}Updated MainSkuOrm ID: {main_sku_orm_instance.id} and SkuOrm ID: {sku_orm_instance.id}")
+                    
+                    if main_sku_orm_instance.is_default and first_main_sku_orm_id_for_images is None:
+                         first_main_sku_orm_id_for_images = main_sku_orm_instance.id
+
+                    processed_main_sku_ids_for_row.append(main_sku_orm_instance.id)
+
+                else: # SKU not found, skip creation as per requirement
+                    logger.warning(f"{variant_log_prefix}SKU with attributes {current_target_attr_value_ids} (Product ID: {product_id}) not found. Skipping creation.")
+                    continue # Move to the next variant in the CSV row
                 
-                # 4. Create SkuOrm instance
-                sku_orm = SkuOrm(
-                    product_id=product_id,
-                    main_sku_id=main_sku_orm.id, 
-                    price=price, 
-                    discount_price=discount_price,
-                    quantity=quantity, 
-                    active=active_db_val, 
-                    order_limit=order_limit,
-                    package_size_length=pkg_length,
-                    package_size_width=pkg_width,
-                    package_size_height=pkg_height,
-                    package_weight=pkg_weight,
-                    description=None, 
-                    name=None,        
-                    part_number="TEMP_SKU_PN", 
-                    mobile_barcode="TEMP_SKU_MB",
-                    barcode="TEMP_SKU_B",      
-                    created_by=user_id,
-                    created_date=current_time_epoch_ms,
-                    updated_by=user_id,
-                    updated_date=current_time_epoch_ms
-                    # business_details_id=business_details_id # Removed, not in SkuOrm DDL
-                )
-                db.add(sku_orm)
-                db.flush() 
-                logger.debug(f"{variant_log_prefix}Created SkuOrm ID: {sku_orm.id}")
+                # End of Update/Skip logic. If we are here, we either updated an existing SKU or skipped.
+                # The original creation logic is now bypassed if an SKU is not found.
 
-                sku_orm.part_number = str(sku_orm.id).zfill(9)
-                sku_orm.mobile_barcode = f"S{sku_orm.id}P{product_id}"
-                try:
-                    barcode_bytes_sku = barcode_helper.generate_barcode_image(sku_orm.mobile_barcode, 350, 100)
-                    sku_orm.barcode = barcode_helper.encode_barcode_to_base64(barcode_bytes_sku)
-                except barcode_helper.BarcodeGenerationError as bge:
-                     raise DataLoaderError(f"Barcode gen failed for SKU {sku_orm.id}: {bge}", ErrorType.PROCESSING, "sku.barcode", sku_orm.mobile_barcode)
-
-                if main_sku_orm.is_default and first_main_sku_orm_id_for_images is None:
-                    first_main_sku_orm_id_for_images = main_sku_orm.id
-                    logger.debug(f"{variant_log_prefix}Set first_main_sku_id_for_images to {main_sku_orm.id}")
-
-                main_attribute_product_variant_id: Optional[int] = None
-                for attr_detail_in_variant in current_sku_variant:
-                    attr_name = attr_detail_in_variant['attribute_name']
-                    attr_value_str = attr_detail_in_variant['value']
-                    current_attr_id = attr_id_map[attr_name] 
-                    current_attr_val_id = attr_val_id_map[(attr_name, attr_value_str)]
-
-                    pv_orm = ProductVariantOrm(
-                        attribute_id=current_attr_id,
-                        attribute_value_id=current_attr_val_id,
-                        sku_id=sku_orm.id,
-                        main_sku_id=main_sku_orm.id,
-                        active=active_db_val, 
-                        created_by=user_id,
-                        created_date=current_time_epoch_ms,
-                        updated_by=user_id,
-                        updated_date=current_time_epoch_ms
-                        # business_details_id=business_details_id # Removed, not in ProductVariantOrm DDL
-                    )
-                    db.add(pv_orm)
-                    db.flush() 
-                    logger.debug(f"{variant_log_prefix}Created ProductVariantOrm ID: {pv_orm.id} for {attr_name}={attr_value_str}")
-
-                    if main_attribute_def and attr_name == main_attribute_def['name']:
-                        main_attribute_product_variant_id = pv_orm.id
-                
-                if main_attribute_product_variant_id is None and main_attribute_def: # main_attribute_def should always exist
-                    raise ItemParserError(f"{variant_log_prefix}Could not determine main_attribute_product_variant_id for MainSkuOrm {main_sku_orm.id}")
-                
-                main_sku_orm.variant_id = main_attribute_product_variant_id
-                logger.debug(f"{variant_log_prefix}Set MainSkuOrm {main_sku_orm.id} variant_id to {main_attribute_product_variant_id}")
-
-                created_main_sku_ids_for_row.append(main_sku_orm.id)
-
-            except ItemParserError as ipe: 
+            except ItemParserError as ipe:
                 logger.error(f"{variant_log_prefix}Parsing error for this variant: {ipe}", exc_info=True)
                 raise 
             except DataLoaderError as dle: 
