@@ -1,315 +1,607 @@
-from typing import Optional, Any
-from pydantic import BaseModel, Field, field_validator, model_validator, validator
-import re
+from typing import List, Dict, Any, Optional # Added Optional
 
-def generate_url_slug(name: Optional[str]) -> Optional[str]:
-    if not name:
-        return None
-    slug = name.lower()
-    slug = re.sub(r'\s+', '-', slug)  # Replace spaces with hyphens
-    slug = re.sub(r'[^\w\-]', '', slug)  # Remove special characters except hyphen and word characters
-    slug = re.sub(r'--+', '-', slug)  # Replace multiple hyphens with a single one
-    slug = slug.strip('-')
-    return slug if slug else None
+class ItemParserError(ValueError):
+    """Custom exception for item parsing errors."""
+    pass
 
-class ProductCsvModel(BaseModel):
-    product_name: str = Field(..., min_length=1)
-    # self_gen_product_id: str = Field(..., min_length=1) # Removed as per new requirements
-    # product_lookup_key: str = Field(..., min_length=1) # Removed: lookup by product_name
-    description: str = Field(..., min_length=1)
-    brand_name: str = Field(..., min_length=1)
-    category_path: str = Field(..., min_length=1)
+def parse_attributes_string(attributes_str: str) -> List[Dict[str, Any]]:
+    """
+    Parses the attributes string from the CSV.
+    Example input: "color|main_attribute:true|size|main_attribute:false"
+    Example output: [{'name': 'color', 'is_main': True}, {'name': 'size', 'is_main': False}]
+    """
+    if not attributes_str:
+        raise ItemParserError("Attributes string cannot be empty.")
 
-    shopping_category_name: Optional[str] = None
+    parts = attributes_str.split('|')
+    if not parts: # Should not happen if attributes_str is not empty, but defensive.
+        raise ItemParserError("Attributes string is malformed (empty after split).")
 
-    price: float = Field(..., gt=0)
-    sale_price: Optional[float] = None
-    cost_price: Optional[float] = None
+    parsed_attributes: List[Dict[str, Any]] = []
+    main_attribute_is_true_found = False # Tracks if a 'main_attribute:true' is found
+    
+    if len(parts) % 2 != 0:
+        raise ItemParserError(
+            f"Attributes string '{attributes_str}' is malformed. "
+            "Expected pairs of attribute name and main_attribute flag. Must have an even number of segments."
+        )
+    if not parts[0].strip(): # Check if the first part (potential attribute name) is empty
+         raise ItemParserError(f"First attribute name cannot be empty in '{attributes_str}'.")
 
-    quantity: int = Field(..., ge=0)
 
-    package_size_length: float = Field(..., gt=0)
-    package_size_width: float = Field(..., gt=0)
-    package_size_height: float = Field(..., gt=0)
-    product_weights: float = Field(..., gt=0)
-
-    size_unit: str # Will be validated and transformed
-    weight_unit: str # Will be validated and transformed
-
-    active: Optional[str] = Field(default="ACTIVE") # Default to ACTIVE
-
-    return_type: str
-    return_fee_type: Optional[str] = None
-    return_fee: Optional[float] = None
-    warehouse_location: Optional[str] = None
-    store_location: Optional[str] = None
-    return_policy: Optional[str] = None
-    size_chart_img: Optional[str] = None # Handled by Optional[str] and strip_whitespace
-
-    url: Optional[str] = None
-    video_url: Optional[str] = None # Handled by Optional[str] and strip_whitespace
-    video_thumbnail_url: Optional[str] = None # Handled by Optional[str] and strip_whitespace
-
-    images: Optional[str] = None # Handled by Optional[str] and strip_whitespace
-    specifications: Optional[str] = None
-
-    is_child_item: Optional[int] = None # Changed to Optional[int], default None
-
-    order_limit: Optional[int] = None # New field
-
-    ean: Optional[str] = None
-    isbn: Optional[str] = None
-    keywords: Optional[str] = None
-    mpn: Optional[str] = None
-    seo_description: Optional[str] = None
-    seo_title: Optional[str] = None
-    upc: Optional[str] = None
-
-    # ----- FIELD-LEVEL CLEANUPS -----
-    @field_validator('active', mode='before')
-    @classmethod
-    def validate_and_normalize_active_status(cls, value: Any) -> Optional[str]:
-        if isinstance(value, str):
-            stripped_value = value.strip()
-            if stripped_value == "":
-                return None # Will allow Pydantic to use the default="ACTIVE"
-            
-            upper_value = stripped_value.upper()
-            if upper_value not in ["ACTIVE", "INACTIVE"]:
-                raise ValueError("Status, if provided and not empty, must be 'ACTIVE' or 'INACTIVE'")
-            return upper_value # Return 'ACTIVE' or 'INACTIVE'
+    for i in range(0, len(parts), 2):
+        attr_name = parts[i].strip()
         
-        if value is None: # If input is None (e.g. field missing in CSV row parsed as None)
-            return None # Will allow Pydantic to use the default="ACTIVE"
+        # Ensure we don't try to access parts[i+1] if it's out of bounds (already checked by len(parts)%2!=0)
+        # but good to be defensive if loop structure were different.
+        flag_str_original = parts[i+1] 
+        flag_str = flag_str_original.strip().lower()
+
+        if not attr_name:
+            raise ItemParserError(f"Attribute name cannot be empty in '{attributes_str}'. Found at pair index {i//2}.")
+
+        is_main_flag_value = None # Represents the boolean value of the main_attribute flag
+        if flag_str == "main_attribute:true":
+            is_main_flag_value = True
+        elif flag_str == "main_attribute:false":
+            is_main_flag_value = False
+        else:
+            raise ItemParserError(
+                f"Invalid main_attribute flag '{flag_str_original}' for attribute '{attr_name}'. "
+                "Expected 'main_attribute:true' or 'main_attribute:false'."
+            )
+
+        if is_main_flag_value: # If this attribute is marked as main_attribute:true
+            if main_attribute_is_true_found:
+                # This is the error: more than one attribute is marked main_attribute:true
+                raise ItemParserError("Multiple main attributes defined. Only one attribute can be 'main_attribute:true'.")
+            main_attribute_is_true_found = True
+        
+        parsed_attributes.append({'name': attr_name, 'is_main': is_main_flag_value})
+
+    if not parsed_attributes: 
+        # This case should ideally be caught by len(parts) % 2 != 0 or if attributes_str was empty.
+        # If attributes_str was, for example, "||||", parts would be non-empty but attr_names would be empty.
+        raise ItemParserError("No attributes could be parsed from the input string.")
+
+    # Validation: "only one attribute can be the main attribute" (meaning main_attribute:true)
+    # The loop already checks for multiple 'main_attribute:true'.
+    # Now, ensure that if there are attributes, at least one is marked 'main_attribute:true',
+    # as per the example "color|main_attribute:true|size|main_attribute:false" which implies one MUST be true.
+    # This also simplifies downstream logic which expects one clear main attribute for pivoting.
+    if parsed_attributes and not main_attribute_is_true_found:
+        raise ItemParserError("No attribute was marked as 'main_attribute:true'. One attribute must be designated as the main attribute.")
+
+    return parsed_attributes
+
+
+def parse_attribute_combination_string(
+    attr_combination_str: str,
+    parsed_attributes: List[Dict[str, Any]] # Output from parse_attributes_string
+) -> List[List[Dict[str, Any]]]:
+    """
+    Parses the attribute_combination string from the CSV 
+    (e.g., "{Black|main_sku:true:White|main_sku:false}|{S:M:L:XL}")
+    using the definitions from parsed_attributes.
+
+    Output: A list of lists, where each inner list contains value details for an attribute.
+            The order matches parsed_attributes.
+            [
+                [{'value': 'Black', 'is_default_sku_value': True}, {'value': 'White', 'is_default_sku_value': False}, ...],
+                [{'value': 'S'}, {'value': 'M'}, ...]
+            ]
+    """
+    if not attr_combination_str:
+        raise ItemParserError("Attribute combination string cannot be empty.")
+    if not parsed_attributes:
+        raise ItemParserError("Parsed attributes list cannot be empty for parsing combinations.")
+
+    # Split by '}|{' to separate attribute groups, then clean up braces from first/last group.
+    stripped_str = attr_combination_str.strip()
+    if not (stripped_str.startswith('{') and stripped_str.endswith('}')):
+        raise ItemParserError(
+            f"Attribute combination string '{attr_combination_str}' must start with '{{' and end with '}}'."
+        )
+
+    # Remove outermost braces for splitting: e.g. "{groupA}|{groupB}" -> "groupA}|{groupB"
+    content_str = stripped_str[1:-1]
+    raw_groups = content_str.split('}|{')
+
+    if not raw_groups: # Should not happen if content_str was not empty
+        raise ItemParserError("No attribute value groups found in combination string after stripping braces.")
             
-        # If it's not a string or None, it's an invalid type for this logic.
-        # Pydantic will likely catch type errors for Optional[str] earlier if not a str or None.
-        # This validator primarily focuses on string processing for "ACTIVE"/"INACTIVE" and empty string.
-        raise ValueError("Invalid type for active status. Must be a string or None/empty.")
+    if len(raw_groups) != len(parsed_attributes):
+        raise ItemParserError(
+            f"Mismatch between number of attribute groups in combination string ({len(raw_groups)}) "
+            f"and number of defined attributes ({len(parsed_attributes)})."
+        )
+
+    result_list: List[List[Dict[str, Any]]] = []
+    
+    for i, group_str in enumerate(raw_groups):
+        attribute_definition = parsed_attributes[i]
+        current_attribute_is_main = attribute_definition['is_main']
+        values_for_this_attribute: List[Dict[str, Any]] = []
+
+        # Values within a group are separated by ':'
+        value_segments = group_str.split(':')
+        
+        if not value_segments or not any(vs.strip() for vs in value_segments):
+            raise ItemParserError(
+                f"Attribute group for '{attribute_definition['name']}' has no values or only empty values defined in segment '{group_str}'."
+            )
+
+        if current_attribute_is_main:
+            # Main attribute group_str is "Val1|main_sku:bool1:Val2|main_sku:bool2..."
+            raw_value_segments = group_str.split(':')
+            # Filter out empty strings that might result from leading/trailing/double colons, and strip valid ones
+            value_segments = [segment.strip() for segment in raw_value_segments if segment.strip()]
+
+            # This happens if group_str was empty, all colons, or colons with only whitespace.
+            # If group_str itself had non-whitespace content, it means it was malformed into all empty segments.
+            original_content_present = group_str.strip()
+            if not original_content_present:
+                raise ItemParserError(
+                    f"Attribute group for '{attribute_definition['name']}' is empty." # Generalized error message
+                )
+            else: # Original group_str had content but it all became empty segments after split & strip
+                raise ItemParserError(
+                    f"Attribute group for '{attribute_definition['name']}' ('{group_str}') " # Generalized
+                    "resulted in no valid segments after processing delimiters. Check for excessive or misplaced colons."
+                )
+
+        # Unified parsing: All attribute value definitions in attribute_combination string
+        # are expected to follow "ValueName|main_sku:boolean_flag" structure,
+        # and these pairs are separated by colons.
+        if len(value_segments) % 2 != 0:
+            raise ItemParserError(
+                f"Malformed value string for attribute '{attribute_definition['name']}': '{group_str}'. " # Generalized
+                f"Processed segments: {value_segments}. Expected an even number of segments for 'ValueName|main_sku' and 'true/false' pairs."
+            )
+        
+        for vp_idx in range(0, len(value_segments), 2):
+            val_name_part_raw = value_segments[vp_idx] # Already stripped by the list comprehension that created value_segments
+            val_flag_part_raw = value_segments[vp_idx+1] # Already stripped
+
+            val_name_part = val_name_part_raw 
+            val_flag_part = val_flag_part_raw.lower() # Convert flag to lowercase for comparison
+            
+            expected_suffix = "|main_sku"
+            # Case-insensitive check for the suffix itself.
+            if not val_name_part.lower().endswith(expected_suffix.lower()):
+                raise ItemParserError(
+                    f"Malformed value name part '{val_name_part_raw}' for attribute "
+                    f"'{attribute_definition['name']}'. Expected 'ValueName|main_sku'."
+                )
+            
+            actual_value = val_name_part[:-len(expected_suffix)].strip() # Strip after slicing suffix
+            if not actual_value: # Ensure actual value is not empty after stripping suffix and spaces
+                 raise ItemParserError(
+                     f"Empty actual value for attribute '{attribute_definition['name']}' from segment '{val_name_part_raw}'." # Generalized
+                 )
+
+            value_detail = {'value': actual_value}
+            if val_flag_part == "true":
+                value_detail['is_default_sku_value'] = True
+            elif val_flag_part == "false":
+                value_detail['is_default_sku_value'] = False
+            else:
+                raise ItemParserError(
+                    f"Invalid boolean flag '{val_flag_part_raw}' for value '{actual_value}' "
+                    f"of attribute '{attribute_definition['name']}'. Expected 'true' or 'false'." # Generalized
+                )
+            values_for_this_attribute.append(value_detail)
+        
+        if not values_for_this_attribute: # Should be caught by earlier `if not value_segments:` if group was truly empty of valid parts.
+             raise ItemParserError(f"No values parsed for attribute '{attribute_definition['name']}' from segment '{group_str}'.")
+        result_list.append(values_for_this_attribute)
+            
+    return result_list
 
 
-    @field_validator('return_type')
-    @classmethod
-    def validate_return_type(cls, value: str) -> str:
-        if value not in ["SALES_RETURN_ALLOWED", "SALES_ARE_FINAL"]:
-            raise ValueError("return_type must be 'SALES_RETURN_ALLOWED' or 'SALES_ARE_FINAL'")
-        return value
+import itertools
 
-    @field_validator('return_fee_type', mode='before')
-    @classmethod
-    def clean_return_fee_type(cls, v):
-        if v is None:
-            return None
-        if isinstance(v, str) and v.strip() == "":
-            return None
-        return v.strip()
+def generate_sku_variants(
+    parsed_attribute_values: List[List[Dict[str, Any]]], # Output from parse_attribute_combination_string
+    parsed_attributes: List[Dict[str, Any]] # Output from parse_attributes_string (to get names)
+) -> List[List[Dict[str, Any]]]:
+    """
+    Generates all unique SKU variant combinations (Cartesian product) from parsed attribute values.
+    
+    Input parsed_attribute_values example: 
+    [
+        [{'value': 'Black', 'is_default_sku_value': True}, {'value': 'White', 'is_default_sku_value': False}], # Color values
+        [{'value': 'S'}, {'value': 'M'}]  # Size values
+    ]
+    Input parsed_attributes example:
+    [{'name': 'color', 'is_main': True}, {'name': 'size', 'is_main': False}]
 
-    @field_validator('return_fee', mode='before')
-    @classmethod
-    def clean_return_fee(cls, v):
-        if v is None:
+    Output: A list of SKU variants. Each variant is a list of attribute details.
+    [
+        [ {'attribute_name': 'color', 'value': 'Black', 'is_default_sku_value': True}, {'attribute_name': 'size', 'value': 'S'} ],
+        [ {'attribute_name': 'color', 'value': 'Black', 'is_default_sku_value': True}, {'attribute_name': 'size', 'value': 'M'} ],
+        [ {'attribute_name': 'color', 'value': 'White', 'is_default_sku_value': False}, {'attribute_name': 'size', 'value': 'S'} ],
+        # ... and so on
+    ]
+    """
+    if not parsed_attribute_values:
+        # If there are no attribute value lists (e.g. product has no attributes defined in CSV)
+        # Return a list containing one "empty" variant if this represents a simple product.
+        # However, given the CSV structure, this function will likely always receive non-empty parsed_attribute_values
+        # if the input CSV row is valid up to this point.
+        # If parsed_attributes is empty, parse_attribute_combination_string should ideally handle it or raise error.
+        # For now, let's assume valid, non-empty inputs as per this function's direct role.
+        # If a product truly has no attributes, it might not go through this item/variant loading path.
+        return [] # Or raise error, depending on how products with no variants are handled.
+
+    if len(parsed_attribute_values) != len(parsed_attributes):
+        # This check ensures consistency between the attribute definitions and the provided values.
+        raise ItemParserError(
+            f"Mismatch in length between parsed_attribute_values ({len(parsed_attribute_values)}) "
+            f"and parsed_attributes ({len(parsed_attributes)})."
+        )
+    
+    # Check if any list of attribute values is empty, which would result in an empty product set.
+    for i, values_list in enumerate(parsed_attribute_values):
+        if not values_list:
+            attr_name = parsed_attributes[i]['name'] if i < len(parsed_attributes) else f"index {i}"
+            raise ItemParserError(
+                f"Attribute '{attr_name}' has an empty list of values. Cannot generate variants."
+            )
+
+    # The list of lists of values (parsed_attribute_values) is what itertools.product needs.
+    all_combinations_tuples = list(itertools.product(*parsed_attribute_values))
+
+    sku_variants_list: List[List[Dict[str, Any]]] = []
+
+    for combo_tuple in all_combinations_tuples:
+        current_variant_details: List[Dict[str, Any]] = []
+        if len(combo_tuple) != len(parsed_attributes):
+            # This should not happen if itertools.product works as expected and inputs are consistent.
+            raise ItemParserError(
+                "Internal error: Combination tuple length does not match attribute count."
+            )
+            
+        for i, value_dict_for_attr in enumerate(combo_tuple):
+            attribute_name = parsed_attributes[i]['name']
+            # Create a new dict to store attribute name along with value details
+            # value_dict_for_attr is like {'value': 'Black', 'is_default_sku_value': True} or {'value': 'S'}
+            attr_detail_for_variant = {'attribute_name': attribute_name, **value_dict_for_attr}
+            current_variant_details.append(attr_detail_for_variant)
+        sku_variants_list.append(current_variant_details)
+        
+    # It's possible all_combinations_tuples is empty if one of the input lists in parsed_attribute_values was empty.
+    # This is now checked before itertools.product.
+    # If sku_variants_list is empty here, it means parsed_attribute_values was empty or contained an empty list,
+    # which should have been caught or handled.
+            
+    return sku_variants_list
+
+
+# --- Per-Combination Data Extractors ---
+
+def get_value_for_combination(
+    data_str: Optional[str],
+    parsed_attributes: List[Dict[str, Any]], # Defines order and names of attributes
+    parsed_attribute_values: List[List[Dict[str, Any]]], # List of value lists for each attribute type
+    current_sku_variant: List[Dict[str, Any]], # The specific variant: [{'attr_name':'color', 'value':'Red'}, ...]
+    expected_type: type,
+    is_optional: bool,
+    field_name_for_error: str,
+    delimiters: List[str] = ['|', ':'] # Delimiter for 1st attribute's groups, 2nd attribute's values, etc.
+) -> Any:
+    """
+    Retrieves and type-converts a specific value for a given SKU variant from a complex delimited string.
+    Handles up to 2 attributes based on the provided delimiters.
+    """
+    if data_str is None or not data_str.strip():
+        if is_optional:
             return None
-        if isinstance(v, str) and v.strip() == "":
-            return None
+        else:
+            # Provide more context if possible, like product name or current SKU variant description
+            variant_desc_parts = [f"{v['attribute_name']}:{v['value']}" for v in current_sku_variant]
+            variant_desc = ", ".join(variant_desc_parts)
+            raise ItemParserError(
+                f"Required field '{field_name_for_error}' is missing or empty in CSV data "
+                f"for SKU variant ({variant_desc})."
+            )
+
+    num_attributes = len(parsed_attributes)
+    if num_attributes == 0:
+        if is_optional: return None # Or handle as single value if data_str is simple
+        raise ItemParserError(f"Cannot get value for '{field_name_for_error}': No attributes defined for variant construction.")
+
+    target_indices = []
+    for i in range(num_attributes):
+        attr_name_from_def = parsed_attributes[i]['name']
+        variant_attr_detail = next((vad for vad in current_sku_variant if vad['attribute_name'] == attr_name_from_def), None)
+        
+        if not variant_attr_detail:
+            # This should not happen if current_sku_variant is correctly generated by generate_sku_variants
+            raise ItemParserError(f"Internal error: Attribute '{attr_name_from_def}' not found in current_sku_variant while parsing '{field_name_for_error}'.")
+        
+        target_value = variant_attr_detail['value']
+        values_for_this_attr_type = parsed_attribute_values[i]
+        
         try:
-            return float(v)
-        except Exception:
-            raise ValueError("Input should be a valid number")
+            idx = next(j for j, val_dict in enumerate(values_for_this_attr_type) if val_dict['value'] == target_value)
+            target_indices.append(idx)
+        except StopIteration:
+            raise ItemParserError(
+                f"Internal error: Value '{target_value}' for attribute '{attr_name_from_def}' "
+                f"not found in its definition list while parsing '{field_name_for_error}'."
+            )
+    
+    raw_value_str = ""
+    try:
+        if num_attributes == 1:
+            # Values are directly in data_str, separated by the *last* conventional delimiter (e.g., ':')
+            # or the first if only one is relevant. Let's assume ':' for single attribute value lists.
+            # This implies the CSV for single-attribute price/qty would be "10:20:30" not "10|20|30"
+            # The CSV example "19.99:19.99:21.99:21.99|..." uses ':' for the *second* attribute.
+            # If there's only one attribute, its values should be split by the first delimiter intended for values, typically ':'.
+            value_delimiter = delimiters[1] if len(delimiters) > 1 else delimiters[0] # Default to ':' or first delimiter
+            
+            values = data_str.split(value_delimiter)
+            if len(values) != len(parsed_attribute_values[0]):
+                 raise ItemParserError(
+                     f"Field '{field_name_for_error}': Expected {len(parsed_attribute_values[0])} values for attribute "
+                     f"'{parsed_attributes[0]['name']}', got {len(values)} from data '{data_str}'."
+                 )
+            raw_value_str = values[target_indices[0]]
 
-    @field_validator('return_fee_type')
-    @classmethod
-    def validate_return_fee_type_format(cls, value: Optional[str], info: Any) -> Optional[str]:
-        if value is not None and value not in ["FIXED", "PERCENTAGE", "FREE"]:
-            raise ValueError("return_fee_type, if provided, must be 'FIXED', 'PERCENTAGE', or 'FREE'")
-        return value
+        elif num_attributes == 2:
+            primary_groups = data_str.split(delimiters[0]) # Split by '|' for 1st attribute groups
+            if len(primary_groups) != len(parsed_attribute_values[0]):
+                 raise ItemParserError(
+                     f"Field '{field_name_for_error}': Expected {len(parsed_attribute_values[0])} primary groups for attribute "
+                     f"'{parsed_attributes[0]['name']}', got {len(primary_groups)} from data '{data_str}'."
+                 )
+            secondary_group_str = primary_groups[target_indices[0]]
 
-    @field_validator('url', mode='before')
-    @classmethod
-    def generate_or_validate_url(cls, value: Optional[str], info: Any) -> Optional[str]:
-        product_name = info.data.get('product_name')
-        if value:
-            if not re.match(r"^[a-z0-9]+(?:-[a-z0-9]+)*$", value):
-                raise ValueError("Provided URL is not a valid slug (lowercase, alphanumeric, hyphens only)")
-            return value
-        return generate_url_slug(product_name)
-
-    @field_validator('is_child_item')
-    @classmethod
-    def validate_is_child_item(cls, value: Optional[int]) -> Optional[int]:
-        if value is not None and value not in [0, 1]:
-            raise ValueError("is_child_item must be 0 or 1 if provided")
-        return value
-
-    @field_validator('order_limit', mode='before')
-    @classmethod
-    def empty_str_as_none_for_order_limit(cls, v: Any) -> Optional[Any]:
-        if isinstance(v, str) and v.strip() == "":
+            secondary_values = secondary_group_str.split(delimiters[1]) # Split by ':' for 2nd attribute values
+            if len(secondary_values) != len(parsed_attribute_values[1]):
+                raise ItemParserError(
+                    f"Field '{field_name_for_error}': Expected {len(parsed_attribute_values[1])} secondary values for attribute "
+                    f"'{parsed_attributes[1]['name']}' in group '{secondary_group_str}', got {len(secondary_values)}."
+                )
+            raw_value_str = secondary_values[target_indices[1]]
+        else:
+            raise NotImplementedError(
+                f"Parsing for {num_attributes} attributes for field '{field_name_for_error}' is not implemented. "
+                "This helper currently supports 1 or 2 attributes."
+            )
+    except IndexError: # Handles if target_indices are out of bounds for the parsed data segments
+        if is_optional:
             return None
-        # Pydantic will then attempt to validate the (potentially non-None) value as int
-        # If v is already None, or a valid int, or a string like "123", it passes through.
-        # If v is a non-empty string that's not a valid int, Pydantic's default int parsing will raise error.
-        return v
+        variant_desc_parts = [f"{v['attribute_name']}:{v['value']}" for v in current_sku_variant]
+        variant_desc = ", ".join(variant_desc_parts)
+        raise ItemParserError(
+            f"Value for SKU variant ({variant_desc}) not found in '{field_name_for_error}' data. "
+            f"Calculated indices {target_indices} might be out of range for data string '{data_str}'."
+        )
 
-    @field_validator('size_unit', mode='before')
-    @classmethod
-    def normalize_and_validate_size_unit(cls, value: Any) -> str:
-        if not isinstance(value, str):
-            raise ValueError("Size unit must be a string.")
+    raw_value_str = raw_value_str.strip()
+    if not raw_value_str:
+        if is_optional:
+            return None
+        if expected_type != str: # For non-string types, an empty string after strip is usually an error if required.
+            variant_desc_parts = [f"{v['attribute_name']}:{v['value']}" for v in current_sku_variant]
+            variant_desc = ", ".join(variant_desc_parts)
+            raise ItemParserError(
+                f"Empty value found for required field '{field_name_for_error}' for SKU variant ({variant_desc})."
+            )
+        # If expected_type is str, an empty string might be a valid value.
+
+    try:
+        if expected_type == str:
+            return raw_value_str
+        if expected_type == int:
+            return int(raw_value_str)
+        if expected_type == float:
+            return float(raw_value_str)
+        # Add bool if 'ACTIVE'/'INACTIVE' or '1'/'0' needs to be bool, though status is usually string.
+        # Example for boolean from 'active'/'inactive' strings:
+        # if expected_type == bool and isinstance(raw_value_str, str):
+        #     if raw_value_str.upper() == 'ACTIVE': return True
+        #     if raw_value_str.upper() == 'INACTIVE': return False
+        #     raise ValueError("Invalid boolean string")
+
+    except ValueError as e:
+        variant_desc_parts = [f"{v['attribute_name']}:{v['value']}" for v in current_sku_variant]
+        variant_desc = ", ".join(variant_desc_parts)
+        raise ItemParserError(
+            f"Cannot convert value '{raw_value_str}' to type '{expected_type.__name__}' "
+            f"for field '{field_name_for_error}' for SKU variant ({variant_desc}). Original error: {e}"
+        )
+    
+    # Should not be reached if expected_type is handled above
+    raise ItemParserError(f"Unhandled expected_type '{expected_type.__name__}' in get_value_for_combination.")
+
+# Now, the specific wrapper functions:
+
+def get_price_for_combination(
+    price_data_str: str, 
+    parsed_attributes: List[Dict[str, Any]], 
+    parsed_attribute_values: List[List[Dict[str, Any]]], 
+    current_sku_variant: List[Dict[str, Any]]
+) -> float:
+    # Price is considered required for each variant.
+    value = get_value_for_combination(
+        price_data_str, parsed_attributes, parsed_attribute_values, 
+        current_sku_variant, float, is_optional=False, field_name_for_error="price"
+    )
+    if not isinstance(value, float): # Should be caught by get_value_for_combination's type check or error
+        raise ItemParserError(f"Price for variant was not a float: {value}") # Defensive
+    return value
+
+def get_quantity_for_combination(
+    quantity_data_str: str, 
+    parsed_attributes: List[Dict[str, Any]], 
+    parsed_attribute_values: List[List[Dict[str, Any]]], 
+    current_sku_variant: List[Dict[str, Any]]
+) -> int:
+    # Quantity is considered required.
+    value = get_value_for_combination(
+        quantity_data_str, parsed_attributes, parsed_attribute_values, 
+        current_sku_variant, int, is_optional=False, field_name_for_error="quantity"
+    )
+    if not isinstance(value, int):
+        raise ItemParserError(f"Quantity for variant was not an int: {value}")
+    return value
+
+def get_status_for_combination(
+    status_data_str: str, 
+    parsed_attributes: List[Dict[str, Any]], 
+    parsed_attribute_values: List[List[Dict[str, Any]]], 
+    current_sku_variant: List[Dict[str, Any]]
+) -> str:
+    # Status is string 'ACTIVE' or 'INACTIVE'. Default is 'ACTIVE'.
+    # The CSV format for status is "ACTIVE|ACTIVE|ACTIVE|ACTIVE" (one per main attribute value, not per SKU)
+    # This means all SKUs under a main attribute value (e.g. all "Black" SKUs) share the same status.
+    # So, we only need the index of the main attribute's value.
+    
+    main_attr_index_in_parsed_attributes = -1
+    main_attr_value_for_current_sku = ""
+
+    for i, attr_def in enumerate(parsed_attributes):
+        if attr_def['is_main']:
+            main_attr_index_in_parsed_attributes = i
+            # Find the value of this main attribute in the current_sku_variant
+            sku_attr_detail = next(vad for vad in current_sku_variant if vad['attribute_name'] == attr_def['name'])
+            main_attr_value_for_current_sku = sku_attr_detail['value']
+            break
+    
+    if main_attr_index_in_parsed_attributes == -1:
+        raise ItemParserError("Internal: Could not find main attribute definition for status parsing.")
+
+    # Find the index of this main_attr_value_for_current_sku within its own list of possible values
+    main_attr_all_possible_values = parsed_attribute_values[main_attr_index_in_parsed_attributes]
+    try:
+        status_group_index = next(
+            j for j, val_dict in enumerate(main_attr_all_possible_values) 
+            if val_dict['value'] == main_attr_value_for_current_sku
+        )
+    except StopIteration:
+         raise ItemParserError(f"Internal: Could not find main attribute value '{main_attr_value_for_current_sku}' in its definition for status parsing.")
+
+    status_groups = status_data_str.split('|')
+    if status_group_index >= len(status_groups):
+        # Not enough status entries for all main attribute values. Default to ACTIVE.
+        return "ACTIVE" 
+    
+    status_val = status_groups[status_group_index].strip().upper()
+    if not status_val: # Empty status for this group, default to ACTIVE
+        return "ACTIVE"
+    if status_val not in ["ACTIVE", "INACTIVE"]:
+        raise ItemParserError(f"Invalid status value '{status_groups[status_group_index]}' found for variant. Expected 'ACTIVE' or 'INACTIVE'.")
+    return status_val
+
+
+def get_optional_typed_value_for_combination(
+    data_str: Optional[str],
+    parsed_attributes: List[Dict[str, Any]], 
+    parsed_attribute_values: List[List[Dict[str, Any]]], 
+    current_sku_variant: List[Dict[str, Any]],
+    expected_type: type,
+    field_name: str,
+    # For optional fields like order_limit, the CSV format is "10|10|10|10" (one per main attr value)
+    # similar to status.
+    is_per_main_attribute_value: bool = False # If true, data_str is indexed by main_attr_value_index
+) -> Any:
+    if data_str is None or not data_str.strip():
+        return None
+
+    if is_per_main_attribute_value:
+        main_attr_index_in_parsed_attributes = -1
+        main_attr_value_for_current_sku = ""
+        for i, attr_def in enumerate(parsed_attributes):
+            if attr_def['is_main']:
+                main_attr_index_in_parsed_attributes = i
+                sku_attr_detail = next(vad for vad in current_sku_variant if vad['attribute_name'] == attr_def['name'])
+                main_attr_value_for_current_sku = sku_attr_detail['value']
+                break
+        if main_attr_index_in_parsed_attributes == -1: raise ItemParserError("No main attr for optional field.")
         
-        v_lower = value.strip().lower()
-        mapping = {
-            "m": "METERS", "meters": "METERS",
-            "cm": "CENTIMETERS", "centimeters": "CENTIMETERS",
-            "ft": "FEET", "foot": "FEET", "foots": "FEET", # foots from original DDL, foot for common use
-            "in": "INCHES", "inches": "INCHES",
-            "mm": "MILLIMETERS", "millimeters": "MILLIMETERS",
-        }
-        # Target enums from problem: {METERS, CENTIMETERS,FOOTS,INCHES,MILLIMETERS}
-        # Adjusted mapping to use FOOTS as per problem description, assuming FEET was my interpretation.
-        # Re-adjusting to use FOOTS as specified in the original prompt, even if FEET is more standard.
-        final_mapping = {
-            "m": "METERS", "meters": "METERS",
-            "cm": "CENTIMETERS", "centimeters": "CENTIMETERS",
-            "ft": "FOOTS", "foot": "FOOTS", "foots": "FOOTS", # Using FOOTS
-            "in": "INCHES", "inches": "INCHES",
-            "mm": "MILLIMETERS", "millimeters": "MILLIMETERS",
-        }
-        # Validating against the specific enum set provided: {METERS, CENTIMETERS,FOOTS,INCHES,MILLIMETERS}
-        valid_enums = {"METERS", "CENTIMETERS", "FOOTS", "INCHES", "MILLIMETERS"}
+        main_attr_all_possible_values = parsed_attribute_values[main_attr_index_in_parsed_attributes]
+        try:
+            target_idx = next(
+                j for j, val_dict in enumerate(main_attr_all_possible_values) 
+                if val_dict['value'] == main_attr_value_for_current_sku
+            )
+        except StopIteration: raise ItemParserError(f"Main attr value {main_attr_value_for_current_sku} not found for {field_name}")
 
-        if v_lower in final_mapping:
-            result = final_mapping[v_lower]
-            if result in valid_enums:
-                return result
-            else: # Should not happen if final_mapping is correct
-                raise ValueError(f"Internal mapping error for size unit '{value}'. Mapped to '{result}' which is not in {valid_enums}")
+        value_groups = data_str.split('|')
+        if target_idx >= len(value_groups): return None # Not enough entries, so optional value is None
+        
+        raw_value_str = value_groups[target_idx].strip()
+        if not raw_value_str: return None
 
-        # If it's already one of the target enum values (e.g., "CENTIMETERS")
-        if v_lower.upper() in valid_enums:
-            return v_lower.upper()
-            
-        raise ValueError(f"Invalid size_unit: '{value}'. Must be one of {list(final_mapping.keys())} or {list(valid_enums)}.")
+        try:
+            if expected_type == str: return raw_value_str
+            if expected_type == int: return int(raw_value_str)
+            if expected_type == float: return float(raw_value_str)
+        except ValueError:
+            # Log this or handle as warning, return None as it's optional
+            return None 
+        return None # Fallback for unhandled type
+    else: # Value is per SKU combination
+        return get_value_for_combination(
+            data_str, parsed_attributes, parsed_attribute_values,
+            current_sku_variant, expected_type, is_optional=True, field_name_for_error=field_name
+        )
 
-    @field_validator('weight_unit', mode='before')
-    @classmethod
-    def normalize_and_validate_weight_unit(cls, value: Any) -> str:
-        if not isinstance(value, str):
-            raise ValueError("Weight unit must be a string.")
+# Wrappers for optional fields that are per main attribute value
+def get_order_limit_for_combination( # Corrected: order_limit is per main_attribute_value
+    data_str: Optional[str], parsed_attributes: List[Dict[str, Any]], 
+    parsed_attribute_values: List[List[Dict[str, Any]]], current_sku_variant: List[Dict[str, Any]]
+) -> Optional[int]:
+    return get_optional_typed_value_for_combination(
+        data_str, parsed_attributes, parsed_attribute_values, current_sku_variant,
+        int, "order_limit", is_per_main_attribute_value=True
+    )
 
-        v_lower = value.strip().lower()
-        # CSV enum: {KILOGRAMS,GRAMS,POUNDS,OUNCES,MILLIGRAM,TON,METRIC_TON}
-        # My interpretation for 't': METRIC_TON.
-        # For 'tonne': METRIC_TON
-        mapping = {
-            "kg": "KILOGRAMS", "kilograms": "KILOGRAMS",
-            "g": "GRAMS", "grams": "GRAMS",
-            "lb": "POUNDS", "pounds": "POUNDS",
-            "oz": "OUNCES", "ounces": "OUNCES",
-            "mg": "MILLIGRAMS", "milligrams": "MILLIGRAMS", # Original prompt uses MILLIGRAM
-            "t": "METRIC_TON", "ton": "METRIC_TON", # 'ton' could also map to TON if distinct. Assuming 't' and 'ton' map to METRIC_TON as per common interpretation for data loading.
-            "tonne": "METRIC_TON", "metric_ton": "METRIC_TON"
-        }
-        # Target enums from problem: {KILOGRAMS,GRAMS,POUNDS,OUNCES,MILLIGRAM,TON,METRIC_TON}
-        # Correcting MILLIGRAMS to MILLIGRAM
-        final_mapping = {
-            "kg": "KILOGRAMS", "kilograms": "KILOGRAMS",
-            "g": "GRAMS", "grams": "GRAMS",
-            "lb": "POUNDS", "pounds": "POUNDS",
-            "oz": "OUNCES", "ounces": "OUNCES",
-            "mg": "MILLIGRAM", "milligram": "MILLIGRAM", # Corrected to MILLIGRAM
-            "t": "METRIC_TON", "ton": "METRIC_TON", # Assuming 'ton' from CSV also means METRIC_TON here. If 'TON' is a distinct short ton, this needs adjustment.
-            "tonne": "METRIC_TON", "metric_ton": "METRIC_TON"
-        }
-        valid_enums = {"KILOGRAMS", "GRAMS", "POUNDS", "OUNCES", "MILLIGRAM", "TON", "METRIC_TON"}
+def get_package_size_length_for_combination( # Corrected: package fields are per main_attribute_value
+    data_str: Optional[str], parsed_attributes: List[Dict[str, Any]], 
+    parsed_attribute_values: List[List[Dict[str, Any]]], current_sku_variant: List[Dict[str, Any]]
+) -> Optional[float]:
+    return get_optional_typed_value_for_combination(
+        data_str, parsed_attributes, parsed_attribute_values, current_sku_variant,
+        float, "package_size_length", is_per_main_attribute_value=True
+    )
 
-        if v_lower in final_mapping:
-            result = final_mapping[v_lower]
-            # Special case: if input was 'ton' and we need to distinguish between 'TON' and 'METRIC_TON'
-            # For now, this logic maps 'ton' to 'METRIC_TON'. If 'ton' should map to 'TON' enum, it needs explicit handling.
-            # The problem states "t (for metric ton/tonne) -> METRIC_TON". It doesn't explicitly state what "TON" (the enum) maps from.
-            # Given "TON" is in the enum list, if "ton" (lowercase) from CSV is meant to be "TON" (uppercase enum), the mapping should be:
-            # "ton": "TON"
-            # Let's adjust: if 't' or 'tonne' means METRIC_TON, then 'ton' (if it appears) should map to 'TON'.
-            # This makes the mapping more specific.
-            
-            # Re-evaluating based on "weight_unit in the csv enum is {KILOGRAMS,GRAMS,POUNDS,OUNCES,MILLIGRAM,TON,METRIC_TON}
-            # so if any abbriviation provided here, one of the enums will be added ( KG = KILOGRAMS )"
-            # This implies the keys in `final_mapping` are abbreviations, and values are the target enums.
-            # 't' -> 'METRIC_TON' is clear.
-            # What about 'TON' enum? If CSV provides 'ton', does it mean 'TON' or 'METRIC_TON'?
-            # The user clarified "t (for metric ton/tonne) -> METRIC_TON". And "Ton: t (for metric ton, commonly referred to as "tonne")"
-            # "Metric Ton: t or tonne"
-            # This is slightly circular. I will assume 't' and 'tonne' map to 'METRIC_TON'.
-            # If the CSV contains literally "TON" (uppercase) or "ton" (lowercase), it should map to the "TON" enum value.
+def get_package_size_width_for_combination(
+    data_str: Optional[str], parsed_attributes: List[Dict[str, Any]], 
+    parsed_attribute_values: List[List[Dict[str, Any]]], current_sku_variant: List[Dict[str, Any]]
+) -> Optional[float]:
+    return get_optional_typed_value_for_combination(
+        data_str, parsed_attributes, parsed_attribute_values, current_sku_variant,
+        float, "package_size_width", is_per_main_attribute_value=True
+    )
 
-            if v_lower == "ton": # Explicitly map "ton" (lowercase) to "TON" (enum)
-                result = "TON"
+def get_package_size_height_for_combination(
+    data_str: Optional[str], parsed_attributes: List[Dict[str, Any]], 
+    parsed_attribute_values: List[List[Dict[str, Any]]], current_sku_variant: List[Dict[str, Any]]
+) -> Optional[float]:
+    return get_optional_typed_value_for_combination(
+        data_str, parsed_attributes, parsed_attribute_values, current_sku_variant,
+        float, "package_size_height", is_per_main_attribute_value=True
+    )
 
-            if result in valid_enums:
-                return result
-            else: # Should not happen
-                 raise ValueError(f"Internal mapping error for weight unit '{value}'. Mapped to '{result}' which is not in {valid_enums}")
+def get_package_weight_for_combination( # Corrected: package_weight is per main_attribute_value
+    data_str: Optional[str], parsed_attributes: List[Dict[str, Any]], 
+    parsed_attribute_values: List[List[Dict[str, Any]]], current_sku_variant: List[Dict[str, Any]]
+) -> Optional[float]:
+    return get_optional_typed_value_for_combination(
+        data_str, parsed_attributes, parsed_attribute_values, current_sku_variant,
+        float, "package_weight", is_per_main_attribute_value=True
+    )
 
-        if v_lower.upper() in valid_enums: # If input is already "KILOGRAMS", "TON", etc.
-            return v_lower.upper()
+# Note: Discount price was not in the CSV sample for items, but is in SKU DDL.
+# If it were added to CSV with per-combination values, it would be like price/quantity.
+# If it's optional:
+# def get_discount_price_for_combination(...) -> Optional[float]:
+#     return get_value_for_combination(..., float, is_optional=True, ...)
 
-        raise ValueError(f"Invalid weight_unit: '{value}'. Must be one of {list(final_mapping.keys())} or {list(valid_enums)}.")
-
-
-    @field_validator('sale_price', 'cost_price', 'return_fee')
-    @classmethod
-    def validate_optional_positive_floats(cls, value: Optional[float]) -> Optional[float]:
-        if value is not None and value < 0:
-            raise ValueError("Price/fee fields, if provided, must be non-negative.")
-        return value
-
-    # ----- CROSS-FIELD LOGIC -----
-    @model_validator(mode='after')
-    def check_model_logic(self) -> 'ProductCsvModel':
-        if self.return_type == "SALES_ARE_FINAL":
-            if self.return_fee_type or self.return_fee:
-                raise ValueError("return_fee_type and return_fee must be null or empty when return_type is 'SALES_ARE_FINAL'")
-
-        elif self.return_type == "SALES_RETURN_ALLOWED":
-            if not self.return_fee_type:
-                raise ValueError("return_fee_type is required when return_type is 'SALES_RETURN_ALLOWED'")
-            if self.return_fee_type not in ["FIXED", "PERCENTAGE", "FREE"]:
-                raise ValueError("return_fee_type must be 'FIXED', 'PERCENTAGE', or 'FREE'")
-            if self.return_fee_type == "FREE":
-                if self.return_fee not in (None, 0, 0.0):
-                    raise ValueError("return_fee must be 0 or null/empty if return_fee_type is 'FREE'")
-                object.__setattr__(self, 'return_fee', 0.0)
-            elif self.return_fee_type in ["FIXED", "PERCENTAGE"]:
-                if self.return_fee is None or self.return_fee < 0:
-                    raise ValueError(f"return_fee must be provided and non-negative if return_fee_type is '{self.return_fee_type}'")
-
-        if self.images:
-            parts = self.images.split('|')
-            if len(parts) % 2 != 0:
-                raise ValueError("Images string must have pairs of url and main_image flag.")
-            for i in range(0, len(parts), 2):
-                # Removed absolute URL check:
-                # if not parts[i].startswith(('http://', 'https://')):
-                #     raise ValueError(f"Image URL '{parts[i]}' must be a valid URL.")
-                if parts[i+1] not in ["main_image:true", "main_image:false"]:
-                    raise ValueError(f"Image flag '{parts[i+1]}' must be 'main_image:true' or 'main_image:false'.")
-
-        if self.specifications:
-            pairs = self.specifications.split('|')
-            for pair in pairs:
-                if ':' not in pair or len(pair.split(':', 1)) != 2 or not pair.split(':', 1)[0] or not pair.split(':', 1)[1]:
-                    raise ValueError(f"Specification entry '{pair}' must be in 'Name:Value' format and both Name and Value must be non-empty.")
-
-        if self.video_url and not self.video_thumbnail_url:
-            raise ValueError("If 'video_url' is provided, 'video_thumbnail_url' must also be provided.")
-
-        return self
-
-    @validator('category_path')
-    def clean_category_path(cls, v):
-        return '/'.join(part.strip() for part in v.strip().split('/') if part.strip())
-
-    class Config:
-        str_strip_whitespace = True  # Changed from anystr_strip_whitespace
-        validate_assignment = True
-        extra = "forbid"
+# Image parsing is handled separately as it's one string for the whole product row,
+# not per combination in the CSV.
