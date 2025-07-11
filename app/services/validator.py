@@ -5,13 +5,14 @@ from collections import defaultdict
 from app.models.schemas import (
     BrandCsvModel, AttributeCsvModel, ReturnPolicyCsvModel,
     ProductItemModel, ProductPriceModel, MetaTagModel,
-    ProductCsvModel, ErrorDetailModel, ErrorType,
+    # ProductCsvModel, # Removed from here, will import directly
+    ErrorDetailModel, ErrorType,
     CategoryCsvModel
 )
+from app.dataload.models.product_csv import ProductCsvModel # Import the canonical ProductCsvModel
 from app.dataload.models.item_csv import ItemCsvModel # Added import for new model
 from typing import List, Dict, Optional
 from app.utils.redis_utils import get_from_id_map
-# from app.dataload.models.product_csv import ProductCsvModel # Already imported via schemas or not needed directly here
 
 MODEL_MAP = {
     "brands":           BrandCsvModel,

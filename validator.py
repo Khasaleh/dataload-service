@@ -3,8 +3,9 @@ from app.utils.redis_utils import get_from_id_map
 from collections import defaultdict
 from app.models.schemas import (
     BrandCsvModel, AttributeCsvModel, ReturnPolicyCsvModel, ProductItemModel, 
-    ProductPriceModel, MetaTagModel, ProductCsvModel
+    ProductPriceModel, MetaTagModel # ProductCsvModel removed from here
 )
+from app.dataload.models.product_csv import ProductCsvModel # Import the canonical ProductCsvModel
 from app.models.schemas import ErrorDetailModel, ErrorType
 from typing import List, Dict, Tuple
 
