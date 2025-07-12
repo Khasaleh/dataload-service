@@ -2,8 +2,8 @@ import logging
 from typing import List, Dict, Any, Optional,Tuple
 
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError, NoResultFound, DataError, MultipleResultsFound
-from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError, NoResultFound, DataError
+from sqlalchemy import func # Added for func.lower
 
 
 # ORM Models
@@ -14,12 +14,14 @@ from app.db.models import (
     ProductVariantOrm,
     ProductImageOrm,
     AttributeOrm,
-    AttributeValueOrm
+    AttributeValueOrm,
+    MainSkuOrm # Ensure MainSkuOrm is imported if not already
 )
 # Pydantic CSV Model
 from app.dataload.models.item_csv import ItemCsvModel
 
 # Parsing Utilities
+# Need to import sql_func for sqlalchemy.sql.func
 from sqlalchemy import and_, func as sql_func
 
 from app.dataload.parsers.item_parser import (
@@ -34,7 +36,7 @@ from app.dataload.parsers.item_parser import (
     get_package_size_width_for_combination,
     get_package_size_height_for_combination,
     get_package_weight_for_combination,
-    ItemParserError
+    ItemParserError # For handling parsing errors
 )
 # Product Image parsing (similar to product_loader)
 from app.dataload.product_loader import parse_images as parse_product_level_images
@@ -42,38 +44,52 @@ from app.dataload.product_loader import parse_images as parse_product_level_imag
 
 # General Utilities / Exceptions
 from app.exceptions import DataLoaderError
-from app.models.schemas import ErrorType
+from app.models.schemas import ErrorType # Assuming ErrorType is used in DataLoaderError
 try:
     from app.utils.date_utils import now_epoch_ms
-except ImportError:
+except ImportError: # Fallback if not available, for basic compilation
     import time
     def now_epoch_ms() -> int:
         return int(time.time() * 1000)
 
-from app.utils import barcode_helper
+from app.utils import barcode_helper # For barcode generation
 
 logger = logging.getLogger(__name__)
 
+# Placeholder for functions to be implemented:
+# def _get_or_create_attribute_value_ids(...) # Renamed to _lookup_...
+# def load_item_record_to_db(...)
+# def load_items_to_db(...)
+# pass # Removed pass
+
 def _lookup_attribute_ids(db: Session, business_details_id: int, attribute_names: List[str]) -> Dict[str, int]:
+    """Helper to look up attribute IDs by name for a business."""
     attr_id_map: Dict[str, int] = {}
     missing_attrs = []
+    # Ensure unique names for lookup to avoid redundant DB calls, though list(set()) already does this.
     for name in sorted(list(set(attribute_names))):
         try:
+            # Use func.lower for case-insensitive comparison on name
             attr_orm_result = db.query(AttributeOrm.id).filter(
                 func.lower(AttributeOrm.name) == func.lower(name), 
                 AttributeOrm.business_details_id == business_details_id
-            ).first()
+            ).first() # Changed to .first()
 
             if attr_orm_result:
                 attr_id_map[name] = attr_orm_result.id
-            else:
+            else: # attr_orm_result is None, meaning not found
                 missing_attrs.append(name)
-        except Exception as e:
+        except Exception as e: # Catch other potential DB errors or unexpected issues
             logger.error(f"Error looking up attribute '{name}' for business {business_details_id}: {e}", exc_info=True)
+            # Ensure name is added to missing_attrs if an error occurred, to signify lookup failure.
+            # Avoid adding duplicates if already added by a NoResultFound-like path (though .first() doesn't raise NoResultFound for empty results)
             if name not in missing_attrs and f"{name} (DB error)" not in missing_attrs:
                  missing_attrs.append(f"{name} (DB error)")
             
     if missing_attrs:
+        # Consolidate error reporting for missing attributes or DB errors during lookup
+        # The "(DB error)" suffix helps distinguish.
+        # If any item contains "(DB error)", it implies a more critical issue than just "not found".
         is_critical_error = any("(DB error)" in ma for ma in missing_attrs)
         error_message_intro = "Critical error during attribute lookup or some attributes not found" if is_critical_error else "Attributes not found"
         
@@ -83,6 +99,13 @@ def _lookup_attribute_ids(db: Session, business_details_id: int, attribute_names
                 field_name="attributes (derived names)",
                 offending_value=str(missing_attrs)
             )
+        # This second raise was unreachable and has been removed in subsequent versions.
+        # raise DataLoaderError(
+        #     message=f"Attributes not found for business {business_details_id}: {', '.join(missing_attrs)}",
+        #     error_type=ErrorType.LOOKUP,
+        #     field_name="attributes (derived names)",
+        #     offending_value=str(missing_attrs)
+        # )
     return attr_id_map
 
 def _lookup_attribute_value_ids(
@@ -90,13 +113,14 @@ def _lookup_attribute_value_ids(
     attr_id_map: Dict[str, int], 
     attr_value_pairs_to_lookup: List[tuple[str, str]]
 ) -> Dict[tuple[str, str], int]:
+    """Helper to look up attribute value IDs."""
     attr_val_id_map: Dict[tuple[str, str], int] = {}
     missing_vals = []
     unique_pairs = sorted(list(set(attr_value_pairs_to_lookup)))
 
     for attr_name, val_name in unique_pairs:
         attr_id = attr_id_map.get(attr_name)
-        if attr_id is None:
+        if attr_id is None: 
             logger.error(f"Internal inconsistency: Attribute ID for '{attr_name}' not present in attr_id_map during value lookup for '{val_name}'.")
             missing_vals.append(f"{attr_name} -> {val_name} (Attribute '{attr_name}' missing its ID)")
             continue 
@@ -108,7 +132,7 @@ def _lookup_attribute_value_ids(
             attr_val_orm_result = db.query(AttributeValueOrm.id, AttributeValueOrm.name).filter(
                 AttributeValueOrm.attribute_id == attr_id,
                 func.lower(AttributeValueOrm.name) == func.lower(val_name)
-            ).first()
+            ).first() 
             
             if attr_val_orm_result:
                 attr_val_id_map[(attr_name, val_name)] = attr_val_orm_result.id
@@ -125,11 +149,11 @@ def _lookup_attribute_value_ids(
             missing_vals.append(f"{attr_name} -> {val_name} (DB error during lookup)")
 
     if missing_vals:
-        is_critical_error = any("(DB error during lookup)" in mv or "(Attribute" in mv for mv in missing_vals)
+        is_critical_error = any("(DB error during lookup)" in mv or "(Attribute" in mv for mv in missing_vals) 
         error_message_intro = "Critical error during attribute value lookup or some attribute values not found" if is_critical_error else "Attribute values not found"
         
         raise DataLoaderError(
-            message=f"{error_message_intro}: {', '.join(sorted(list(set(missing_vals))))}",
+            message=f"{error_message_intro}: {', '.join(sorted(list(set(missing_vals))))}", 
             error_type=ErrorType.LOOKUP,
             field_name="attribute_combination (derived values)",
             offending_value=str(sorted(list(set(missing_vals))))
@@ -185,7 +209,7 @@ def find_existing_sku_by_attributes(
             return existing_sku_orm, main_sku_orm
         else:
             logger.error(f"{log_prefix} Data integrity issue: SkuOrm ID {existing_sku_orm.id} found, but its MainSkuOrm (ID: {existing_sku_orm.main_sku_id}) is missing for product {product_id}.")
-            return None
+            return None 
     
     logger.debug(f"{log_prefix} No existing SKU found for product_id {product_id} with attributes {target_attribute_value_ids}.")
     return None
@@ -290,7 +314,7 @@ def load_item_record_to_db(
                     item_csv_row.package_weight, parsed_attributes, parsed_attribute_values_by_type, current_sku_variant
                 )
                 
-                discount_price = None # Placeholder for future use
+                discount_price = None
 
                 logger.debug(f"{variant_log_prefix}Data extracted: Price={price}, Qty={quantity}, Active={active_db_val}")
 
@@ -347,13 +371,18 @@ def load_item_record_to_db(
                     
                     logger.debug(f"{variant_log_prefix}Updated MainSkuOrm ID: {main_sku_orm_instance.id} and SkuOrm ID: {sku_orm_instance.id}")
                     
-                else:
+                    if main_sku_orm_instance.is_default and first_main_sku_orm_id_for_images is None:
+                         first_main_sku_orm_id_for_images = main_sku_orm_instance.id
+
+                    processed_main_sku_ids_for_row.append(main_sku_orm_instance.id)
+                else: 
                     logger.info(f"{variant_log_prefix}SKU with attributes {current_target_attr_value_ids} (Product ID: {product_id}) not found. Creating new SKU.")
 
+                    # Create MainSkuOrm
                     main_sku_orm_instance = MainSkuOrm(
                         product_id=product_id,
                         price=price,
-                        discount_price=discount_price,
+                        discount_price=discount_price, # Assuming discount_price is available
                         quantity=quantity,
                         active=active_db_val,
                         is_default=is_default_sku,
@@ -365,23 +394,47 @@ def load_item_record_to_db(
                         created_by=user_id,
                         created_date=current_time_epoch_ms,
                         updated_by=user_id,
-                        updated_date=current_time_epoch_ms
+                        updated_date=current_time_epoch_ms,
+                        # Placeholders - will be updated after ID generation
+                        barcode="PENDING_BARCODE_MAIN", 
+                        part_number="PENDING_PN_MAIN",
+                        mobile_barcode=None 
                     )
                     db.add(main_sku_orm_instance)
-                    db.flush()
+                    db.flush() # Flush to get main_sku_orm_instance.id
 
-                    main_sku_orm_instance.mobile_barcode = barcode_helper.generate_mobile_barcode(main_sku_id=main_sku_orm_instance.id, product_id=product_id) # type: ignore
-                    main_sku_orm_instance.barcode = barcode_helper.generate_barcode_from_mobile_barcode(main_sku_orm_instance.mobile_barcode) # type: ignore
-                    main_sku_orm_instance.part_number = barcode_helper.generate_part_number(main_sku_orm_instance.id) # type: ignore
-                    logger.debug(f"{variant_log_prefix}Generated MainSKU ID: {main_sku_orm_instance.id}, Barcode: {main_sku_orm_instance.barcode}")
+                    # Generate ID-dependent fields for MainSkuOrm
+                    main_sku_orm_instance.mobile_barcode = f"S{main_sku_orm_instance.id}P{product_id}"
+                    try:
+                        main_sku_orm_instance.barcode = barcode_helper.generate_barcode(main_sku_orm_instance.mobile_barcode)
+                    except Exception as bc_exc: # Catch potential errors from barcode generation
+                        logger.error(f"{variant_log_prefix}Error generating barcode for MainSKU {main_sku_orm_instance.id}: {bc_exc}")
+                        main_sku_orm_instance.barcode = main_sku_orm_instance.mobile_barcode # Fallback
+                    main_sku_orm_instance.part_number = str(main_sku_orm_instance.id).zfill(8) # Example padding
+
+                    logger.debug(f"{variant_log_prefix}Created MainSkuOrm with temp ID, generated mobile_barcode: {main_sku_orm_instance.mobile_barcode}")
+
+                    # Create SkuOrm
+                    # Construct a variant description string for name/description
+                    variant_description_parts = []
+                    for attr_detail in current_sku_variant:
+                        variant_description_parts.append(f"{attr_detail['attribute_name']}: {attr_detail['value']}")
+                    variant_description_string = ", ".join(variant_description_parts)
+
+                    sku_orm_instance_name = f"{item_csv_row.product_name} - {variant_description_string}"
+                    # Ensure name is not too long if there's a DB constraint (e.g., SkuOrm.name has Varchar(256))
+                    max_sku_name_len = 250 # Assuming a buffer for SkuOrm.name length
+                    if len(sku_orm_instance_name) > max_sku_name_len:
+                        sku_orm_instance_name = sku_orm_instance_name[:max_sku_name_len] + "..."
+
 
                     sku_orm_instance = SkuOrm(
-                        product_id=product_id,
                         main_sku_id=main_sku_orm_instance.id,
-                        name=item_csv_row.product_name,
-                        description=", ".join(f"{ad['attribute_name']}:{ad['value']}" for ad in current_sku_variant),
+                        product_id=product_id,
+                        name=sku_orm_instance_name,
+                        description=f"Variant of {item_csv_row.product_name} with attributes: {variant_description_string}",
                         price=price,
-                        discount_price=discount_price,
+                        discount_price=discount_price, # Assuming discount_price is available
                         quantity=quantity,
                         active=active_db_val,
                         order_limit=order_limit,
@@ -392,55 +445,71 @@ def load_item_record_to_db(
                         created_by=user_id,
                         created_date=current_time_epoch_ms,
                         updated_by=user_id,
-                        updated_date=current_time_epoch_ms
+                        updated_date=current_time_epoch_ms,
+                        # Placeholders - will be updated after ID generation
+                        barcode="PENDING_BARCODE_SKU",
+                        part_number="PENDING_PN_SKU",
+                        mobile_barcode=None
                     )
                     db.add(sku_orm_instance)
-                    db.flush()
+                    db.flush() # Flush to get sku_orm_instance.id
 
-                    sku_orm_instance.mobile_barcode = barcode_helper.generate_mobile_barcode(sku_id=sku_orm_instance.id, product_id=product_id) # type: ignore
-                    sku_orm_instance.barcode = barcode_helper.generate_barcode_from_mobile_barcode(sku_orm_instance.mobile_barcode) # type: ignore
-                    sku_orm_instance.part_number = barcode_helper.generate_part_number(sku_orm_instance.id) # type: ignore
-                    logger.debug(f"{variant_log_prefix}Created new SkuOrm ID: {sku_orm_instance.id}, Barcode: {sku_orm_instance.barcode}")
+                    # Generate ID-dependent fields for SkuOrm
+                    sku_orm_instance.mobile_barcode = f"S{sku_orm_instance.id}P{product_id}"
+                    try:
+                        sku_orm_instance.barcode = barcode_helper.generate_barcode(sku_orm_instance.mobile_barcode)
+                    except Exception as bc_exc:
+                        logger.error(f"{variant_log_prefix}Error generating barcode for SKU {sku_orm_instance.id}: {bc_exc}")
+                        sku_orm_instance.barcode = sku_orm_instance.mobile_barcode # Fallback
+                    sku_orm_instance.part_number = str(sku_orm_instance.id).zfill(8) # Example padding
+                    
+                    logger.debug(f"{variant_log_prefix}Created SkuOrm ID: {sku_orm_instance.id}, generated mobile_barcode: {sku_orm_instance.mobile_barcode}")
 
-                    main_attr_pv_id_for_main_sku: Optional[int] = None
+                    # Create ProductVariantOrm records
+                    product_variant_orms_list = []
                     for attr_detail in current_sku_variant:
-                        attr_name = attr_detail['attribute_name']
-                        val_name = attr_detail['value']
+                        attribute_name = attr_detail['attribute_name']
+                        value_name = attr_detail['value']
+                        
+                        # Ensure attribute_name exists in attr_id_map
+                        if attribute_name not in attr_id_map:
+                            logger.error(f"{variant_log_prefix}Attribute name '{attribute_name}' not found in attr_id_map. Skipping ProductVariantOrm creation for this attribute.")
+                            # Potentially raise an error or handle as per business logic
+                            continue # Or raise an exception
 
-                        if attr_name not in attr_id_map or (attr_name, val_name) not in attr_val_id_map:
-                            err_msg = f"Missing ID for attribute '{attr_name}' or value '{val_name}' in maps."
-                            logger.error(f"{variant_log_prefix}{err_msg}")
-                            raise DataLoaderError(message=err_msg, error_type=ErrorType.INTERNAL, offending_value=f"{attr_name}:{val_name}")
+                        # Ensure (attribute_name, value_name) exists in attr_val_id_map
+                        if (attribute_name, value_name) not in attr_val_id_map:
+                            logger.error(f"{variant_log_prefix}Attribute value pair ('{attribute_name}', '{value_name}') not found in attr_val_id_map. Skipping ProductVariantOrm creation for this attribute value.")
+                            # Potentially raise an error or handle as per business logic
+                            continue # Or raise an exception
 
                         product_variant_orm = ProductVariantOrm(
                             sku_id=sku_orm_instance.id,
                             main_sku_id=main_sku_orm_instance.id,
-                            attribute_id=attr_id_map[attr_name],
-                            attribute_value_id=attr_val_id_map[(attr_name, val_name)],
-                            active=active_db_val,
+                            attribute_id=attr_id_map[attribute_name],
+                            attribute_value_id=attr_val_id_map[(attribute_name, value_name)],
+                            active=active_db_val, # Or determine active status specifically for variant link
                             created_by=user_id,
                             created_date=current_time_epoch_ms,
                             updated_by=user_id,
                             updated_date=current_time_epoch_ms
                         )
-                        db.add(product_variant_orm)
-                        logger.debug(f"{variant_log_prefix}Added ProductVariantOrm for Attr: {attr_name}, Val: {val_name}")
-
-                        if main_attribute_def and attr_name == main_attribute_def['name']:
-                            db.flush()
-                            main_attr_pv_id_for_main_sku = product_variant_orm.id
-
-                    if main_attr_pv_id_for_main_sku:
-                        main_sku_orm_instance.variant_id = main_attr_pv_id_for_main_sku
-                        logger.debug(f"{variant_log_prefix}Linked MainSkuOrm ID {main_sku_orm_instance.id} to main ProductVariantOrm ID {main_attr_pv_id_for_main_sku}")
+                        product_variant_orms_list.append(product_variant_orm)
+                    
+                    if product_variant_orms_list: # Only add if list is not empty
+                        db.add_all(product_variant_orms_list)
+                        logger.debug(f"{variant_log_prefix}Added {len(product_variant_orms_list)} ProductVariantOrm records.")
                     else:
-                        logger.warning(f"{variant_log_prefix}Could not determine main ProductVariantOrm to link to MainSkuOrm ID {main_sku_orm_instance.id}")
+                        # This case might indicate an issue with attribute/value lookups if current_sku_variant was not empty
+                        logger.warning(f"{variant_log_prefix}No ProductVariantOrm records were created for SKU ID {sku_orm_instance.id}. This might be due to lookup issues for all attributes/values in the variant.")
 
-                if main_sku_orm_instance and main_sku_orm_instance.is_default and first_main_sku_orm_id_for_images is None:
-                    first_main_sku_orm_id_for_images = main_sku_orm_instance.id
-                
-                if main_sku_orm_instance:
+
+                    if is_default_sku and first_main_sku_orm_id_for_images is None:
+                        first_main_sku_orm_id_for_images = main_sku_orm_instance.id
+                        logger.debug(f"{variant_log_prefix}Set first_main_sku_orm_id_for_images to {main_sku_orm_instance.id} for new default SKU.")
+                    
                     processed_main_sku_ids_for_row.append(main_sku_orm_instance.id)
+                    logger.info(f"{variant_log_prefix}Successfully created new MainSKU ID: {main_sku_orm_instance.id}, SKU ID: {sku_orm_instance.id}")
 
             except ItemParserError as ipe:
                 logger.error(f"{variant_log_prefix}Parsing error for this variant: {ipe}", exc_info=True)
@@ -485,20 +554,20 @@ def load_item_record_to_db(
                 )
         elif item_csv_row.images and not item_csv_row.images.strip():
              logger.info(f"{log_prefix} Images field provided but is empty. No images to process.")
-        else:
+        else: 
             logger.info(f"{log_prefix} No images provided in CSV for this product row.")
         
         logger.info(f"{log_prefix} Successfully processed item CSV row. Returning {len(processed_main_sku_ids_for_row)} main SKU IDs.")
 
-    except ItemParserError as e:
+    except ItemParserError as e: 
         logger.error(f"{log_prefix} Item parsing error: {e}", exc_info=True)
         raise DataLoaderError(
             message=f"Error parsing item CSV structure for '{item_csv_row.product_name}': {e}", 
             error_type=ErrorType.VALIDATION, 
-            field_name="CSV item structure rules",
-            offending_value=item_csv_row.product_name
+            field_name="CSV item structure rules", 
+            offending_value=item_csv_row.product_name 
         ) from e
-    except DataLoaderError:
+    except DataLoaderError: 
         raise
     except Exception as e:
         logger.error(f"{log_prefix} Unexpected error during item record processing setup: {e}", exc_info=True)
@@ -514,8 +583,8 @@ def load_item_record_to_db(
 def load_items_to_db(
     db: Session,
     business_details_id: int,
-    item_records_data: List[Dict[str, Any]],
-    session_id: str,
+    item_records_data: List[Dict[str, Any]], 
+    session_id: str, 
     user_id: int
 ) -> Dict[str, int]:
     log_prefix = f"[ItemBatchLoader SID:{session_id} BID:{business_details_id}]"
@@ -551,20 +620,20 @@ def load_items_to_db(
                 summary["total_main_skus_created_or_updated"] += len(created_main_sku_ids_for_this_row)
                 logger.info(f"{row_log_prefix} Successfully processed, created/updated {len(created_main_sku_ids_for_this_row)} MainSKUs.")
 
-            except (DataLoaderError, ItemParserError, IntegrityError, DataError, MultipleResultsFound) as e:
-                savepoint.rollback()
+            except (DataLoaderError, ItemParserError, IntegrityError, DataError) as e:
+                savepoint.rollback() 
                 error_message = e.message if isinstance(e, DataLoaderError) else str(e)
-                logger.error(f"{row_log_prefix} Error processing row: {error_message}", exc_info=False)
+                logger.error(f"{row_log_prefix} Error processing row: {error_message}", exc_info=False) 
                 summary["csv_rows_with_errors"] += 1
             except Exception as e_gen:
                 savepoint.rollback()
                 logger.error(f"{row_log_prefix} Unexpected critical error processing row: {e_gen}", exc_info=True)
                 summary["csv_rows_with_errors"] += 1
 
-        except ValidationError as pve:
-            logger.error(f"{row_log_prefix} Pydantic validation error for raw data. Errors: {pve.errors()}", exc_info=False)
+        except ValidationError as pve: 
+            logger.error(f"{row_log_prefix} Pydantic validation error for raw data. Errors: {pve.errors()}", exc_info=False) 
             summary["csv_rows_with_errors"] += 1
-        except Exception as e_outer:
+        except Exception as e_outer: 
             logger.error(f"{row_log_prefix} Critical error before processing row: {e_outer}", exc_info=True)
             summary["csv_rows_with_errors"] += 1
 
