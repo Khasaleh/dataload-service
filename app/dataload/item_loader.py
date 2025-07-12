@@ -357,6 +357,28 @@ def load_item_record_to_db(
                     main_sku_orm_instance.updated_by = user_id
                     main_sku_orm_instance.updated_date = current_time_epoch_ms
                     
+                    # Update is_default flag
+                    main_sku_orm_instance.is_default = is_default_sku
+                    logger.debug(f"{variant_log_prefix}Set MainSkuOrm ID {main_sku_orm_instance.id} is_default to {is_default_sku}")
+
+                    # Regenerate barcode and part_number for MainSkuOrm
+                    main_sku_orm_instance.mobile_barcode = f"S{main_sku_orm_instance.id}P{product_id}"
+                    try:
+                        if main_sku_orm_instance.mobile_barcode:
+                            image_bytes = barcode_helper.generate_barcode_image(
+                                main_sku_orm_instance.mobile_barcode, desired_width=350, desired_height=100
+                            )
+                            main_sku_orm_instance.barcode = barcode_helper.encode_barcode_to_base64(image_bytes)
+                        else:
+                            main_sku_orm_instance.barcode = "ERROR_NO_MOBILE_BARCODE_MAIN_UPDATE"
+                            logger.warning(f"{variant_log_prefix}MainSKU {main_sku_orm_instance.id} has no mobile_barcode for update.")
+                    except Exception as bc_exc:
+                        logger.error(f"{variant_log_prefix}Error updating barcode for MainSKU {main_sku_orm_instance.id}: {bc_exc}", exc_info=True)
+                        main_sku_orm_instance.barcode = main_sku_orm_instance.mobile_barcode # Fallback
+                    main_sku_orm_instance.part_number = str(main_sku_orm_instance.id).zfill(9) # Corrected padding
+                    logger.debug(f"{variant_log_prefix}Updated barcode/part_number for MainSkuOrm ID {main_sku_orm_instance.id}")
+
+                    # Update SkuOrm fields
                     sku_orm_instance.price = price
                     sku_orm_instance.discount_price = discount_price
                     sku_orm_instance.quantity = quantity
@@ -368,16 +390,203 @@ def load_item_record_to_db(
                     sku_orm_instance.package_weight = pkg_weight
                     sku_orm_instance.updated_by = user_id
                     sku_orm_instance.updated_date = current_time_epoch_ms
+
+                    # Regenerate barcode and part_number for SkuOrm
+                    sku_orm_instance.mobile_barcode = f"S{sku_orm_instance.id}P{product_id}"
+                    try:
+                        if sku_orm_instance.mobile_barcode:
+                            image_bytes = barcode_helper.generate_barcode_image(
+                                sku_orm_instance.mobile_barcode, desired_width=350, desired_height=100
+                            )
+                            sku_orm_instance.barcode = barcode_helper.encode_barcode_to_base64(image_bytes)
+                        else:
+                            sku_orm_instance.barcode = "ERROR_NO_MOBILE_BARCODE_SKU_UPDATE"
+                            logger.warning(f"{variant_log_prefix}SKU {sku_orm_instance.id} has no mobile_barcode for update.")
+                    except Exception as bc_exc:
+                        logger.error(f"{variant_log_prefix}Error updating barcode for SkuOrm ID {sku_orm_instance.id}: {bc_exc}", exc_info=True)
+                        sku_orm_instance.barcode = sku_orm_instance.mobile_barcode # Fallback
+                    sku_orm_instance.part_number = str(sku_orm_instance.id).zfill(9) # Corrected padding
+                    logger.debug(f"{variant_log_prefix}Updated barcode/part_number for SkuOrm ID {sku_orm_instance.id}")
                     
-                    logger.debug(f"{variant_log_prefix}Updated MainSkuOrm ID: {main_sku_orm_instance.id} and SkuOrm ID: {sku_orm_instance.id}")
+                    logger.debug(f"{variant_log_prefix}Updated MainSkuOrm ID: {main_sku_orm_instance.id} and SkuOrm ID: {sku_orm_instance.id} with new flags and barcodes.")
                     
+                    # This logic for first_main_sku_orm_id_for_images should consider the updated is_default status
                     if main_sku_orm_instance.is_default and first_main_sku_orm_id_for_images is None:
                          first_main_sku_orm_id_for_images = main_sku_orm_instance.id
+                         logger.debug(f"{variant_log_prefix}Set/confirmed first_main_sku_orm_id_for_images to {main_sku_orm_instance.id} due to updated default SKU.")
+
 
                     processed_main_sku_ids_for_row.append(main_sku_orm_instance.id)
                 else: 
-                    logger.warning(f"{variant_log_prefix}SKU with attributes {current_target_attr_value_ids} (Product ID: {product_id}) not found. Skipping creation.")
-                    continue
+                    logger.info(f"{variant_log_prefix}SKU with attributes {current_target_attr_value_ids} (Product ID: {product_id}) not found. Creating new SKU.")
+
+                    # Create MainSkuOrm
+                    main_sku_orm_instance = MainSkuOrm(
+                        product_id=product_id,
+                        price=price,
+                        discount_price=discount_price, # Assuming discount_price is available
+                        quantity=quantity,
+                        active=active_db_val,
+                        is_default=is_default_sku,
+                        order_limit=order_limit,
+                        package_size_length=pkg_length,
+                        package_size_width=pkg_width,
+                        package_size_height=pkg_height,
+                        package_weight=pkg_weight,
+                        created_by=user_id,
+                        created_date=current_time_epoch_ms,
+                        updated_by=user_id,
+                        updated_date=current_time_epoch_ms,
+                        # Placeholders - will be updated after ID generation
+                        barcode="PENDING_BARCODE_MAIN",
+                        part_number="PENDING_PN_MAIN",
+                        mobile_barcode=None
+                    )
+                    db.add(main_sku_orm_instance)
+                    db.flush() # Flush to get main_sku_orm_instance.id
+
+                    # Generate ID-dependent fields for MainSkuOrm
+                    main_sku_orm_instance.mobile_barcode = f"S{main_sku_orm_instance.id}P{product_id}"
+                    try:
+                        if main_sku_orm_instance.mobile_barcode:
+                            image_bytes = barcode_helper.generate_barcode_image(
+                                main_sku_orm_instance.mobile_barcode,
+                                desired_width=350,
+                                desired_height=100
+                            )
+                            main_sku_orm_instance.barcode = barcode_helper.encode_barcode_to_base64(image_bytes)
+                        else:
+                            main_sku_orm_instance.barcode = "ERROR_NO_MOBILE_BARCODE_MAIN"
+                            logger.warning(f"{variant_log_prefix}MainSKU {main_sku_orm_instance.id} has no mobile_barcode to generate full barcode from.")
+                    except Exception as bc_exc:
+                        logger.error(f"{variant_log_prefix}Error generating or encoding barcode for MainSKU {main_sku_orm_instance.id} from mobile_barcode '{main_sku_orm_instance.mobile_barcode}': {bc_exc}", exc_info=True)
+                        main_sku_orm_instance.barcode = main_sku_orm_instance.mobile_barcode # Fallback to mobile_barcode string
+                    main_sku_orm_instance.part_number = str(main_sku_orm_instance.id).zfill(9) # Corrected padding
+
+                    logger.debug(f"{variant_log_prefix}Created MainSkuOrm ID: {main_sku_orm_instance.id}, mobile_barcode: {main_sku_orm_instance.mobile_barcode}, generated barcode (or fallback): {main_sku_orm_instance.barcode is not None}")
+
+                    # Create SkuOrm
+                    # Construct a variant description string for name/description
+                    variant_description_parts = []
+                    for attr_detail in current_sku_variant:
+                        variant_description_parts.append(f"{attr_detail['attribute_name']}: {attr_detail['value']}")
+                    variant_description_string = ", ".join(variant_description_parts)
+
+                    sku_orm_instance_name = f"{item_csv_row.product_name} - {variant_description_string}"
+                    # Ensure name is not too long if there's a DB constraint (e.g., SkuOrm.name has Varchar(256))
+                    max_sku_name_len = 250 # Assuming a buffer for SkuOrm.name length
+                    if len(sku_orm_instance_name) > max_sku_name_len:
+                        sku_orm_instance_name = sku_orm_instance_name[:max_sku_name_len] + "..."
+
+
+                    sku_orm_instance = SkuOrm(
+                        main_sku_id=main_sku_orm_instance.id,
+                        product_id=product_id,
+                        name=sku_orm_instance_name,
+                        description=f"Variant of {item_csv_row.product_name} with attributes: {variant_description_string}",
+                        price=price,
+                        discount_price=discount_price, # Assuming discount_price is available
+                        quantity=quantity,
+                        active=active_db_val,
+                        order_limit=order_limit,
+                        package_size_length=pkg_length,
+                        package_size_width=pkg_width,
+                        package_size_height=pkg_height,
+                        package_weight=pkg_weight,
+                        created_by=user_id,
+                        created_date=current_time_epoch_ms,
+                        updated_by=user_id,
+                        updated_date=current_time_epoch_ms,
+                        # Placeholders - will be updated after ID generation
+                        barcode="PENDING_BARCODE_SKU",
+                        part_number="PENDING_PN_SKU",
+                        mobile_barcode=None
+                    )
+                    db.add(sku_orm_instance)
+                    db.flush() # Flush to get sku_orm_instance.id
+
+                    # Generate ID-dependent fields for SkuOrm
+                    sku_orm_instance.mobile_barcode = f"S{sku_orm_instance.id}P{product_id}"
+                    try:
+                        if sku_orm_instance.mobile_barcode:
+                            image_bytes = barcode_helper.generate_barcode_image(
+                                sku_orm_instance.mobile_barcode,
+                                desired_width=350,
+                                desired_height=100
+                            )
+                            sku_orm_instance.barcode = barcode_helper.encode_barcode_to_base64(image_bytes)
+                        else:
+                            sku_orm_instance.barcode = "ERROR_NO_MOBILE_BARCODE_SKU"
+                            logger.warning(f"{variant_log_prefix}SKU {sku_orm_instance.id} has no mobile_barcode to generate full barcode from.")
+                    except Exception as bc_exc:
+                        logger.error(f"{variant_log_prefix}Error generating or encoding barcode for SKU {sku_orm_instance.id} from mobile_barcode '{sku_orm_instance.mobile_barcode}': {bc_exc}", exc_info=True)
+                        sku_orm_instance.barcode = sku_orm_instance.mobile_barcode # Fallback to mobile_barcode string
+                    sku_orm_instance.part_number = str(sku_orm_instance.id).zfill(9) # Corrected padding
+
+                    logger.debug(f"{variant_log_prefix}Created SkuOrm ID: {sku_orm_instance.id}, mobile_barcode: {sku_orm_instance.mobile_barcode}, generated barcode (or fallback): {sku_orm_instance.barcode is not None}")
+
+                    # Create ProductVariantOrm records
+                    product_variant_orms_list = []
+                    main_product_variant_orm_for_linking: Optional[ProductVariantOrm] = None # For MainSkuOrm.variant_id
+
+                    for attr_detail in current_sku_variant:
+                        attribute_name = attr_detail['attribute_name']
+                        value_name = attr_detail['value']
+
+                        # Ensure attribute_name exists in attr_id_map
+                        if attribute_name not in attr_id_map:
+                            logger.error(f"{variant_log_prefix}Attribute name '{attribute_name}' not found in attr_id_map. Skipping ProductVariantOrm creation for this attribute.")
+                            continue
+
+                        # Ensure (attribute_name, value_name) exists in attr_val_id_map
+                        if (attribute_name, value_name) not in attr_val_id_map:
+                            logger.error(f"{variant_log_prefix}Attribute value pair ('{attribute_name}', '{value_name}') not found in attr_val_id_map. Skipping ProductVariantOrm creation for this attribute value.")
+                            continue
+
+                        product_variant_orm = ProductVariantOrm(
+                            sku_id=sku_orm_instance.id,
+                            main_sku_id=main_sku_orm_instance.id, # Link to MainSkuOrm
+                            attribute_id=attr_id_map[attribute_name],
+                            attribute_value_id=attr_val_id_map[(attribute_name, value_name)],
+                            active=active_db_val,
+                            created_by=user_id,
+                            created_date=current_time_epoch_ms,
+                            updated_by=user_id,
+                            updated_date=current_time_epoch_ms
+                        )
+                        product_variant_orms_list.append(product_variant_orm)
+
+                        # Check if this is the main attribute for linking
+                        if main_attribute_def and attribute_name == main_attribute_def['name']:
+                            main_product_variant_orm_for_linking = product_variant_orm
+                            logger.debug(f"{variant_log_prefix}Identified ProductVariantOrm for main attribute '{attribute_name}' (Value: {value_name}) for later linking to MainSkuOrm.variant_id.")
+
+                    if product_variant_orms_list:
+                        db.add_all(product_variant_orms_list)
+                        logger.debug(f"{variant_log_prefix}Added {len(product_variant_orms_list)} ProductVariantOrm records to session.")
+
+                        # Flush here to get IDs for ProductVariantOrms, especially for main_product_variant_orm_for_linking
+                        db.flush()
+                        logger.debug(f"{variant_log_prefix}Flushed session to get ProductVariantOrm IDs.")
+
+                        if main_product_variant_orm_for_linking and main_product_variant_orm_for_linking.id:
+                            main_sku_orm_instance.variant_id = main_product_variant_orm_for_linking.id
+                            logger.info(f"{variant_log_prefix}Linked MainSkuOrm ID {main_sku_orm_instance.id} to main ProductVariantOrm ID {main_product_variant_orm_for_linking.id} via variant_id.")
+                        elif main_attribute_def: # If main_attribute_def existed but we couldn't link
+                            logger.warning(f"{variant_log_prefix}Main attribute was defined ('{main_attribute_def['name']}') but could not link corresponding ProductVariantOrm to MainSkuOrm ID {main_sku_orm_instance.id}. Main ProductVariantOrm for linking: {main_product_variant_orm_for_linking}")
+                        else: # No main attribute was defined
+                            logger.debug(f"{variant_log_prefix}No main attribute defined for this SKU set; MainSkuOrm.variant_id will not be set for MainSkuOrm ID {main_sku_orm_instance.id}.")
+
+                    else:
+                        logger.warning(f"{variant_log_prefix}No ProductVariantOrm records were created for SKU ID {sku_orm_instance.id}. This might be due to lookup issues for all attributes/values in the variant.")
+
+                    if is_default_sku and first_main_sku_orm_id_for_images is None: # This uses main_sku_orm_instance.id which is fine
+                        first_main_sku_orm_id_for_images = main_sku_orm_instance.id
+                        logger.debug(f"{variant_log_prefix}Set first_main_sku_orm_id_for_images to {main_sku_orm_instance.id} for new default SKU.")
+
+                    processed_main_sku_ids_for_row.append(main_sku_orm_instance.id)
+                    logger.info(f"{variant_log_prefix}Successfully created new MainSKU ID: {main_sku_orm_instance.id} (VariantID: {main_sku_orm_instance.variant_id}), SKU ID: {sku_orm_instance.id}")
+
             except ItemParserError as ipe:
                 logger.error(f"{variant_log_prefix}Parsing error for this variant: {ipe}", exc_info=True)
                 raise 
