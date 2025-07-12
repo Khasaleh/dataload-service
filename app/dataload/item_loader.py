@@ -406,13 +406,22 @@ def load_item_record_to_db(
                     # Generate ID-dependent fields for MainSkuOrm
                     main_sku_orm_instance.mobile_barcode = f"S{main_sku_orm_instance.id}P{product_id}"
                     try:
-                        main_sku_orm_instance.barcode = barcode_helper.generate_barcode(main_sku_orm_instance.mobile_barcode)
-                    except Exception as bc_exc: # Catch potential errors from barcode generation
-                        logger.error(f"{variant_log_prefix}Error generating barcode for MainSKU {main_sku_orm_instance.id}: {bc_exc}")
-                        main_sku_orm_instance.barcode = main_sku_orm_instance.mobile_barcode # Fallback
+                        if main_sku_orm_instance.mobile_barcode:
+                            image_bytes = barcode_helper.generate_barcode_image(
+                                main_sku_orm_instance.mobile_barcode, 
+                                desired_width=350, 
+                                desired_height=100
+                            )
+                            main_sku_orm_instance.barcode = barcode_helper.encode_barcode_to_base64(image_bytes)
+                        else:
+                            main_sku_orm_instance.barcode = "ERROR_NO_MOBILE_BARCODE_MAIN"
+                            logger.warning(f"{variant_log_prefix}MainSKU {main_sku_orm_instance.id} has no mobile_barcode to generate full barcode from.")
+                    except Exception as bc_exc: 
+                        logger.error(f"{variant_log_prefix}Error generating or encoding barcode for MainSKU {main_sku_orm_instance.id} from mobile_barcode '{main_sku_orm_instance.mobile_barcode}': {bc_exc}", exc_info=True)
+                        main_sku_orm_instance.barcode = main_sku_orm_instance.mobile_barcode # Fallback to mobile_barcode string
                     main_sku_orm_instance.part_number = str(main_sku_orm_instance.id).zfill(8) # Example padding
 
-                    logger.debug(f"{variant_log_prefix}Created MainSkuOrm with temp ID, generated mobile_barcode: {main_sku_orm_instance.mobile_barcode}")
+                    logger.debug(f"{variant_log_prefix}Created MainSkuOrm ID: {main_sku_orm_instance.id}, mobile_barcode: {main_sku_orm_instance.mobile_barcode}, generated barcode (or fallback): {main_sku_orm_instance.barcode is not None}")
 
                     # Create SkuOrm
                     # Construct a variant description string for name/description
@@ -457,16 +466,27 @@ def load_item_record_to_db(
                     # Generate ID-dependent fields for SkuOrm
                     sku_orm_instance.mobile_barcode = f"S{sku_orm_instance.id}P{product_id}"
                     try:
-                        sku_orm_instance.barcode = barcode_helper.generate_barcode(sku_orm_instance.mobile_barcode)
+                        if sku_orm_instance.mobile_barcode:
+                            image_bytes = barcode_helper.generate_barcode_image(
+                                sku_orm_instance.mobile_barcode, 
+                                desired_width=350, 
+                                desired_height=100
+                            )
+                            sku_orm_instance.barcode = barcode_helper.encode_barcode_to_base64(image_bytes)
+                        else:
+                            sku_orm_instance.barcode = "ERROR_NO_MOBILE_BARCODE_SKU"
+                            logger.warning(f"{variant_log_prefix}SKU {sku_orm_instance.id} has no mobile_barcode to generate full barcode from.")
                     except Exception as bc_exc:
-                        logger.error(f"{variant_log_prefix}Error generating barcode for SKU {sku_orm_instance.id}: {bc_exc}")
-                        sku_orm_instance.barcode = sku_orm_instance.mobile_barcode # Fallback
+                        logger.error(f"{variant_log_prefix}Error generating or encoding barcode for SKU {sku_orm_instance.id} from mobile_barcode '{sku_orm_instance.mobile_barcode}': {bc_exc}", exc_info=True)
+                        sku_orm_instance.barcode = sku_orm_instance.mobile_barcode # Fallback to mobile_barcode string
                     sku_orm_instance.part_number = str(sku_orm_instance.id).zfill(8) # Example padding
                     
-                    logger.debug(f"{variant_log_prefix}Created SkuOrm ID: {sku_orm_instance.id}, generated mobile_barcode: {sku_orm_instance.mobile_barcode}")
+                    logger.debug(f"{variant_log_prefix}Created SkuOrm ID: {sku_orm_instance.id}, mobile_barcode: {sku_orm_instance.mobile_barcode}, generated barcode (or fallback): {sku_orm_instance.barcode is not None}")
 
                     # Create ProductVariantOrm records
                     product_variant_orms_list = []
+                    main_product_variant_orm_for_linking: Optional[ProductVariantOrm] = None # For MainSkuOrm.variant_id
+
                     for attr_detail in current_sku_variant:
                         attribute_name = attr_detail['attribute_name']
                         value_name = attr_detail['value']
@@ -474,42 +494,56 @@ def load_item_record_to_db(
                         # Ensure attribute_name exists in attr_id_map
                         if attribute_name not in attr_id_map:
                             logger.error(f"{variant_log_prefix}Attribute name '{attribute_name}' not found in attr_id_map. Skipping ProductVariantOrm creation for this attribute.")
-                            # Potentially raise an error or handle as per business logic
-                            continue # Or raise an exception
+                            continue 
 
                         # Ensure (attribute_name, value_name) exists in attr_val_id_map
                         if (attribute_name, value_name) not in attr_val_id_map:
                             logger.error(f"{variant_log_prefix}Attribute value pair ('{attribute_name}', '{value_name}') not found in attr_val_id_map. Skipping ProductVariantOrm creation for this attribute value.")
-                            # Potentially raise an error or handle as per business logic
-                            continue # Or raise an exception
+                            continue 
 
                         product_variant_orm = ProductVariantOrm(
                             sku_id=sku_orm_instance.id,
-                            main_sku_id=main_sku_orm_instance.id,
+                            main_sku_id=main_sku_orm_instance.id, # Link to MainSkuOrm
                             attribute_id=attr_id_map[attribute_name],
                             attribute_value_id=attr_val_id_map[(attribute_name, value_name)],
-                            active=active_db_val, # Or determine active status specifically for variant link
+                            active=active_db_val, 
                             created_by=user_id,
                             created_date=current_time_epoch_ms,
                             updated_by=user_id,
                             updated_date=current_time_epoch_ms
                         )
                         product_variant_orms_list.append(product_variant_orm)
+
+                        # Check if this is the main attribute for linking
+                        if main_attribute_def and attribute_name == main_attribute_def['name']:
+                            main_product_variant_orm_for_linking = product_variant_orm
+                            logger.debug(f"{variant_log_prefix}Identified ProductVariantOrm for main attribute '{attribute_name}' (Value: {value_name}) for later linking to MainSkuOrm.variant_id.")
                     
-                    if product_variant_orms_list: # Only add if list is not empty
+                    if product_variant_orms_list: 
                         db.add_all(product_variant_orms_list)
-                        logger.debug(f"{variant_log_prefix}Added {len(product_variant_orms_list)} ProductVariantOrm records.")
+                        logger.debug(f"{variant_log_prefix}Added {len(product_variant_orms_list)} ProductVariantOrm records to session.")
+                        
+                        # Flush here to get IDs for ProductVariantOrms, especially for main_product_variant_orm_for_linking
+                        db.flush() 
+                        logger.debug(f"{variant_log_prefix}Flushed session to get ProductVariantOrm IDs.")
+
+                        if main_product_variant_orm_for_linking and main_product_variant_orm_for_linking.id:
+                            main_sku_orm_instance.variant_id = main_product_variant_orm_for_linking.id
+                            logger.info(f"{variant_log_prefix}Linked MainSkuOrm ID {main_sku_orm_instance.id} to main ProductVariantOrm ID {main_product_variant_orm_for_linking.id} via variant_id.")
+                        elif main_attribute_def: # If main_attribute_def existed but we couldn't link
+                            logger.warning(f"{variant_log_prefix}Main attribute was defined ('{main_attribute_def['name']}') but could not link corresponding ProductVariantOrm to MainSkuOrm ID {main_sku_orm_instance.id}. Main ProductVariantOrm for linking: {main_product_variant_orm_for_linking}")
+                        else: # No main attribute was defined
+                            logger.debug(f"{variant_log_prefix}No main attribute defined for this SKU set; MainSkuOrm.variant_id will not be set for MainSkuOrm ID {main_sku_orm_instance.id}.")
+
                     else:
-                        # This case might indicate an issue with attribute/value lookups if current_sku_variant was not empty
                         logger.warning(f"{variant_log_prefix}No ProductVariantOrm records were created for SKU ID {sku_orm_instance.id}. This might be due to lookup issues for all attributes/values in the variant.")
 
-
-                    if is_default_sku and first_main_sku_orm_id_for_images is None:
+                    if is_default_sku and first_main_sku_orm_id_for_images is None: # This uses main_sku_orm_instance.id which is fine
                         first_main_sku_orm_id_for_images = main_sku_orm_instance.id
                         logger.debug(f"{variant_log_prefix}Set first_main_sku_orm_id_for_images to {main_sku_orm_instance.id} for new default SKU.")
                     
                     processed_main_sku_ids_for_row.append(main_sku_orm_instance.id)
-                    logger.info(f"{variant_log_prefix}Successfully created new MainSKU ID: {main_sku_orm_instance.id}, SKU ID: {sku_orm_instance.id}")
+                    logger.info(f"{variant_log_prefix}Successfully created new MainSKU ID: {main_sku_orm_instance.id} (VariantID: {main_sku_orm_instance.variant_id}), SKU ID: {sku_orm_instance.id}")
 
             except ItemParserError as ipe:
                 logger.error(f"{variant_log_prefix}Parsing error for this variant: {ipe}", exc_info=True)
