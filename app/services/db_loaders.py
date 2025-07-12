@@ -22,7 +22,8 @@ from app.db.models import (
     ReturnPolicyOrm,
     PriceOrm,
     ProductOrm,
-    ProductItemOrm,
+    # ProductItemOrm, # Commented out as it's deprecated
+    SkuOrm, # Assuming SkuOrm will be used by load_price_to_db
 )
 from datetime import datetime
 from app.dataload.models.price_csv import PriceCsv, PriceTypeEnum as PriceCsvTypeEnum

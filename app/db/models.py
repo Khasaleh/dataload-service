@@ -369,7 +369,11 @@ class ProductOrm(Base):
     specifications = relationship("ProductSpecificationOrm", back_populates="product", cascade="all, delete-orphan")
 
     # Relationship to items (SKUs) - Assuming ProductItemOrm will be defined/updated later for is_child_item = 1
-    items = relationship("ProductItemOrm", back_populates="product", cascade="all, delete-orphan")
+    # items = relationship("ProductItemOrm", back_populates="product", cascade="all, delete-orphan") # Old, to be replaced by SkuOrm/MainSkuOrm
+
+    # New relationships for SKUs
+    skus = relationship("SkuOrm", foreign_keys="[SkuOrm.product_id]", back_populates="product", cascade="all, delete-orphan")
+    main_sku_entries = relationship("MainSkuOrm", foreign_keys="[MainSkuOrm.product_id]", back_populates="product", cascade="all, delete-orphan")
 
     # Removing old relationships that are not in the new DDL context
     legacy_prices = relationship("ProductPriceOrm", back_populates="product", cascade="all, delete-orphan")
@@ -404,7 +408,9 @@ class ProductImageOrm(Base):
     # main_sku_id = Column(BigInteger, nullable=True) # ForeignKey to main_skus.id will be added later
     # For Price MVP, linking ProductImageOrm directly to main_skus might be out of scope if main_skus is not yet fully defined/used.
     # Temporarily commenting out main_sku_id if it's not immediately used or causes FK issues without a main_skus table.
-    main_sku_id = Column(BigInteger, ForeignKey(f'{CATALOG_SCHEMA}.product_items.id', name='fk_product_images_main_sku_id', use_alter=True), nullable=True, index=True)
+    # main_sku_id = Column(BigInteger, ForeignKey(f'{CATALOG_SCHEMA}.product_items.id', name='fk_product_images_main_sku_id', use_alter=True), nullable=True, index=True) # Old FK
+    main_sku_id = Column(BigInteger, ForeignKey(f'{PUBLIC_SCHEMA}.main_skus.id', name='fk_product_images_main_sku_id'), nullable=True, index=True)
+    main_sku = relationship("MainSkuOrm", back_populates="images")
 
 
     active = Column(String(255), nullable=True) # DDL: character varying(255)
@@ -441,32 +447,156 @@ class ProductSpecificationOrm(Base):
     # CONSTRAINT fkcshw23fru6i7sk0p9qq8fu4gt FOREIGN KEY (product_id) REFERENCES public.products (id)
 
 
-class ProductItemOrm(Base):
-    __tablename__ = "product_items"
-    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    business_details_id = Column(BigInteger, index=True, nullable=False) # Changed
+# class ProductItemOrm(Base):
+#     __tablename__ = "product_items"
+#     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+#     business_details_id = Column(BigInteger, index=True, nullable=False) # Changed
+#
+#     product_id = Column(BigInteger, ForeignKey(f'{PUBLIC_SCHEMA}.products.id'), nullable=False) # Corrected schema to PUBLIC and type to BigInteger
+#     product = relationship("ProductOrm", back_populates="items")
+#
+#     variant_sku = Column(String, index=True, nullable=False)
+#     attribute_combination = Column(Text, nullable=True)
+#     status = Column(String, nullable=True, index=True)
+#     published = Column(Boolean, default=False, nullable=False)
+#     default_sku = Column(Boolean, default=False, nullable=False)
+#     quantity = Column(Integer, default=0, nullable=False)
+#     image_urls = Column(Text, nullable=True)
+#
+#     created_at = Column(DateTime, server_default=func.now(), nullable=False)
+#     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+#
+#     __table_args__ = (
+#         UniqueConstraint('business_details_id', 'variant_sku', name='uq_item_business_sku'),
+#         Index('idx_item_product_id', "product_id"), # Kept manual name for index
+#         {"schema": CATALOG_SCHEMA} # Assigned schema
+#     )
+#
+#     prices = relationship("PriceOrm", back_populates="sku", cascade="all, delete-orphan", foreign_keys="[PriceOrm.sku_id]")
 
-    product_id = Column(BigInteger, ForeignKey(f'{PUBLIC_SCHEMA}.products.id'), nullable=False) # Corrected schema to PUBLIC and type to BigInteger
-    product = relationship("ProductOrm", back_populates="items")
+# --- SKU, MainSKU, and Variant Models ---
 
-    variant_sku = Column(String, index=True, nullable=False)
-    attribute_combination = Column(Text, nullable=True)
-    status = Column(String, nullable=True, index=True)
-    published = Column(Boolean, default=False, nullable=False)
-    default_sku = Column(Boolean, default=False, nullable=False)
-    quantity = Column(Integer, default=0, nullable=False)
-    image_urls = Column(Text, nullable=True)
+class MainSkuOrm(Base):
+    __tablename__ = "main_skus"
+    __table_args__ = ({"schema": PUBLIC_SCHEMA})
 
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
+    active = Column(String(255), nullable=True, default='ACTIVE', index=True)
+    created_by = Column(BigInteger, nullable=True)
+    created_date = Column(BigInteger, nullable=True) # Assuming epoch ms
+    updated_by = Column(BigInteger, nullable=True)
+    updated_date = Column(BigInteger, nullable=True) # Assuming epoch ms
 
-    __table_args__ = (
-        UniqueConstraint('business_details_id', 'variant_sku', name='uq_item_business_sku'),
-        Index('idx_item_product_id', "product_id"), # Kept manual name for index
-        {"schema": CATALOG_SCHEMA} # Assigned schema
+    barcode = Column(Text, nullable=False) # Generated from mobile_barcode
+    discount_price = Column(Float, nullable=True)
+    is_default = Column(Boolean, default=False, nullable=False) # True if this SKU is a main/default variant
+    part_number = Column(String(256), nullable=False) # Generated (padded main_skus.id)
+    price = Column(Float, nullable=True)
+    quantity = Column(Integer, nullable=True)
+
+    product_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.products.id"), nullable=False, index=True)
+    product = relationship("ProductOrm", foreign_keys=[product_id], back_populates="main_sku_entries")
+
+    # variant_id links to a specific ProductVariantOrm record (the one for the main attribute)
+    # This FK must be nullable or deferred if ProductVariantOrm not defined yet or if it can be optional initially.
+    # Using use_alter=True to handle potential definition order issues.
+    variant_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.product_variant.id", name='fk_main_skus_variant_id', use_alter=True), nullable=True, index=True)
+    # main_attribute_product_variant relationship defined below after SkuOrm and ProductVariantOrm to manage import/definition order
+    # main_attribute_product_variant = relationship("ProductVariantOrm", foreign_keys=[variant_id], post_update=True, uselist=False)
+
+
+    order_limit = Column(BigInteger, nullable=True)
+    package_size_height = Column(Float, nullable=True)
+    package_size_length = Column(Float, nullable=True)
+    package_size_width = Column(Float, nullable=True)
+    package_weight = Column(Float, nullable=True)
+    mobile_barcode = Column(Text, nullable=True) # S+MainSku.ID+P+Products.ID
+
+    # Relationship for images: one MainSkuOrm can have many ProductImageOrm records
+    images = relationship("ProductImageOrm", back_populates="main_sku", cascade="all, delete-orphan")
+
+    # Relationship back to SkuOrm (1-to-1). SkuOrm will have main_sku_id = MainSkuOrm.id
+    sku_entry = relationship("SkuOrm", foreign_keys="[SkuOrm.main_sku_id]", back_populates="main_sku", uselist=False)
+
+    # Relationship to its constituent product_variant entries
+    product_variants_associated = relationship(
+        "ProductVariantOrm",
+        primaryjoin="MainSkuOrm.id == ProductVariantOrm.main_sku_id",
+        back_populates="main_sku"
     )
+    main_attribute_product_variant = relationship("ProductVariantOrm", foreign_keys=[variant_id], post_update=True, uselist=False)
 
-    prices = relationship("PriceOrm", back_populates="sku", cascade="all, delete-orphan", foreign_keys="[PriceOrm.sku_id]")
+
+class SkuOrm(Base):
+    __tablename__ = "sku"
+    __table_args__ = ({"schema": PUBLIC_SCHEMA})
+
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
+    created_by = Column(BigInteger, nullable=True)
+    created_date = Column(BigInteger, nullable=True) # Assuming epoch ms
+    updated_by = Column(BigInteger, nullable=True)
+    updated_date = Column(BigInteger, nullable=True) # Assuming epoch ms
+
+    barcode = Column(Text, nullable=True) # Generated from mobile_barcode
+    description = Column(Text, nullable=True)
+    name = Column(String(256), nullable=True)
+    part_number = Column(String(256), nullable=True) # Generated (padded sku.id)
+    
+    product_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.products.id"), nullable=False, index=True)
+    product = relationship("ProductOrm", back_populates="skus")
+
+    discount_price = Column(Float, nullable=True)
+    price = Column(Float, nullable=True)
+    quantity = Column(Integer, nullable=True)
+    active = Column(String(255), nullable=True, default='ACTIVE', index=True)
+    
+    # This establishes the 1-to-1 link where SkuOrm.id == MainSkuOrm.id conceptually,
+    # but MainSkuOrm is the "primary" side of this paired record.
+    main_sku_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.main_skus.id", name="fk_sku_main_sku_id"), nullable=False, unique=True, index=True)
+    main_sku = relationship("MainSkuOrm", foreign_keys=[main_sku_id], back_populates="sku_entry", uselist=False)
+
+
+    order_limit = Column(BigInteger, nullable=True)
+    package_size_height = Column(Float, nullable=True)
+    package_size_length = Column(Float, nullable=True)
+    package_size_width = Column(Float, nullable=True)
+    package_weight = Column(Float, nullable=True)
+    mobile_barcode = Column(Text, nullable=True) # S+Sku.ID+P+Products.ID
+
+    # Relationship to ProductVariantOrm: one SkuOrm can have many ProductVariantOrm records
+    product_variants = relationship("ProductVariantOrm", back_populates="sku", cascade="all, delete-orphan")
+
+    # Relationship to PriceOrm: one Sku can have multiple price entries (though typically one active)
+    prices = relationship("PriceOrm", back_populates="sku", cascade="all, delete-orphan")
+
+
+class ProductVariantOrm(Base):
+    __tablename__ = "product_variant"
+    __table_args__ = ({"schema": PUBLIC_SCHEMA})
+
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
+    created_by = Column(BigInteger, nullable=True)
+    created_date = Column(BigInteger, nullable=True)
+    updated_by = Column(BigInteger, nullable=True)
+    updated_date = Column(BigInteger, nullable=True)
+
+    attribute_id = Column(BigInteger, ForeignKey(f"{CATALOG_SCHEMA}.attribute.id"), nullable=False, index=True)
+    attribute = relationship("AttributeOrm") 
+
+    attribute_value_id = Column(BigInteger, ForeignKey(f"{CATALOG_SCHEMA}.attribute_value.id"), nullable=False, index=True)
+    attribute_value = relationship("AttributeValueOrm") 
+
+    sku_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.sku.id"), nullable=False, index=True)
+    sku = relationship("SkuOrm", back_populates="product_variants")
+
+    active = Column(String(255), nullable=True, default='ACTIVE', index=True)
+    
+    main_sku_id = Column(BigInteger, ForeignKey(f"{PUBLIC_SCHEMA}.main_skus.id"), nullable=False, index=True)
+    main_sku = relationship(
+        "MainSkuOrm",
+        primaryjoin="MainSkuOrm.id == ProductVariantOrm.main_sku_id",
+        back_populates="product_variants_associated"
+    )
 
 
 class PriceOrm(Base):
@@ -479,8 +609,10 @@ class PriceOrm(Base):
     product_id = Column(BigInteger, ForeignKey(f'{PUBLIC_SCHEMA}.products.id'), nullable=True, index=True)
     product = relationship("ProductOrm", back_populates="prices", foreign_keys=[product_id])
 
-    sku_id = Column(Integer, ForeignKey(f'{CATALOG_SCHEMA}.product_items.id'), nullable=True, index=True)
-    sku = relationship("ProductItemOrm", back_populates="prices", foreign_keys=[sku_id])
+    # Changed sku_id to BigInteger and ForeignKey to point to public.sku.id
+    sku_id = Column(BigInteger, ForeignKey(f'{PUBLIC_SCHEMA}.sku.id'), nullable=True, index=True) 
+    # Changed relationship to SkuOrm and assuming SkuOrm will have a 'prices' backref
+    sku = relationship("SkuOrm", back_populates="prices", foreign_keys=[sku_id])
 
     price = Column(Float, nullable=False)
     discount_price = Column(Float, nullable=True)

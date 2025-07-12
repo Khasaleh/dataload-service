@@ -305,11 +305,23 @@ class ProductCsvModel(BaseModel):
 
         return self
 
-    @validator('category_path')
-    def clean_category_path(cls, v):
+    @field_validator('category_path', mode='before')
+    @classmethod
+    def clean_category_path(cls, v: Any) -> str:
+        if not isinstance(v, str):
+            # This case might indicate an issue upstream or an unexpected input type.
+            # Depending on strictness, could raise ValueError or return an empty/default string.
+            # For now, returning as is if not string, Pydantic will then try to validate against `str` field type.
+            # Or, more strictly:
+            # raise ValueError("category_path must be a string")
+            return v # Let Pydantic's core validation handle non-string if it's not already a string.
+                     # If the field is `category_path: str`, Pydantic tries to coerce to string first,
+                     # then this 'before' validator runs. So `v` here should be a string.
+        if not v: # Handle empty string case explicitly if needed, though list comprehension handles it.
+            return ""
         return '/'.join(part.strip() for part in v.strip().split('/') if part.strip())
 
     class Config:
-        str_strip_whitespace = True  # Changed from anystr_strip_whitespace
+        str_strip_whitespace = True
         validate_assignment = True
         extra = "forbid"

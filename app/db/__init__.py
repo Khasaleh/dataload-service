@@ -10,7 +10,7 @@ from .models import BrandOrm
 from .models import AttributeOrm
 from .models import ReturnPolicyOrm
 from .models import ProductOrm
-from .models import ProductItemOrm
+# from .models import ProductItemOrm # Commented out as ProductItemOrm is deprecated
 from .models import ProductPriceOrm
 from .models import MetaTagOrm
 from .models import CategoryOrm
@@ -27,7 +27,7 @@ from .models import BusinessDetailsOrm # Added
 #     "AttributeOrm",
 #     "ReturnPolicyOrm",
 #     "ProductOrm",
-#     "ProductItemOrm",
+#     # "ProductItemOrm", # Commented out
 #     "ProductPriceOrm",
 #     "MetaTagOrm",
 #     "CategoryOrm",
