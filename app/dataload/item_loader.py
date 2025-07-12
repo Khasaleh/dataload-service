@@ -357,6 +357,28 @@ def load_item_record_to_db(
                     main_sku_orm_instance.updated_by = user_id
                     main_sku_orm_instance.updated_date = current_time_epoch_ms
                     
+                    # Update is_default flag
+                    main_sku_orm_instance.is_default = is_default_sku
+                    logger.debug(f"{variant_log_prefix}Set MainSkuOrm ID {main_sku_orm_instance.id} is_default to {is_default_sku}")
+
+                    # Regenerate barcode and part_number for MainSkuOrm
+                    main_sku_orm_instance.mobile_barcode = f"S{main_sku_orm_instance.id}P{product_id}"
+                    try:
+                        if main_sku_orm_instance.mobile_barcode:
+                            image_bytes = barcode_helper.generate_barcode_image(
+                                main_sku_orm_instance.mobile_barcode, desired_width=350, desired_height=100
+                            )
+                            main_sku_orm_instance.barcode = barcode_helper.encode_barcode_to_base64(image_bytes)
+                        else:
+                            main_sku_orm_instance.barcode = "ERROR_NO_MOBILE_BARCODE_MAIN_UPDATE"
+                            logger.warning(f"{variant_log_prefix}MainSKU {main_sku_orm_instance.id} has no mobile_barcode for update.")
+                    except Exception as bc_exc:
+                        logger.error(f"{variant_log_prefix}Error updating barcode for MainSKU {main_sku_orm_instance.id}: {bc_exc}", exc_info=True)
+                        main_sku_orm_instance.barcode = main_sku_orm_instance.mobile_barcode # Fallback
+                    main_sku_orm_instance.part_number = str(main_sku_orm_instance.id).zfill(8)
+                    logger.debug(f"{variant_log_prefix}Updated barcode/part_number for MainSkuOrm ID {main_sku_orm_instance.id}")
+
+                    # Update SkuOrm fields
                     sku_orm_instance.price = price
                     sku_orm_instance.discount_price = discount_price
                     sku_orm_instance.quantity = quantity
@@ -368,11 +390,31 @@ def load_item_record_to_db(
                     sku_orm_instance.package_weight = pkg_weight
                     sku_orm_instance.updated_by = user_id
                     sku_orm_instance.updated_date = current_time_epoch_ms
+
+                    # Regenerate barcode and part_number for SkuOrm
+                    sku_orm_instance.mobile_barcode = f"S{sku_orm_instance.id}P{product_id}"
+                    try:
+                        if sku_orm_instance.mobile_barcode:
+                            image_bytes = barcode_helper.generate_barcode_image(
+                                sku_orm_instance.mobile_barcode, desired_width=350, desired_height=100
+                            )
+                            sku_orm_instance.barcode = barcode_helper.encode_barcode_to_base64(image_bytes)
+                        else:
+                            sku_orm_instance.barcode = "ERROR_NO_MOBILE_BARCODE_SKU_UPDATE"
+                            logger.warning(f"{variant_log_prefix}SKU {sku_orm_instance.id} has no mobile_barcode for update.")
+                    except Exception as bc_exc:
+                        logger.error(f"{variant_log_prefix}Error updating barcode for SkuOrm ID {sku_orm_instance.id}: {bc_exc}", exc_info=True)
+                        sku_orm_instance.barcode = sku_orm_instance.mobile_barcode # Fallback
+                    sku_orm_instance.part_number = str(sku_orm_instance.id).zfill(8)
+                    logger.debug(f"{variant_log_prefix}Updated barcode/part_number for SkuOrm ID {sku_orm_instance.id}")
                     
-                    logger.debug(f"{variant_log_prefix}Updated MainSkuOrm ID: {main_sku_orm_instance.id} and SkuOrm ID: {sku_orm_instance.id}")
+                    logger.debug(f"{variant_log_prefix}Updated MainSkuOrm ID: {main_sku_orm_instance.id} and SkuOrm ID: {sku_orm_instance.id} with new flags and barcodes.")
                     
+                    # This logic for first_main_sku_orm_id_for_images should consider the updated is_default status
                     if main_sku_orm_instance.is_default and first_main_sku_orm_id_for_images is None:
                          first_main_sku_orm_id_for_images = main_sku_orm_instance.id
+                         logger.debug(f"{variant_log_prefix}Set/confirmed first_main_sku_orm_id_for_images to {main_sku_orm_instance.id} due to updated default SKU.")
+
 
                     processed_main_sku_ids_for_row.append(main_sku_orm_instance.id)
                 else: 
