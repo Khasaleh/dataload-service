@@ -526,7 +526,8 @@ def load_item_record_to_db(
             logger.info(f"{log_prefix} No images provided in CSV for this product row.")
         # --- Part 3 ends ---
         
-        logger.info(f"{log_prefix} Successfully processed item CSV row. Returning {len(created_main_sku_ids_for_row)} main SKU IDs.")
+        # Corrected variable name in the log statement and return statement below
+        logger.info(f"{log_prefix} Successfully processed item CSV row. Returning {len(processed_main_sku_ids_for_row)} main SKU IDs.")
 
     except ItemParserError as e: # Errors from initial parsing or propagated from loop
         logger.error(f"{log_prefix} Item parsing error: {e}", exc_info=True)
@@ -547,7 +548,7 @@ def load_item_record_to_db(
             offending_value=item_csv_row.product_name
         ) from e
     
-    return created_main_sku_ids_for_row
+    return processed_main_sku_ids_for_row
 
 
 # Batch loader function
