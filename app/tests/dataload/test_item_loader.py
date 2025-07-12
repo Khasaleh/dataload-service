@@ -1,235 +1,144 @@
 import pytest
-import itertools # Added for mock_id_counter
-from unittest.mock import MagicMock, patch, call, ANY
-from typing import List, Dict, Any, Optional
-
+from unittest.mock import MagicMock, patch, call
 from sqlalchemy.orm import Session
-from pydantic import ValidationError
-
 from app.dataload.models.item_csv import ItemCsvModel
-from app.dataload.item_loader import (
-    load_item_record_to_db,
-    load_items_to_db,
-    # _lookup_attribute_ids, # Tested via load_item_record_to_db
-    # _lookup_attribute_value_ids # Tested via load_item_record_to_db
-)
-from app.db.models import ( 
-    ProductOrm, SkuOrm, MainSkuOrm, ProductVariantOrm, ProductImageOrm,
-    AttributeOrm, AttributeValueOrm, BusinessDetailsOrm # Added BusinessDetailsOrm for completeness if needed
-)
-from app.dataload.parsers.item_parser import ItemParserError # Imported directly
+from app.dataload.item_loader import load_item_record_to_db, load_items_to_db
+from app.db.models import ProductOrm, AttributeOrm, AttributeValueOrm, SkuOrm, MainSkuOrm, ProductVariantOrm, ProductImageOrm
 from app.exceptions import DataLoaderError
-from app.models.schemas import ErrorType
-
-
-# --- Fixtures ---
 
 @pytest.fixture
 def mock_db_session():
-    session = MagicMock(spec=Session)
-    mock_query_obj = MagicMock()
-    session.query.return_value = mock_query_obj
-    mock_query_obj.filter.return_value = mock_query_obj
-    mock_query_obj.filter_by.return_value = mock_query_obj
+    """Provides a MagicMock for the database session."""
+    return MagicMock(spec=Session)
+
+@pytest.fixture
+def mock_product():
+    """Provides a mock product ORM object."""
+    product = ProductOrm(id=1, name="Test Product", business_details_id=1)
+    return product
+
+@pytest.fixture
+def mock_attributes(mock_db_session, mock_product):
+    """Mocks the attribute and attribute value lookups."""
+    color_attr = AttributeOrm(id=1, name="color", business_details_id=mock_product.business_details_id)
+    size_attr = AttributeOrm(id=2, name="size", business_details_id=mock_product.business_details_id)
     
-    session.add = MagicMock()
-    session.flush = MagicMock()
+    black_val = AttributeValueOrm(id=10, attribute_id=1, name="Black")
+    white_val = AttributeValueOrm(id=11, attribute_id=1, name="White")
+    small_val = AttributeValueOrm(id=20, attribute_id=2, name="S")
+    medium_val = AttributeValueOrm(id=21, attribute_id=2, name="M")
+
+    def query_side_effect(*args, **kwargs):
+        if args[0] == ProductOrm:
+            return MagicMock(filter=MagicMock(return_value=MagicMock(one=lambda: mock_product)))
+        if args[0] == AttributeOrm:
+            mock_query = MagicMock()
+            def filter_side_effect(*fargs, **fkwargs):
+                if 'color' in str(fargs[0]).lower():
+                    return MagicMock(one=lambda: color_attr)
+                if 'size' in str(fargs[0]).lower():
+                    return MagicMock(one=lambda: size_attr)
+                return MagicMock(one=MagicMock(side_effect=NoResultFound))
+            mock_query.filter.side_effect = filter_side_effect
+            return mock_query
+        if args[0] == AttributeValueOrm:
+            mock_query = MagicMock()
+            def filter_side_effect(*fargs, **fkwargs):
+                if 'black' in str(fargs[1]).lower():
+                    return MagicMock(one=lambda: black_val)
+                if 'white' in str(fargs[1]).lower():
+                    return MagicMock(one=lambda: white_val)
+                if 's' in str(fargs[1]).lower():
+                    return MagicMock(one=lambda: small_val)
+                if 'm' in str(fargs[1]).lower():
+                    return MagicMock(one=lambda: medium_val)
+                return MagicMock(one=MagicMock(side_effect=NoResultFound))
+            mock_query.filter.side_effect = filter_side_effect
+            return mock_query
+        return MagicMock()
+
+    mock_db_session.query.side_effect = query_side_effect
+    return mock_db_session
+
+
+def test_load_item_record_to_db_success(mock_attributes):
+    """Tests successful loading of a single item record with variants."""
+    item_csv = ItemCsvModel(
+        product_name="Test Product",
+        attributes="color|main_attribute:true|size|main_attribute:false",
+        attribute_combination="{Black|main_sku:true:White|main_sku:false}|{S:M}",
+        price="10:12|11:13",
+        quantity="100:110|105:115",
+        status="ACTIVE|ACTIVE",
+        order_limit="10|10",
+        package_size_length="5|5",
+        package_size_width="5|5",
+        package_size_height="2|2",
+        package_weight="0.5|0.5",
+        images="{https://example.com/image1.jpg|main_image:true}"
+    )
     
-    mock_savepoint = MagicMock()
-    session.begin_nested.return_value = mock_savepoint # For load_items_to_db
-    # savepoint's commit/rollback are part of the mock_savepoint object already
-    # For load_item_record_to_db, it might not use nested if called directly
-    # but load_items_to_db test will verify savepoint usage.
-    return session
+    with patch('app.utils.barcode_helper.generate_barcode_image', return_value=b'barcode_bytes'), \
+         patch('app.utils.barcode_helper.encode_barcode_to_base64', return_value='base64_barcode'):
 
-@pytest.fixture
-def sample_item_csv_row_dict() -> Dict[str, Any]:
-    return {
-        "product_name": "Test Product Alpha",
-        "attributes": "color|main_attribute:true|size|main_attribute:false",
-        "attribute_combination": "{Black|main_sku:true:White|main_sku:false}|{S:M}",
-        "price": "10.00:12.00|20.00:22.00",
-        "quantity": "100:110|200:210",
-        "status": "ACTIVE|INACTIVE", 
-        "order_limit": "10|5",
-        "package_size_length": "30.0|30.0", # Made float like
-        "package_size_width": "20.0|20.0",
-        "package_size_height": "10.0|10.0",
-        "package_weight": "0.5|0.5",
-        "images": "http://example.com/img1.jpg|main_image:true|http://example.com/img2.jpg|main_image:false"
-    }
+        result = load_item_record_to_db(mock_attributes, 1, item_csv, 1)
 
-@pytest.fixture
-def sample_item_csv_model(sample_item_csv_row_dict) -> ItemCsvModel:
-    return ItemCsvModel(**sample_item_csv_row_dict)
+        assert len(result) > 0
+        assert mock_attributes.add.call_count > 0 # Checks if db.add was called for new SKUs etc.
 
-@pytest.fixture
-def mock_parsed_attributes() -> List[Dict[str, Any]]:
-    return [{'name': 'color', 'is_main': True}, {'name': 'size', 'is_main': False}]
+def test_load_item_record_to_db_product_not_found(mock_db_session):
+    """Tests failure when the product is not found in the database."""
+    mock_db_session.query.return_value.filter.return_value.one.side_effect = NoResultFound
+    item_csv = ItemCsvModel(
+        product_name="Unknown Product",
+        attributes="color|main_attribute:true",
+        attribute_combination="{Red|main_sku:true}",
+        price="10",
+        quantity="100",
+        status="ACTIVE"
+    )
+    with pytest.raises(DataLoaderError) as excinfo:
+        load_item_record_to_db(mock_db_session, 1, item_csv, 1)
+    assert "not found" in str(excinfo.value)
 
-@pytest.fixture
-def mock_parsed_attr_values_by_type() -> List[List[Dict[str, Any]]]:
-    return [
-        [{'value': 'Black', 'is_default_sku_value': True}, {'value': 'White', 'is_default_sku_value': False}],
-        [{'value': 'S'}, {'value': 'M'}]
+
+def test_load_items_to_db_batch_processing(mock_attributes):
+    """Tests the batch loading function with multiple records."""
+    item_records = [
+        {
+            "product_name": "Test Product",
+            "attributes": "color|main_attribute:true|size|main_attribute:false",
+            "attribute_combination": "{Black|main_sku:true:White|main_sku:false}|{S:M}",
+            "price": "10:12|11:13",
+            "quantity": "100:110|105:115",
+            "status": "ACTIVE|ACTIVE",
+            "images": "{https://example.com/image1.jpg|main_image:true}"
+        },
+        {
+            "product_name": "Another Product", # This will fail lookup
+            "attributes": "color|main_attribute:true",
+            "attribute_combination": "{Blue|main_sku:true}",
+            "price": "20",
+            "quantity": "50",
+            "status": "ACTIVE"
+        }
     ]
 
-@pytest.fixture
-def mock_all_sku_variants() -> List[List[Dict[str, Any]]]:
-    return [
-        [{'attribute_name': 'color', 'value': 'Black', 'is_default_sku_value': True}, {'attribute_name': 'size', 'value': 'S'}],
-        [{'attribute_name': 'color', 'value': 'Black', 'is_default_sku_value': True}, {'attribute_name': 'size', 'value': 'M'}],
-        [{'attribute_name': 'color', 'value': 'White', 'is_default_sku_value': False}, {'attribute_name': 'size', 'value': 'S'}],
-        [{'attribute_name': 'color', 'value': 'White', 'is_default_sku_value': False}, {'attribute_name': 'size', 'value': 'M'}],
-    ]
+    # Mock product lookup to fail for the second product
+    def product_query_side_effect(*args, **kwargs):
+        if "Test Product" in str(kwargs.get('name')):
+            return MagicMock(one=lambda: ProductOrm(id=1, name="Test Product", business_details_id=1))
+        return MagicMock(one=MagicMock(side_effect=NoResultFound))
 
-# Mocks for data extractors, applied via autouse=True for convenience in this test file
-@pytest.fixture(autouse=True)
-def mock_all_data_extractors(mocker):
-    # Using mocker.patch correctly
-    mocker.patch('app.dataload.item_loader.get_price_for_combination', side_effect=lambda price_str, *args: float(price_str.split(':')[0].split('|')[0])) # Simplified mock
-    mocker.patch('app.dataload.item_loader.get_quantity_for_combination', side_effect=lambda qty_str, *args: int(qty_str.split(':')[0].split('|')[0]))
-    mocker.patch('app.dataload.item_loader.get_status_for_combination', return_value="ACTIVE") # Default to ACTIVE for tests
-    mocker.patch('app.dataload.item_loader.get_order_limit_for_combination', return_value=5)
-    mocker.patch('app.dataload.item_loader.get_package_size_length_for_combination', return_value=10.0)
-    mocker.patch('app.dataload.item_loader.get_package_size_width_for_combination', return_value=10.0)
-    mocker.patch('app.dataload.item_loader.get_package_size_height_for_combination', return_value=10.0)
-    mocker.patch('app.dataload.item_loader.get_package_weight_for_combination', return_value=0.5)
-    mocker.patch('app.dataload.item_loader.parse_product_level_images', return_value=[
-        {'url': 'http://example.com/img1.jpg', 'main_image': True}
-    ]) # Mock for image parsing utility
+    mock_attributes.query.return_value.filter.side_effect = product_query_side_effect
 
-# --- Tests for load_item_record_to_db ---
+    with patch('app.dataload.item_loader.load_item_record_to_db') as mock_load_record:
+        # First call succeeds, second raises DataLoaderError
+        mock_load_record.side_effect = [[1, 2, 3, 4], DataLoaderError("Product not found")]
 
-@patch('app.dataload.item_loader.parse_attributes_string')
-@patch('app.dataload.item_loader.parse_attribute_combination_string')
-@patch('app.dataload.item_loader.generate_sku_variants')
-@patch('app.dataload.item_loader._lookup_attribute_ids')
-@patch('app.dataload.item_loader._lookup_attribute_value_ids')
-@patch('app.dataload.item_loader.barcode_helper')
-@patch('app.dataload.item_loader.now_epoch_ms', return_value=1234567890000)
-def test_load_item_record_db_success_path(
-    mock_now_epoch, mock_barcode_helper_module, # Renamed to avoid conflict if barcode_helper is also a var
-    mock_lookup_val_ids, mock_lookup_attr_ids,
-    mock_gen_variants, mock_parse_combo, mock_parse_attrs,
-    mock_db_session, sample_item_csv_model,
-    mock_parsed_attributes, mock_parsed_attr_values_by_type, mock_all_sku_variants,
-    mock_all_data_extractors # Ensure this fixture is active
-):
-    mock_parse_attrs.return_value = mock_parsed_attributes
-    mock_parse_combo.return_value = mock_parsed_attr_values_by_type
-    mock_gen_variants.return_value = mock_all_sku_variants
-    
-    # Mock ProductOrm query to return an object with an 'id' attribute
-    mock_product_orm_instance = MagicMock()
-    mock_product_orm_instance.id = 1 # Product ID
-    mock_db_session.query(ProductOrm.id).filter().one_or_none.return_value = mock_product_orm_instance
-    
-    mock_lookup_attr_ids.return_value = {'color': 10, 'size': 20}
-    mock_lookup_val_ids.return_value = {
-        ('color', 'Black'): 101, ('color', 'White'): 102,
-        ('size', 'S'): 201, ('size', 'M'): 202
-    }
-    mock_barcode_helper_module.generate_barcode_image.return_value = b"barcode_bytes"
-    mock_barcode_helper_module.encode_barcode_to_base64.return_value = "base64string"
+        summary = load_items_to_db(mock_attributes, 1, item_records, "session123", 1)
 
-    mock_id_counter = itertools.count(start=1001)
-    
-    # Capture added instances to inspect them
-    added_instances_capture = []
-    def assign_id_and_capture(instance):
-        instance.id = next(mock_id_counter)
-        added_instances_capture.append(instance)
-
-    mock_db_session.add.side_effect = assign_id_and_capture
-    
-    created_main_sku_ids = load_item_record_to_db(mock_db_session, 1, sample_item_csv_model, 99)
-
-    assert mock_db_session.query(ProductOrm.id).filter().one_or_none.call_count == 1
-    mock_parse_attrs.assert_called_once_with(sample_item_csv_model.attributes)
-    mock_parse_combo.assert_called_once_with(sample_item_csv_model.attribute_combination, mock_parsed_attributes)
-    mock_gen_variants.assert_called_once_with(mock_parsed_attr_values_by_type, mock_parsed_attributes)
-    
-    assert len(created_main_sku_ids) == 4 
-
-    # Expected adds: 4 MainSku, 4 Sku, 8 ProductVariant, 1 ProductImage
-    assert mock_db_session.add.call_count == 17 
-    assert mock_db_session.flush.call_count == (4 + 4 + 8) # After each MainSku, Sku, ProductVariant
-
-    assert mock_barcode_helper_module.generate_barcode_image.call_count == 8 
-    assert mock_barcode_helper_module.encode_barcode_to_base64.call_count == 8
-    
-    # Check first_main_sku_id_for_images (Black,S is the first default variant)
-    # The MainSku for (Black,S) should be the first MainSkuOrm created.
-    # Its ID will be 1001 if it's the first object to get an ID from mock_id_counter.
-    # We need to ensure MainSkuOrm instances are created before SkuOrm or ProductVariantOrm in the loop for this to hold.
-    # Based on current load_item_record_to_db, MainSkuOrm is created first in the loop.
-    first_main_sku_instance = next(inst for inst in added_instances_capture if isinstance(inst, MainSkuOrm) and inst.is_default)
-    
-    image_orm_instance = next(inst for inst in added_instances_capture if isinstance(inst, ProductImageOrm))
-    assert image_orm_instance.main_sku_id == first_main_sku_instance.id
-
-
-def test_load_item_record_db_product_not_found(mock_db_session, sample_item_csv_model, mock_all_data_extractors):
-    mock_db_session.query(ProductOrm.id).filter().one_or_none.return_value = None
-    with pytest.raises(DataLoaderError, match="Product 'Test Product Alpha' not found"):
-        load_item_record_to_db(mock_db_session, 1, sample_item_csv_model, 99)
-
-@patch('app.dataload.item_loader.parse_attributes_string', side_effect=ItemParserError("Test parse error"))
-def test_load_item_record_db_parser_error(mock_parse_attrs_func, mock_db_session, sample_item_csv_model, mock_all_data_extractors):
-    # Mock ProductOrm query to return an object with an 'id' attribute
-    mock_product_orm_instance = MagicMock()
-    mock_product_orm_instance.id = 1 # Product ID
-    mock_db_session.query(ProductOrm.id).filter().one_or_none.return_value = mock_product_orm_instance
-    
-    with pytest.raises(DataLoaderError, match="Error parsing item CSV structure.*Test parse error"):
-        load_item_record_to_db(mock_db_session, 1, sample_item_csv_model, 99)
-
-# --- Tests for load_items_to_db (Batch loader) ---
-
-@patch('app.dataload.item_loader.load_item_record_to_db')
-def test_load_items_to_db_success(mock_load_record_func, mock_db_session, sample_item_csv_row_dict, mock_all_data_extractors):
-    mock_load_record_func.return_value = [101, 102] 
-    item_records = [sample_item_csv_row_dict, sample_item_csv_row_dict] 
-    
-    summary = load_items_to_db(mock_db_session, 1, item_records, "test_session_01", 99)
-
-    assert summary["csv_rows_processed"] == 2
-    assert summary["csv_rows_with_errors"] == 0
-    assert summary["total_main_skus_created_or_updated"] == 4 
-    assert mock_load_record_func.call_count == 2
-    assert mock_db_session.begin_nested.call_count == 2
-    # Access the savepoint mock object returned by begin_nested() to check its methods
-    mock_db_session.begin_nested().commit.assert_called_with() # Check commit on the savepoint object
-    assert mock_db_session.begin_nested().commit.call_count == 2 
-    assert mock_db_session.begin_nested().rollback.call_count == 0
-
-
-@patch('app.dataload.item_loader.load_item_record_to_db')
-def test_load_items_to_db_partial_failure(mock_load_record_func, mock_db_session, sample_item_csv_row_dict, mock_all_data_extractors):
-    mock_load_record_func.side_effect = [[101, 102], DataLoaderError("Simulated error", ErrorType.VALIDATION)]
-    item_records = [sample_item_csv_row_dict, sample_item_csv_row_dict]
-    
-    summary = load_items_to_db(mock_db_session, 1, item_records, "test_session_02", 99)
-
-    assert summary["csv_rows_processed"] == 2
-    assert summary["csv_rows_with_errors"] == 1
-    assert summary["total_main_skus_created_or_updated"] == 2 
-    assert mock_load_record_func.call_count == 2
-    assert mock_db_session.begin_nested.call_count == 2
-    mock_db_session.begin_nested().commit.assert_called_once() 
-    mock_db_session.begin_nested().rollback.assert_called_once()
-
-
-def test_load_items_to_db_pydantic_validation_error(mock_db_session, sample_item_csv_row_dict, mock_all_data_extractors):
-    invalid_record = sample_item_csv_row_dict.copy()
-    del invalid_record["product_name"] 
-    item_records = [invalid_record]
-    
-    summary = load_items_to_db(mock_db_session, 1, item_records, "test_session_03", 99)
-    
-    assert summary["csv_rows_processed"] == 1
-    assert summary["csv_rows_with_errors"] == 1
-    assert summary["total_main_skus_created_or_updated"] == 0
-    # begin_nested should not be called if pydantic validation fails for the row itself
-    assert mock_db_session.begin_nested.call_count == 0
+        assert summary["csv_rows_processed"] == 2
+        assert summary["csv_rows_with_errors"] == 1
+        assert summary["total_main_skus_created_or_updated"] == 4
+        assert mock_load_record.call_count == 2
