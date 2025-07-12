@@ -6,7 +6,7 @@ BEGIN
     -- 1️⃣ Find the product ID
     SELECT id INTO target_product_id
     FROM public.products
-    WHERE name = 'Adidas Performance Tee'
+    WHERE name = 'Puma Essential Logo Hoodie'
       AND business_details_id = 11;
 
     -- Exit if not found

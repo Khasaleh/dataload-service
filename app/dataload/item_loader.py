@@ -127,46 +127,57 @@ def _lookup_attribute_value_ids(
             continue 
         
         logger.debug(
-            f"Looking up AttributeValue: attr_name='{attr_name}', attr_id='{attr_id}', val_name_from_csv='{val_name}'"
+            f"Attempting to look up AttributeValue: attr_name='{attr_name}', attr_id='{attr_id}', val_name_from_csv='{val_name}'"
         )
         try:
             # Compare CSV value (val_name) against AttributeValueOrm.name column, case-insensitively
-            attr_val_orm_result = db.query(AttributeValueOrm.id).filter(
+            # Changed from .one() to .first() for diagnostic purposes
+            attr_val_orm_result = db.query(AttributeValueOrm.id, AttributeValueOrm.name).filter(
                 AttributeValueOrm.attribute_id == attr_id,
                 func.lower(AttributeValueOrm.name) == func.lower(val_name)
-            ).one() # Expect exactly one match
+            ).first() 
             
-            attr_val_id_map[(attr_name, val_name)] = attr_val_orm_result.id
-        except NoResultFound:
-            missing_vals.append(f"{attr_name} -> {val_name}")
-        except MultipleResultsFound:
-            logger.error(
-                f"Multiple attribute values found for attr_id='{attr_id}', "
-                f"val_name='{val_name}' (case-insensitive). This indicates a data integrity issue "
-                f"where (attribute_id, LOWER(name)) is not unique in attribute_value table."
-            )
-            missing_vals.append(f"{attr_name} -> {val_name} (Multiple results found in DB)")
+            if attr_val_orm_result:
+                attr_val_id_map[(attr_name, val_name)] = attr_val_orm_result.id
+                logger.debug(
+                    f"Found AttributeValue: ID='{attr_val_orm_result.id}', DBName='{attr_val_orm_result.name}' for CSV val_name='{val_name}', attr_id='{attr_id}'"
+                )
+            else:
+                # This case means .first() returned None, so no record was found
+                logger.warning(
+                    f"AttributeValue NOT FOUND for attr_name='{attr_name}' (ID: {attr_id}), val_name_from_csv='{val_name}' using .first()"
+                )
+                missing_vals.append(f"{attr_name} -> {val_name}")
+
+        # It's good practice to keep specific exception handling if .one() were to be restored,
+        # but .first() won't raise NoResultFound or MultipleResultsFound.
+        # except NoResultFound: # This block would not be hit with .first()
+        #     logger.warning(
+        #         f"AttributeValue NOT FOUND (NoResultFound) for attr_name='{attr_name}' (ID: {attr_id}), val_name_from_csv='{val_name}'"
+        #     )
+        #     missing_vals.append(f"{attr_name} -> {val_name}")
+        # except MultipleResultsFound: # This block would not be hit with .first()
+        #     logger.error(
+        #         f"Multiple attribute values found for attr_id='{attr_id}', "
+        #         f"val_name='{val_name}' (case-insensitive). This indicates a data integrity issue."
+        #     )
+        #     missing_vals.append(f"{attr_name} -> {val_name} (Multiple results found in DB)")
         except Exception as e:
-            logger.error(f"Error looking up attribute value '{val_name}' for attribute '{attr_name}' (ID: {attr_id}): {e}", exc_info=True)
-            missing_vals.append(f"{attr_name} -> {val_name} (DB error)")
+            logger.error(f"Error during lookup for attribute value '{val_name}' for attribute '{attr_name}' (ID: {attr_id}): {e}", exc_info=True)
+            missing_vals.append(f"{attr_name} -> {val_name} (DB error during lookup)")
 
 
     if missing_vals:
-        # Check if any missing_val contains specific error indicators to modify message
-        is_critical_error = any("(DB error)" in mv or "(Attribute" in mv or "(Multiple results found in DB)" in mv for mv in missing_vals)
-        error_message_intro = "Critical error during attribute value lookup or some values not found/unique" if is_critical_error else "Attribute values not found"
+        # Consolidate error reporting for missing values or DB errors during lookup
+        is_critical_error = any("(DB error during lookup)" in mv or "(Attribute" in mv for mv in missing_vals) # Removed multiple results check as .first() is used
+        error_message_intro = "Critical error during attribute value lookup or some attribute values not found" if is_critical_error else "Attribute values not found"
         
+        # Deduplicate the original DataLoaderError raise, the second one was unreachable.
         raise DataLoaderError(
-            message=f"{error_message_intro}: {', '.join(missing_vals)}",
-                error_type=ErrorType.LOOKUP,
-                field_name="attribute_combination (derived values)",
-                offending_value=str(missing_vals)
-            )
-        raise DataLoaderError(
-            message=f"Attribute values not found: {', '.join(missing_vals)}",
+            message=f"{error_message_intro}: {', '.join(sorted(list(set(missing_vals))))}", # Sort and unique for consistent error messages
             error_type=ErrorType.LOOKUP,
             field_name="attribute_combination (derived values)",
-            offending_value=str(missing_vals)
+            offending_value=str(sorted(list(set(missing_vals))))
         )
     return attr_val_id_map
 
