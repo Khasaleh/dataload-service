@@ -474,8 +474,8 @@ def load_item_record_to_db(
                  logger.error(f"{variant_log_prefix}Unexpected error processing this variant: {e}", exc_info=True)
                  raise DataLoaderError(message=f"Unexpected error for variant {sku_variant_idx}: {e}", error_type=ErrorType.UNEXPECTED_ROW_ERROR, offending_value=item_csv_row.product_name)
 
-
-        logger.info(f"{log_prefix} SKU variant loop completed. {len(created_main_sku_ids_for_row)} MainSKUs processed for creation.")
+        # Corrected variable name in the log statement below
+        logger.info(f"{log_prefix} SKU variant loop completed. {len(processed_main_sku_ids_for_row)} MainSKUs processed/skipped for this row.")
         # --- Part 2 ends ---
 
         # --- Part 3: Image Processing starts here ---
