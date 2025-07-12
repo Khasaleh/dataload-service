@@ -375,7 +375,7 @@ def load_item_record_to_db(
                     except Exception as bc_exc:
                         logger.error(f"{variant_log_prefix}Error updating barcode for MainSKU {main_sku_orm_instance.id}: {bc_exc}", exc_info=True)
                         main_sku_orm_instance.barcode = main_sku_orm_instance.mobile_barcode # Fallback
-                    main_sku_orm_instance.part_number = str(main_sku_orm_instance.id).zfill(8)
+                    main_sku_orm_instance.part_number = str(main_sku_orm_instance.id).zfill(9) # Corrected padding
                     logger.debug(f"{variant_log_prefix}Updated barcode/part_number for MainSkuOrm ID {main_sku_orm_instance.id}")
 
                     # Update SkuOrm fields
@@ -405,7 +405,7 @@ def load_item_record_to_db(
                     except Exception as bc_exc:
                         logger.error(f"{variant_log_prefix}Error updating barcode for SkuOrm ID {sku_orm_instance.id}: {bc_exc}", exc_info=True)
                         sku_orm_instance.barcode = sku_orm_instance.mobile_barcode # Fallback
-                    sku_orm_instance.part_number = str(sku_orm_instance.id).zfill(8)
+                    sku_orm_instance.part_number = str(sku_orm_instance.id).zfill(9) # Corrected padding
                     logger.debug(f"{variant_log_prefix}Updated barcode/part_number for SkuOrm ID {sku_orm_instance.id}")
                     
                     logger.debug(f"{variant_log_prefix}Updated MainSkuOrm ID: {main_sku_orm_instance.id} and SkuOrm ID: {sku_orm_instance.id} with new flags and barcodes.")
@@ -461,7 +461,7 @@ def load_item_record_to_db(
                     except Exception as bc_exc: 
                         logger.error(f"{variant_log_prefix}Error generating or encoding barcode for MainSKU {main_sku_orm_instance.id} from mobile_barcode '{main_sku_orm_instance.mobile_barcode}': {bc_exc}", exc_info=True)
                         main_sku_orm_instance.barcode = main_sku_orm_instance.mobile_barcode # Fallback to mobile_barcode string
-                    main_sku_orm_instance.part_number = str(main_sku_orm_instance.id).zfill(8) # Example padding
+                    main_sku_orm_instance.part_number = str(main_sku_orm_instance.id).zfill(9) # Corrected padding
 
                     logger.debug(f"{variant_log_prefix}Created MainSkuOrm ID: {main_sku_orm_instance.id}, mobile_barcode: {main_sku_orm_instance.mobile_barcode}, generated barcode (or fallback): {main_sku_orm_instance.barcode is not None}")
 
@@ -521,7 +521,7 @@ def load_item_record_to_db(
                     except Exception as bc_exc:
                         logger.error(f"{variant_log_prefix}Error generating or encoding barcode for SKU {sku_orm_instance.id} from mobile_barcode '{sku_orm_instance.mobile_barcode}': {bc_exc}", exc_info=True)
                         sku_orm_instance.barcode = sku_orm_instance.mobile_barcode # Fallback to mobile_barcode string
-                    sku_orm_instance.part_number = str(sku_orm_instance.id).zfill(8) # Example padding
+                    sku_orm_instance.part_number = str(sku_orm_instance.id).zfill(9) # Corrected padding
                     
                     logger.debug(f"{variant_log_prefix}Created SkuOrm ID: {sku_orm_instance.id}, mobile_barcode: {sku_orm_instance.mobile_barcode}, generated barcode (or fallback): {sku_orm_instance.barcode is not None}")
 
